@@ -1,0 +1,442 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width,initial-scale=1" />
+<title>stormedge — sign in</title>
+<link rel="preconnect" href="https://fonts.googleapis.com" />
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<style>
+  :root {
+    --bg: #07080a;
+    --panel: #0d0f12;
+    --panel-2: #14171c;
+    --line: rgba(255,255,255,0.08);
+    --line-soft: rgba(255,255,255,0.04);
+    --text: #e9e6df;
+    --muted: #6e6a62;
+    --dim: #43413c;
+    --signal: #f5b13c;
+    --positive: #6cbf85;
+    --negative: #e07866;
+    --warn: #f0934f;
+  }
+  * { box-sizing: border-box; }
+  html, body { margin: 0; height: 100%; background: #000; color: var(--text); font-family: 'Manrope', ui-sans-serif, sans-serif; -webkit-font-smoothing: antialiased; }
+  body {
+    min-height: 100vh;
+    display: grid;
+    place-items: center;
+    padding: 16px;
+  }
+  .frame {
+    width: min(1240px, 100%);
+    height: min(820px, calc(100vh - 32px));
+    background: var(--bg);
+    border-radius: 4px;
+    display: grid;
+    grid-template-columns: minmax(360px, 480px) 1fr;
+    overflow: hidden;
+    position: relative;
+    border: 1px solid rgba(255,255,255,0.04);
+  }
+  /* ===== LEFT — sign in ===== */
+  .left {
+    padding: 56px 56px 40px;
+    display: flex;
+    flex-direction: column;
+    justify-content: space-between;
+    position: relative;
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 12px;
+  }
+  .brand .mark {
+    width: 32px; height: 32px;
+    border-radius: 50%;
+    border: 1.5px solid var(--text);
+    position: relative;
+    display: inline-block;
+  }
+  .brand .mark::before {
+    content: '';
+    position: absolute;
+    inset: -1.5px;
+    border-radius: 50%;
+    background:
+      linear-gradient(124deg, transparent 47%, var(--text) 47%, var(--text) 53%, transparent 53%);
+    -webkit-mask: radial-gradient(circle, #000 60%, transparent 61%);
+            mask: radial-gradient(circle, #000 60%, transparent 61%);
+  }
+  .brand .wordmark {
+    font-family: 'Instrument Serif', serif;
+    font-size: 26px;
+    letter-spacing: 0.5px;
+    line-height: 1;
+    color: var(--text);
+  }
+  .brand .wordmark em { font-style: italic; color: var(--signal); }
+
+  .form-area {
+    display: flex;
+    flex-direction: column;
+    gap: 18px;
+    max-width: 360px;
+  }
+  .form-area h1 {
+    font-family: 'Instrument Serif', serif;
+    font-weight: 400;
+    font-size: 36px;
+    line-height: 1.05;
+    margin: 0 0 4px;
+    color: var(--text);
+    letter-spacing: -0.01em;
+  }
+  .form-area h1 em { font-style: italic; color: var(--muted); }
+  .form-area .sub {
+    color: var(--muted);
+    font-size: 13.5px;
+    margin: 0 0 8px;
+    letter-spacing: 0.01em;
+  }
+
+  .field { display: flex; flex-direction: column; gap: 7px; }
+  .field label {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--text);
+    letter-spacing: 0.02em;
+  }
+  .input {
+    position: relative;
+    display: flex;
+    align-items: center;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 4px;
+    padding: 0 12px;
+    height: 40px;
+    transition: border-color .15s ease, background .15s ease;
+  }
+  .input:focus-within { border-color: rgba(245,177,60,0.5); background: #181b21; }
+  .input svg { color: var(--dim); flex-shrink: 0; }
+  .input input {
+    background: transparent;
+    border: 0;
+    outline: 0;
+    color: var(--text);
+    font: inherit;
+    font-size: 14px;
+    width: 100%;
+    padding: 0 0 0 10px;
+    letter-spacing: 0.005em;
+  }
+  .input input::placeholder { color: var(--dim); }
+  .input input:-webkit-autofill,
+  .input input:-webkit-autofill:hover,
+  .input input:-webkit-autofill:focus {
+    -webkit-box-shadow: 0 0 0 100px #14171c inset;
+    -webkit-text-fill-color: var(--text);
+    caret-color: var(--text);
+  }
+
+  .btn {
+    height: 44px;
+    border-radius: 4px;
+    border: 1px solid transparent;
+    font: inherit;
+    font-weight: 600;
+    font-size: 14px;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    transition: transform .08s ease, background .15s ease, border-color .15s ease;
+    text-decoration: none;
+  }
+  .btn:active { transform: translateY(1px); }
+  .btn-primary { background: var(--text); color: #07080a; }
+  .btn-primary:hover { background: #fff; }
+  .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+  .error-msg {
+    font-size: 12.5px;
+    color: var(--negative);
+    min-height: 18px;
+    margin-top: -8px;
+  }
+
+  .footer {
+    color: var(--dim);
+    font-size: 11px;
+    display: flex;
+    justify-content: space-between;
+    letter-spacing: 0.04em;
+  }
+  .footer .dot { color: var(--signal); }
+
+  /* ===== RIGHT — stippled cyclone ===== */
+  .right {
+    position: relative;
+    background:
+      radial-gradient(ellipse 80% 60% at 50% 50%, #0f1115 0%, #06070a 70%, #000 100%);
+    overflow: hidden;
+    border-left: 1px solid var(--line-soft);
+  }
+  #cyclone { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
+
+  .corner {
+    position: absolute;
+    color: var(--muted);
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.08em;
+    pointer-events: none;
+  }
+  .corner.tl { top: 24px; left: 28px; }
+  .corner.tr { top: 24px; right: 28px; text-align: right; }
+  .corner.bl { bottom: 22px; left: 28px; }
+  .corner.br { bottom: 22px; right: 28px; text-align: right; }
+  .corner b { color: var(--text); font-weight: 500; }
+  .corner .pill {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    color: var(--signal);
+    margin-top: 4px;
+  }
+  .pill .live {
+    width: 6px; height: 6px; border-radius: 50%; background: var(--signal);
+    box-shadow: 0 0 8px var(--signal);
+    animation: pulse 1.6s ease-in-out infinite;
+  }
+  @keyframes pulse { 0%,100%{opacity:.4} 50%{opacity:1} }
+
+  .caption {
+    position: absolute;
+    left: 28px;
+    bottom: 80px;
+    max-width: 360px;
+    color: var(--text);
+    font-family: 'Instrument Serif', serif;
+    font-size: 22px;
+    line-height: 1.25;
+    letter-spacing: -0.005em;
+  }
+  .caption .gray { color: var(--muted); font-style: italic; }
+
+  @media (max-width: 880px) {
+    .frame { grid-template-columns: 1fr; height: auto; }
+    .right { min-height: 320px; }
+    .left { padding: 40px 32px; }
+  }
+</style>
+</head>
+<body>
+<div class="frame">
+  <!-- LEFT -->
+  <div class="left">
+    <div class="brand">
+      <span class="mark" aria-hidden="true"></span>
+      <span class="wordmark">stormedge<em>.</em></span>
+    </div>
+
+    <form class="form-area" id="loginForm">
+      <div>
+        <h1>Sign in to your <em>desk</em></h1>
+        <p class="sub">Weather-edge trading on Polymarket. Paper or live.</p>
+      </div>
+
+      <div class="field">
+        <label for="email">Email</label>
+        <div class="input">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 7 10 7 10-7"/></svg>
+          <input id="email" type="email" placeholder="hello@stormedge.io" autocomplete="email" />
+        </div>
+      </div>
+
+      <div class="field">
+        <label for="password">Password</label>
+        <div class="input">
+          <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
+          <input id="password" type="password" placeholder="Your password" autocomplete="current-password" />
+          <button type="button" id="eyeBtn" onclick="togglePassword()" style="background:none;border:0;padding:0;cursor:pointer;color:var(--dim);display:grid;place-items:center;flex-shrink:0;" tabindex="-1">
+            <svg id="eyeIcon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          </button>
+        </div>
+      </div>
+
+      <div class="error-msg" id="errorMsg"></div>
+
+      <button type="submit" class="btn btn-primary" id="submitBtn">Sign in</button>
+    </form>
+
+  </div>
+
+  <!-- RIGHT -->
+  <div class="right">
+    <canvas id="cyclone"></canvas>
+
+    <div class="corner tr">
+      <div class="pill">
+        <span class="live"></span>
+        monitoring
+      </div>
+    </div>
+
+    <div class="caption">
+      &ldquo;Scans every weather market<br/>
+      on Polymarket. Finds the<br/>
+      <span class="gray">mispricings before the crowd does.</span>&rdquo;
+    </div>
+  </div>
+</div>
+
+<script>
+function togglePassword() {
+  const input = document.getElementById('password');
+  const icon = document.getElementById('eyeIcon');
+  const btn = document.getElementById('eyeBtn');
+  const show = input.type === 'password';
+  input.type = show ? 'text' : 'password';
+  btn.style.color = show ? 'var(--text-soft)' : 'var(--dim)';
+  icon.innerHTML = show
+    ? '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>'
+    : '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
+}
+
+document.getElementById('loginForm').addEventListener('submit', async function(e) {
+  e.preventDefault();
+  const btn = document.getElementById('submitBtn');
+  const errEl = document.getElementById('errorMsg');
+  const email = document.getElementById('email').value;
+  const password = document.getElementById('password').value;
+  btn.disabled = true;
+  btn.textContent = 'Signing in…';
+  errEl.textContent = '';
+  try {
+    const r = await fetch('/api/login', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ email, password })
+    });
+    if (r.ok) {
+      window.location.href = '/dashboard';
+    } else {
+      const d = await r.json();
+      errEl.textContent = d.error || 'Wrong password';
+      btn.disabled = false;
+      btn.textContent = 'Sign in';
+    }
+  } catch (err) {
+    errEl.textContent = 'Connection error';
+    btn.disabled = false;
+    btn.textContent = 'Sign in';
+  }
+});
+</script>
+
+<script>
+// Stippled cyclone — fibonacci spiral with hash-noise dropout.
+const canvas = document.getElementById('cyclone');
+const ctx = canvas.getContext('2d');
+let DPR = Math.min(window.devicePixelRatio || 1, 2);
+let W = 0, H = 0;
+
+function resize() {
+  const r = canvas.getBoundingClientRect();
+  W = r.width; H = r.height;
+  canvas.width = W * DPR;
+  canvas.height = H * DPR;
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+}
+resize();
+window.addEventListener('resize', resize);
+
+function hash(x, y) {
+  let h = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
+  return h - Math.floor(h);
+}
+
+let t = 0;
+function draw() {
+  ctx.clearRect(0, 0, W, H);
+  const cx = W * 0.5, cy = H * 0.5;
+  const R = Math.min(W, H) * 0.46;
+
+  for (let i = 0; i < 380; i++) {
+    const a = hash(i, 11) * Math.PI * 2;
+    const r = R * (1.05 + hash(i, 41) * 0.6);
+    const x = cx + Math.cos(a) * r;
+    const y = cy + Math.sin(a) * r * 0.92;
+    if (x < 0 || x > W || y < 0 || y > H) continue;
+    const op = 0.06 + hash(i, 71) * 0.12;
+    ctx.fillStyle = `rgba(220,215,200,${op})`;
+    ctx.fillRect(x, y, 1, 1);
+  }
+
+  const arms = 2;
+  const POINTS = 4200;
+  for (let i = 0; i < POINTS; i++) {
+    const u = i / POINTS;
+    const r = Math.pow(u, 0.55) * R;
+    const arm = i % arms;
+    const baseAngle = (arm / arms) * Math.PI * 2;
+    const wrap = 3.6;
+    const ang = baseAngle + u * wrap * Math.PI * 2 + t * 0.0008;
+    const armWidth = 12 + (1 - u) * 26;
+    const j1 = (hash(i, 3) - 0.5) * armWidth;
+    const j2 = (hash(i, 7) - 0.5) * armWidth * 0.6;
+    const px = cx + Math.cos(ang) * r + Math.cos(ang + Math.PI / 2) * j1;
+    const py = cy + Math.sin(ang) * r * 0.96 + Math.sin(ang + Math.PI / 2) * j2;
+    if (px < 0 || px > W || py < 0 || py > H) continue;
+
+    const eye = u < 0.06;
+    if (eye && hash(i, 13) > 0.05) continue;
+    const noise = hash(i, 17);
+    if (noise > 0.78) continue;
+
+    const bright = 0.18 + (1 - u) * 0.7;
+    const flicker = 0.85 + hash(i + Math.floor(t / 8), 23) * 0.3;
+    const op = Math.min(0.95, bright * flicker);
+    const warm = u < 0.18 ? 1 : 0;
+    const rgb = warm ? `245,200,140` : `220,215,200`;
+    ctx.fillStyle = `rgba(${rgb},${op})`;
+    const sz = u < 0.04 ? 1.4 : (u < 0.2 ? 1.1 : 1);
+    ctx.fillRect(px, py, sz, sz);
+  }
+
+  ctx.beginPath();
+  ctx.arc(cx, cy, R * 0.04, 0, Math.PI * 2);
+  ctx.fillStyle = '#06070a';
+  ctx.fill();
+  ctx.strokeStyle = 'rgba(245,177,60,0.55)';
+  ctx.lineWidth = 0.6;
+  ctx.beginPath();
+  ctx.arc(cx, cy, R * 0.045, 0, Math.PI * 2);
+  ctx.stroke();
+
+  ctx.strokeStyle = 'rgba(245,177,60,0.3)';
+  ctx.lineWidth = 0.5;
+  ctx.beginPath();
+  ctx.moveTo(cx - R * 0.08, cy); ctx.lineTo(cx - R * 0.05, cy);
+  ctx.moveTo(cx + R * 0.05, cy); ctx.lineTo(cx + R * 0.08, cy);
+  ctx.moveTo(cx, cy - R * 0.08); ctx.lineTo(cx, cy - R * 0.05);
+  ctx.moveTo(cx, cy + R * 0.05); ctx.lineTo(cx, cy + R * 0.08);
+  ctx.stroke();
+
+  t += 16;
+  requestAnimationFrame(draw);
+}
+draw();
+</script>
+</body>
+</html>
