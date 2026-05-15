@@ -6,15 +6,26 @@ Automated weather market trading bot for [Polymarket](https://polymarket.com), w
 
 ## Screenshots
 
-<!-- Login page -->
-> **Login**
->
-> _Screenshot / recording here_
+### Login
 
-<!-- Dashboard overview -->
-> **Dashboard**
->
-> _Screenshot / recording here_
+![stormedge login screen](docs/assets/screenshots/login.png)
+
+### Dashboard Overview
+
+![stormedge dashboard overview](docs/assets/screenshots/dashboard-overview.png)
+
+### Activity, Performance, and Model Confidence
+
+![stormedge activity and performance dashboard](docs/assets/screenshots/dashboard-activity.png)
+
+## Demo Video
+
+<video controls width="100%">
+  <source src="docs/assets/videos/dashboard-walkthrough.mp4" type="video/mp4">
+  <source src="docs/assets/videos/dashboard-walkthrough.webm" type="video/webm">
+</video>
+
+[Download MP4](docs/assets/videos/dashboard-walkthrough.mp4) · [Download WebM](docs/assets/videos/dashboard-walkthrough.webm)
 
 ---
 
