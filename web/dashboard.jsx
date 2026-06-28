@@ -697,15 +697,19 @@ function ScanFeed({ scanLog }) {
               { label: 'Candidates',    v: scanLog.candidates,    tone: 'neutral' },
               { label: 'Shadow passed', v: scanLog.shadow_passed, tone: 'signal' },
               { label: 'Filled',        v: scanLog.filled,        tone: 'pos' },
-            ].map((s, i, arr) => (
-              <div className="funnel-step" key={s.label}>
-                <div className="kpi-label">{s.label}</div>
-                <div className={`mono funnel-val tone-${s.tone}`}>{s.v.toLocaleString()}</div>
-                {i < arr.length - 1 && arr[i].v > 0 && (
-                  <div className="funnel-conn">→ {((arr[i + 1].v / arr[i].v) * 100).toFixed(1)}%</div>
-                )}
-              </div>
-            ))}
+            ].map((s, i, arr) => {
+              const prev = i > 0 ? arr[i - 1].v : null;
+              const conv = prev && prev > 0 ? (s.v / prev) * 100 : null;
+              return (
+                <div className="funnel-step" key={s.label}>
+                  <div className="kpi-label">{s.label}</div>
+                  <div className={`mono funnel-val tone-${s.tone}`}>{s.v.toLocaleString()}</div>
+                  <div className="funnel-conv mono">
+                    {conv !== null ? `${conv.toFixed(1)}% of prev` : ' '}
+                  </div>
+                </div>
+              );
+            })}
           </div>
         </div>
       )}

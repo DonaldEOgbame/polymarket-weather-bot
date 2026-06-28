@@ -2,14 +2,14 @@ import json
 import logging
 from datetime import datetime, timezone
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs
+from py_clob_client.clob_types import OrderArgs, MarketOrderArgs, OrderType
 from db import execute_query, fetch_query, update_bankroll, get_open_position, close_position_atomic
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
 from scanner import get_realtime_price, get_market_resolution
 from config import (
     PAPER_MODE, POLYMARKET_PK, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE,
     MAX_CONCURRENT_POSITIONS, STOP_LOSS_PCT, ENABLE_STOP_LOSS, EXIT_EDGE_FLOOR, CLOB_BASE_URL,
-    MIN_MODEL_COUNT,
+    MIN_MODEL_COUNT, TAKER_FEE_RATE,
 )
 
 
@@ -150,6 +150,56 @@ class Executor:
         res = fetch_query("SELECT COUNT(*) as count FROM positions")
         return res[0]["count"] if res else 0
 
+    def _read_fill(self, resp, order_id, fallback_price):
+        """Determine the ACTUAL matched size (shares) and average fill price for a
+        just-submitted order. The POST /order response schema is not contractually
+        stable, so the order record (get_order) is treated as the source of truth.
+        Returns (filled_shares, avg_price). filled_shares == 0 means nothing filled.
+
+        NOTE: verify these field names against the raw response logged below on the
+        FIRST real fill — adjust if Polymarket's schema differs in this client version.
+        """
+        shares, price = 0.0, None
+        if order_id:
+            try:
+                o = self.client.get_order(order_id)
+                if isinstance(o, dict):
+                    sm = float(o.get("size_matched") or 0)
+                    if sm > 0:
+                        shares = sm
+                        price = float(o.get("price") or 0) or fallback_price
+            except Exception as e:
+                logging.error(f"get_order({order_id}) failed during fill confirmation: {e}")
+        return shares, price
+
+    def _submit_taker(self, token_id, side, amount):
+        """Place a Fill-And-Kill MARKET order (taker). For BUY, `amount` is USDC to
+        spend (Polymarket market-order min $1); for SELL, `amount` is shares. The
+        client walks the book to price it, so it either takes immediately or is
+        killed — never rests as a phantom open order. Returns {shares, price,
+        fee_bps} on a real fill, or None if nothing filled. Live mode only."""
+        try:
+            fee_bps = self.client.get_fee_rate_bps(token_id)
+        except Exception:
+            fee_bps = None
+        try:
+            signed = self.client.create_market_order(
+                MarketOrderArgs(token_id=token_id, amount=amount, side=side,
+                                order_type=OrderType.FAK)
+            )
+            resp = self.client.post_order(signed, OrderType.FAK)
+        except Exception as e:
+            logging.error(f"Market order failed ({side} amount={amount} tok={token_id}): {e}")
+            return None
+        # Log the raw response verbatim — this is how we confirm the schema on the first real fill.
+        logging.info(f"RAW order response [{side} {token_id}]: {resp}")
+        order_id = resp.get("orderID") or resp.get("orderId") if isinstance(resp, dict) else None
+        filled, avg = self._read_fill(resp, order_id, None)
+        if filled <= 0 or not avg:
+            logging.warning(f"{side} market order did not fill; booking nothing. resp={resp}")
+            return None
+        return {"shares": filled, "price": avg, "fee_bps": fee_bps}
+
     def execute_trade(self, signal_data):
         opp = signal_data["opp"]
 
@@ -168,25 +218,33 @@ class Executor:
 
         side = signal_data["side"]
         size = signal_data["size_usdc"]
+        # Paper assumes a fill at the quote + 1¢. Live crosses the real ask and
+        # records whatever ACTUALLY fills (price + size), so the ledger and the
+        # measured cost reflect real execution, not an assumption.
         price = round(min(signal_data["price"] + 0.01, 0.99), 2)
         shares = round(size / price, 2)
 
-        logging.info(
-            f"Executing {'PAPER ' if PAPER_MODE else ''}trade: "
-            f"BUY {shares} shares of {opp.market_id} {side} @ ${price:.3f} "
-            f"(size=${size:.2f}, edge={signal_data['edge']:.3f}, prob={signal_data['model_prob']:.3f})"
-        )
-
         if not PAPER_MODE:
-            order_args = OrderArgs(
-                price=price, size=shares, side="BUY", token_id=signal_data["token_id"]
+            logging.info(
+                f"Executing LIVE trade: BUY ${size:.2f} of {opp.market_id} {side} "
+                f"(target=${signal_data['price']:.2f}, edge={signal_data['edge']:.3f})"
             )
-            try:
-                resp = self.client.create_and_post_order(order_args)
-                logging.info(f"Order response: {resp}")
-            except Exception as e:
-                logging.error(f"Failed to place order: {e}")
-                return
+            fill = self._submit_taker(signal_data["token_id"], "BUY", size)  # amount = USDC
+            if not fill:
+                return  # nothing filled → no phantom position
+            price = round(fill["price"], 4)
+            shares = fill["shares"]
+            size = round(shares * price, 2)                  # actual USDC deployed
+            slip = price - signal_data["price"]
+            logging.info(
+                f"FILLED {opp.market_id} {side}: {shares} sh @ ${price:.4f} "
+                f"= ${size:.2f} | slippage vs target {slip:+.4f} | fee_bps={fill['fee_bps']}"
+            )
+        else:
+            logging.info(
+                f"Executing PAPER trade: BUY {shares} shares of {opp.market_id} {side} @ ${price:.3f} "
+                f"(size=${size:.2f}, edge={signal_data['edge']:.3f}, prob={signal_data['model_prob']:.3f})"
+            )
 
         now_iso = datetime.now(timezone.utc).isoformat()
         execute_query(
@@ -243,7 +301,15 @@ class Executor:
 
         entry_price = pos["entry_price"]
         pnl_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0
-        pnl_dollars = (current_price - entry_price) * (pos["size_usdc"] / entry_price)
+        # Book the exit at a realistic taker fill: sell into the BID (which captures
+        # the spread) minus the Polymarket taker fee — not the optimistic mid. The
+        # mid (current_price) is still used for the edge-decay decision below.
+        # Resolution exits settle exactly ($1/$0) and never reach this path; live
+        # mode overrides pnl from the actual fill in _close_position.
+        shares = pos["size_usdc"] / entry_price if entry_price > 0 else 0
+        exit_fill = bid_price if bid_price > 0 else current_price
+        exit_fee = TAKER_FEE_RATE * exit_fill * (1.0 - exit_fill) * shares
+        pnl_dollars = (exit_fill - entry_price) * shares - exit_fee
 
         exit_reason = None
 
@@ -300,17 +366,18 @@ class Executor:
 
         skip_clob_exit = exit_reason == "EXPIRED_ON_RESTART" or exit_reason.startswith("RESOLVED_")
         if not PAPER_MODE and not skip_clob_exit:
-            _, bid_price = get_realtime_price(pos["token_id"])
-            if bid_price > 0:
-                shares = round(pos["size_usdc"] / pos["entry_price"], 2)
-                order_args = OrderArgs(
-                    price=bid_price, size=shares, side="SELL", token_id=pos["token_id"]
-                )
-                try:
-                    self.client.create_and_post_order(order_args)
-                except Exception as e:
-                    logging.error(f"Failed to place exit order: {e}")
-                    return
+            shares = round(pos["size_usdc"] / pos["entry_price"], 2)
+            fill = self._submit_taker(pos["token_id"], "SELL", shares)   # amount = shares
+            if not fill:
+                logging.warning(f"Exit SELL did not fill for {pos['market_id']}; leaving open for retry.")
+                return
+            # Recompute realized PnL from the ACTUAL exit fill price, not the mid estimate.
+            exit_price = fill["price"]
+            pnl_dollars = (exit_price - pos["entry_price"]) * (pos["size_usdc"] / pos["entry_price"])
+            logging.info(
+                f"EXIT FILLED {pos['market_id']} ({pos['side']}): {fill['shares']} sh @ ${exit_price:.4f} "
+                f"| realized PnL ${pnl_dollars:.2f} | fee_bps={fill['fee_bps']}"
+            )
 
         closed = close_position_atomic(
             pos_id=pos["id"],

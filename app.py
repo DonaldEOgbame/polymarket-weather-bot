@@ -26,13 +26,11 @@ STARTING_BANKROLL = float(os.getenv('STARTING_BANKROLL', '20.0'))
 from weather import STATIONS
 
 MODEL_META = {
-    'ecmwf_ifs04':   (0.40, 'global', 'ECMWF IFS 0.4°'),
-    'ecmwf_ifs025':  (0.35, 'AP', 'ECMWF IFS 0.25°'),
-    'gfs025':        (0.20, 'global', 'GFS 0.25°'),
-    'icon_global':   (0.20, 'global', 'ICON Global'),
-    'jma_gsm':       (0.35, 'AP', 'JMA GSM'),
-    'gem_global':    (0.10, 'AP', 'GEM Global'),
-    'best_match':    (0.35, 'US', 'Best Match'),
+    'ecmwf_ifs025':  (0.40, 'global', 'ECMWF IFS 0.25°'),
+    'gfs_global':    (0.30, 'global', 'GFS Global'),
+    'icon_global':   (0.25, 'global', 'ICON Global'),
+    'gem_global':    (0.15, 'global', 'GEM Global'),
+    'jma_gsm':       (0.30, 'AP', 'JMA GSM'),
 }
 
 

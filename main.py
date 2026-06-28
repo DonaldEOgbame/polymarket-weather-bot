@@ -253,7 +253,7 @@ def _print_startup_summary():
         MAX_CONCURRENT_POSITIONS, DAILY_LOSS_LIMIT, MAX_HOURS_TO_RESOLUTION,
         MIN_VOLUME, MARKET_DISCOVERY_MAX_PAGES, MARKET_DISCOVERY_LIMIT,
         SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD, SHADOW_MAX_SIZE_USDC,
-        ENABLE_SHADOW_EXPLORATION, EDGE_FEE_HAIRCUT,
+        ENABLE_SHADOW_EXPLORATION, TAKER_FEE_RATE, SLIPPAGE_FRACTION,
     )
     portfolio = get_portfolio_state()
     open_pos = fetch_query("SELECT COUNT(*) as c FROM positions")[0]["c"]
@@ -267,7 +267,7 @@ def _print_startup_summary():
         "=" * 52,
         f"  Bankroll     : ${portfolio['total_equity']:.2f}  (cash ${portfolio['available_cash']:.2f}  locked ${portfolio['locked_cash']:.2f})",
         f"  Open pos     : {open_pos} / {MAX_CONCURRENT_POSITIONS}  |  Daily loss limit: ${DAILY_LOSS_LIMIT:.2f}",
-        f"  Edge thresh  : {EDGE_THRESHOLD:.0%} (net of {EDGE_FEE_HAIRCUT:.0%} fee haircut)  |  Kelly cap: {KELLY_CAP:.0%}  |  Max size: ${HARD_MAX_POSITION_SIZE:.2f}",
+        f"  Edge thresh  : {EDGE_THRESHOLD:.0%} (net of taker fee {TAKER_FEE_RATE:.0%}·p·(1-p) + {SLIPPAGE_FRACTION:.1%} slippage)  |  Kelly cap: {KELLY_CAP:.0%}  |  Max size: ${HARD_MAX_POSITION_SIZE:.2f}",
         f"  Strict gates : agreement ≥ {MIN_MODEL_AGREEMENT:.0%}  |  spread < {MAX_MODEL_SPREAD}°F",
         f"  Shadow gates : agreement ≥ {SHADOW_MIN_AGREEMENT:.0%}  |  spread < {SHADOW_MAX_SPREAD}°F  |  {shadow_label}",
         f"  Market filter: vol ≥ ${MIN_VOLUME:,.0f}  |  ≤ {MAX_HOURS_TO_RESOLUTION:.0f}h to resolution",

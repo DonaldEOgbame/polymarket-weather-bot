@@ -14,7 +14,7 @@ PAPER_MODE = os.getenv("PAPER_MODE", "true").lower() == "true"
 DB_PATH = os.getenv("DB_PATH", "data/bot.db")
 
 # --- Bankroll ---
-STARTING_BANKROLL = float(os.getenv("STARTING_BANKROLL", "20.0"))
+STARTING_BANKROLL = float(os.getenv("STARTING_BANKROLL", "40.0"))
 
 # --- Strategy Thresholds ---
 EDGE_THRESHOLD = float(os.getenv("EDGE_THRESHOLD", "0.08"))
@@ -22,10 +22,17 @@ MIN_MODEL_AGREEMENT = float(os.getenv("MIN_MODEL_AGREEMENT", "0.6"))
 # 2.7°F = 1.5°C — maximum spread between model forecasts before trade is skipped
 MAX_MODEL_SPREAD = float(os.getenv("MAX_MODEL_SPREAD", "2.7"))
 
-# Round-trip transaction-cost haircut on edge. Covers Polymarket taker fees and
-# bid/ask spread crossed at entry + exit. A 2% haircut on a $0.50 price = $0.01.
-# Subtracted from raw edge before comparing to EDGE_THRESHOLD. Set to 0 to disable.
-EDGE_FEE_HAIRCUT = float(os.getenv("EDGE_FEE_HAIRCUT", "0.02"))
+# --- Transaction costs (subtracted from raw edge before the threshold check) ---
+# Polymarket taker fee per share = TAKER_FEE_RATE * p * (1 - p), a bell curve that
+# peaks at p=0.50 and ~vanishes near 0.01/0.99. Makers pay $0; Geopolitics/World
+# markets are fee-free. Weather is the "Economics/Culture/Weather/Other" category
+# at 0.05. As a fraction of notional this is feeRate*(1-p) — cheap on the high-priced
+# NO tails the bot favours (~0.5-1%), expensive on cheap YES longshots (up to ~4%).
+TAKER_FEE_RATE = float(os.getenv("TAKER_FEE_RATE", "0.05"))
+# Separate allowance for crossing the bid/ask spread on thin books, as a fraction
+# of the entry price. The measurement-week run exists to replace this estimate with
+# the real slippage logged on actual fills.
+SLIPPAGE_FRACTION = float(os.getenv("SLIPPAGE_FRACTION", "0.015"))
 
 # Minimum number of weather models required to enter a trade.
 # Two models that agree proves nothing — ECMWF dropping out silently leaves only 2.
@@ -54,15 +61,19 @@ BASE_FORECAST_ERROR = {
     72:  float(os.getenv("BASE_FORECAST_ERROR_72H",  "2.5")),
 }
 
-# --- Risk / Sizing (Micro-account mode) ---
-DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "-5.00"))
+# --- Risk / Sizing (measurement-week mode) ---
+# Goal of this profile: maximise the NUMBER of small resolved trades per week so
+# execution-cost and calibration estimates converge fast — NOT to deploy more
+# capital per bet. Keep positions small; widen concurrency/exposure instead.
+DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "-8.00"))
 HARD_MAX_POSITION_SIZE = float(os.getenv("HARD_MAX_POSITION_SIZE", "2.0"))
 MAX_POSITION_FRACTION = float(os.getenv("MAX_POSITION_FRACTION", "0.10"))
-MAX_TOTAL_EXPOSURE_FRACTION = float(os.getenv("MAX_TOTAL_EXPOSURE_FRACTION", "0.30"))
-MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "3"))
+MAX_TOTAL_EXPOSURE_FRACTION = float(os.getenv("MAX_TOTAL_EXPOSURE_FRACTION", "0.70"))
+MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "10"))
 BASE_POSITION_FRACTION = float(os.getenv("BASE_POSITION_FRACTION", "0.05"))
 KELLY_CAP = float(os.getenv("KELLY_CAP", "0.08"))
-MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "0.50"))
+# Polymarket's real CLOB minimum order is ~$1; below this, live orders won't fill.
+MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "1.00"))
 
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.15"))
 ENABLE_STOP_LOSS = os.getenv("ENABLE_STOP_LOSS", "false").lower() == "true"

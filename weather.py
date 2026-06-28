@@ -34,9 +34,9 @@ STATIONS = {
     "Toronto": {"lat": 43.6777, "lon": -79.6248, "region": "US"},
     "Mexico City": {"lat": 19.4363, "lon": -99.0721, "region": "US"},
     "Panama": {"lat": 8.9824, "lon": -79.5199, "region": "US"},
-    # South America
-    "Buenos Aires": {"lat": -34.5597, "lon": -58.4116, "region": "EU"},
-    "Sao Paulo": {"lat": -23.6273, "lon": -46.6566, "region": "EU"},
+    # South America (GFS unavailable here — GLOBAL blend, no GFS)
+    "Buenos Aires": {"lat": -34.5597, "lon": -58.4116, "region": "GLOBAL"},
+    "Sao Paulo": {"lat": -23.6273, "lon": -46.6566, "region": "GLOBAL"},
     # Europe
     "London": {"lat": 51.4775, "lon": -0.4614, "region": "EU"},
     "Paris": {"lat": 49.0097, "lon": 2.5479, "region": "EU"},
@@ -49,12 +49,13 @@ STATIONS = {
     "Moscow": {"lat": 55.4098, "lon": 37.9026, "region": "EU"},
     "Munich": {"lat": 48.3537, "lon": 11.7750, "region": "EU"},
     "Warsaw": {"lat": 52.1657, "lon": 20.9671, "region": "EU"},
-    # Middle East / Africa
-    "Tel Aviv": {"lat": 31.9980, "lon": 34.9067, "region": "EU"},
+    # Middle East / Africa (GFS unavailable — GLOBAL blend, no GFS).
+    # Ankara stays EU: ecmwf_ifs025 + gfs_global both return data there.
+    "Tel Aviv": {"lat": 31.9980, "lon": 34.9067, "region": "GLOBAL"},
     "Ankara": {"lat": 40.1280, "lon": 32.9949, "region": "EU"},
-    "Jeddah": {"lat": 21.6796, "lon": 39.1566, "region": "AP"},
-    "Lagos": {"lat": 6.5774, "lon": 3.3212, "region": "AP"},
-    "Cape Town": {"lat": -33.9648, "lon": 18.6017, "region": "EU"},
+    "Jeddah": {"lat": 21.6796, "lon": 39.1566, "region": "GLOBAL"},
+    "Lagos": {"lat": 6.5774, "lon": 3.3212, "region": "GLOBAL"},
+    "Cape Town": {"lat": -33.9648, "lon": 18.6017, "region": "GLOBAL"},
     # Asia-Pacific
     "Tokyo": {"lat": 35.5494, "lon": 139.7798, "region": "AP"},
     "Hong Kong": {"lat": 22.3080, "lon": 113.9185, "region": "AP"},
@@ -78,11 +79,23 @@ STATIONS = {
     "Wellington": {"lat": -41.3272, "lon": 174.8053, "region": "AP"},
 }
 
+# Two rules for this table:
+#   1. Every model id must actually return data from Open-Meteo. The old ids
+#      `ecmwf_ifs04` and `gfs025` return null for ALL coordinates (verified
+#      2026-06-28) — they silently dropped to <3 models everywhere except AP,
+#      so US/EU never traded. Valid global ids: ecmwf_ifs025, gfs_global,
+#      icon_global, gem_global, jma_gsm.
+#   2. Never use Open-Meteo's "best_match" — it is not an independent model
+#      (it's the auto-selected best available, usually ECMWF) so it double-counts
+#      and corrupts the model_spread / model_agreement gates.
+# GFS is unavailable in the Southern Hemisphere / Africa / Middle East, so those
+# cities use the GLOBAL blend (no GFS). ECMWF leads everywhere — it's the
+# highest-skill operational global model.
 WEIGHTS = {
-    "US": {"ecmwf_ifs04": 0.35, "best_match": 0.35, "gfs025": 0.20, "icon_global": 0.10},
-    "EU": {"ecmwf_ifs04": 0.40, "icon_global": 0.30, "gfs025": 0.20, "jma_gsm": 0.10},
-    # ecmwf_ifs04 returns nulls for AP coords — use ifs025, icon_global, gem_global instead
-    "AP": {"jma_gsm": 0.35, "ecmwf_ifs025": 0.35, "icon_global": 0.20, "gem_global": 0.10}
+    "US":     {"ecmwf_ifs025": 0.40, "gfs_global": 0.30, "icon_global": 0.20, "gem_global": 0.10},
+    "EU":     {"ecmwf_ifs025": 0.40, "icon_global": 0.30, "gfs_global": 0.20, "gem_global": 0.10},
+    "AP":     {"ecmwf_ifs025": 0.35, "jma_gsm": 0.30, "icon_global": 0.20, "gem_global": 0.15},
+    "GLOBAL": {"ecmwf_ifs025": 0.40, "icon_global": 0.25, "gem_global": 0.20, "jma_gsm": 0.15},
 }
 
 def get_station_coords(city_name):
@@ -162,7 +175,7 @@ def fetch_forecasts(city_name, is_high=True, force_refresh=False):
             
             if val is not None:
                 # GFS warm bias correction (city-keyed, configured in config.py)
-                if model == "gfs025" and city_key in GFS_BIAS_CORRECTIONS:
+                if model == "gfs_global" and city_key in GFS_BIAS_CORRECTIONS:
                     correction = GFS_BIAS_CORRECTIONS[city_key]
                     val += correction
                     logging.debug(f"GFS bias correction ({correction:+.1f}°F) for {city_key}")

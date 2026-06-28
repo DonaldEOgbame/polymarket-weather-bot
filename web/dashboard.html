@@ -320,9 +320,9 @@
   /* ============ MAIN ROW (globe + side) ============ */
   .row-main {
     display: grid;
-    grid-template-columns: 1.55fr 1fr;
+    grid-template-columns: 1.25fr 1fr;
     gap: 12px;
-    align-items: stretch;
+    align-items: start;   /* don't stretch the globe to match a long positions list */
   }
   .col-stack { display: flex; flex-direction: column; gap: 12px; }
 
@@ -348,7 +348,9 @@
   .pg-info { font-size: 11px; color: var(--muted); min-width: 36px; text-align: center; }
 
   /* ============ GLOBE ============ */
-  .globe-card { min-height: 580px; }
+  /* Fixed height (not min-height) so the canvas stays stable no matter how long
+     the neighbouring positions list grows — otherwise the globe balloons into a void. */
+  .globe-card { height: 560px; }
   .globe-legend {
     display: flex;
     gap: 14px;
@@ -544,7 +546,7 @@
     background: var(--panel-2);
     border: 1px solid var(--line-2);
     border-radius: 6px;
-    padding: 12px 14px;
+    padding: 14px 16px;
     display: flex; flex-direction: column; gap: 4px;
   }
   .perf-val { font-size: 20px; font-weight: 600; color: var(--text); letter-spacing: -0.01em; }
@@ -634,34 +636,25 @@
     overflow: hidden;
   }
   .funnel-step {
-    padding: 14px 18px;
-    position: relative;
+    padding: 14px 16px;
     border-right: 1px solid var(--line-2);
   }
-  .funnel-step:not(:last-child) { padding-right: 58px; }
   .funnel-step:last-child { border-right: 0; }
   .funnel-val {
-    font-size: 24px;
+    font-size: 20px;
     font-weight: 600;
     margin-top: 4px;
+    line-height: 1.1;
   }
   .funnel-val.tone-dim { color: var(--text-soft); }
   .funnel-val.tone-neutral { color: var(--text); }
   .funnel-val.tone-signal { color: var(--signal); }
   .funnel-val.tone-pos { color: var(--positive); }
-  .funnel-conn {
-    position: absolute;
-    right: 0;
-    top: 50%;
-    transform: translate(50%, -50%);
-    background: var(--panel);
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    padding: 3px 8px;
+  .funnel-conv {
+    margin-top: 6px;
     font-size: 10.5px;
     color: var(--muted);
-    font-family: 'JetBrains Mono', monospace;
-    z-index: 2;
+    min-height: 14px;
     white-space: nowrap;
   }
 

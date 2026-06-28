@@ -36,11 +36,16 @@ For each city, the bot calls [Open-Meteo](https://open-meteo.com) to pull temper
 
 **Model weights by region:**
 
+All ids must be models Open-Meteo actually serves. `ecmwf_ifs04` and `gfs025` were used originally but return **null at every coordinate** — they silently collapsed the ensemble to <3 models everywhere except AP, so US/EU markets never traded. The working ids are `ecmwf_ifs025`, `gfs_global`, `icon_global`, `gem_global`, `jma_gsm`. Open-Meteo's `best_match` is deliberately excluded — it is not an independent model (it's the auto-selected best available, usually ECMWF), so it double-counts and corrupts the spread/agreement gates.
+
 | Region | Models used | Rationale |
 |---|---|---|
-| US | ECMWF IFS 0.4° (35%), best_match (35%), GFS 0.25° (20%), ICON Global (10%) | ECMWF and GFS are the dominant US operational models |
-| EU | ECMWF IFS 0.4° (40%), ICON Global (30%), GFS 0.25° (20%), JMA GSM (10%) | ECMWF is highest-skill for Europe; ICON is DWD's European model |
-| AP | JMA GSM (35%), ECMWF IFS 0.25° (35%), ICON Global (20%), GEM Global (10%) | ECMWF 0.4° returns nulls for many AP coordinates; IFS 0.25° is used instead |
+| US | ECMWF IFS 0.25° (40%), GFS Global (30%), ICON Global (20%), GEM Global (10%) | ECMWF + GFS dominate North America; GEM adds an independent Canadian global |
+| EU | ECMWF IFS 0.25° (40%), ICON Global (30%), GFS Global (20%), GEM Global (10%) | ECMWF is highest-skill for Europe; ICON is DWD's European model |
+| AP | ECMWF IFS 0.25° (35%), JMA GSM (30%), ICON Global (20%), GEM Global (15%) | ECMWF leads; JMA has genuine skill in East Asia/Pacific but is demoted from its old 0.35 after it badly missed (e.g. Jeddah by 11.7°F) |
+| GLOBAL | ECMWF IFS 0.25° (40%), ICON Global (25%), GEM Global (20%), JMA GSM (15%) | Southern Hemisphere / Africa / Middle East cities where GFS is unavailable. No GFS dependence |
+
+Cities are mapped to a region in `STATIONS`. South America, sub-Saharan Africa, and most of the Middle East use **GLOBAL** because GFS returns null there.
 
 **Bias corrections applied:**
 - GFS has a known warm bias in humid US cities: −1.5°F for Miami and Houston, −1.2°F for Dallas

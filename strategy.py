@@ -11,8 +11,17 @@ from config import (
     ENABLE_SHADOW_EXPLORATION, PAPER_MODE,
     NARROW_BUCKET_WIDTH_F, NARROW_BUCKET_EDGE_THRESHOLD, NARROW_BUCKET_STD_INFLATION,
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION,
-    EDGE_FEE_HAIRCUT,
+    TAKER_FEE_RATE, SLIPPAGE_FRACTION,
 )
+
+
+def transaction_cost(price):
+    """Per-share cost of taking liquidity at `price`: Polymarket's dynamic taker
+    fee (feeRate * p * (1-p)) plus a spread/slippage allowance. Returned in price
+    units so it can be subtracted directly from per-share edge."""
+    fee = TAKER_FEE_RATE * price * (1.0 - price)
+    slippage = SLIPPAGE_FRACTION * price
+    return fee + slippage
 
 def calculate_kelly(edge, price):
     """Fractional Kelly criterion for binary prediction markets.
@@ -70,13 +79,11 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
 
     prob = get_bucket_probability(engine_res, opp.bucket_low, opp.bucket_high)
 
-    # Subtract a round-trip fee/slippage haircut from raw edge so the threshold
-    # check is on *net* expected edge after frictions. Haircut is a fraction of
-    # entry price (fees scale with notional), applied to both sides.
-    yes_haircut = EDGE_FEE_HAIRCUT * opp.yes_price
-    no_haircut = EDGE_FEE_HAIRCUT * opp.no_price
-    yes_edge = (prob - opp.yes_price) - yes_haircut
-    no_edge = ((1.0 - prob) - opp.no_price) - no_haircut
+    # Subtract the real per-share transaction cost (Polymarket dynamic taker fee +
+    # spread/slippage) from raw edge so the threshold check is on *net* edge after
+    # frictions. Cost is priced at the side actually bought.
+    yes_edge = (prob - opp.yes_price) - transaction_cost(opp.yes_price)
+    no_edge = ((1.0 - prob) - opp.no_price) - transaction_cost(opp.no_price)
 
     agreement = engine_res["model_agreement"]
     spread = engine_res["model_spread"]
