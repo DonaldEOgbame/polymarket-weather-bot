@@ -115,7 +115,7 @@ function NotificationBell() {
 }
 
 // ---------- TopBar ----------
-function TopBar({ portfolio, scanLog }) {
+function TopBar({ portfolio, scanLog, activeTab, setActiveTab }) {
   const [tick, setTick] = useState(0);
   useEffect(() => {
     const i = setInterval(() => setTick(t => t + 1), 1000);
@@ -128,6 +128,11 @@ function TopBar({ portfolio, scanLog }) {
         <span className="brand-mark" aria-hidden="true" />
         <span className="brand-word">stormedge<em>.</em></span>
         <span className="brand-tag">desk</span>
+      </div>
+      <div className="top-nav">
+        <div className={`nav-item ${activeTab === 'desk' ? 'active' : ''}`} onClick={() => setActiveTab('desk')}>Desk</div>
+        <div className={`nav-item ${activeTab === 'archive' ? 'active' : ''}`} onClick={() => setActiveTab('archive')}>Archive</div>
+        <div className={`nav-item ${activeTab === 'models' ? 'active' : ''}`} onClick={() => setActiveTab('models')}>Models</div>
       </div>
       <div className="top-right">
         <span className={`mode-pill mode-${portfolio.mode.toLowerCase()}`}>
@@ -173,7 +178,7 @@ function CircuitMeter({ used, limit, pnl }) {
         <span>{fmtUSD(pnl, true)}</span>
         <span className="dim">limit {fmtUSD(limit)}</span>
       </div>
-      {tripped && <span className="circuit-tripped">BREAKER TRIPPED</span>}
+      {tripped && <span className="circuit-tripped">DAILY LIMIT EXCEEDED</span>}
     </div>
   );
 }
@@ -183,7 +188,7 @@ function CircuitBreakerBanner({ portfolio }) {
   return (
     <div className="circuit-banner">
       <span className="circuit-banner-icon">⚠</span>
-      <span>Circuit breaker tripped — daily loss limit ${Math.abs(portfolio.daily_loss_limit).toFixed(2)} reached. No new positions until midnight UTC.</span>
+      <span>Daily loss limit of ${Math.abs(portfolio.daily_loss_limit).toFixed(2)} reached. Trading halted until midnight UTC.</span>
     </div>
   );
 }
@@ -197,7 +202,7 @@ function HeaderStrip({ portfolio }) {
         label="Total equity"
         value={fmtUSD(portfolio.total_equity)}
         sub={<span className={equityChange >= 0 ? 'pos' : 'neg'}>
-          {fmtUSD(equityChange, true)} <span className="dim">since seed</span>
+          {fmtUSD(equityChange, true)} <span className="dim">since start</span>
         </span>}
         tone="hero"
       />
@@ -264,12 +269,12 @@ function GlobePanel({ cities, cityActivity, positions, scanLog }) {
       <header className="card-head">
         <div>
           <h2>Live coverage</h2>
-          <p className="card-sub">{cities.length} weather stations · {counts.active} active · {counts.signal} flagged · {counts.scanned} scanned in last cycle</p>
+          <p className="card-sub">{cities.length} weather stations · {counts.active} active · {counts.signal} shadow · {counts.scanned} scanned in last cycle</p>
         </div>
         <div className="globe-legend">
           <span className="lg lg-active"><i /> open position</span>
-          <span className="lg lg-signal"><i /> flagged signal</span>
-          <span className="lg lg-scanned"><i /> recent scan</span>
+          <span className="lg lg-signal"><i /> shadow signal (skipped)</span>
+          <span className="lg lg-scanned"><i /> scanned (no signal)</span>
         </div>
       </header>
       <div className="globe-body">
@@ -318,7 +323,7 @@ function GlobePanel({ cities, cityActivity, positions, scanLog }) {
                       <span className="dim">{fmtUSD(pos.size_usdc)}</span>
                     </span>
                   )}
-                  {act.state === 'signal' && <span className="city-meta dim">flagged</span>}
+                  {act.state === 'signal' && <span className="city-meta dim">shadow</span>}
                   {act.state === 'scanned' && act.skip && (
                     <span className="city-meta dim trunc">{act.skip.bucket}</span>
                   )}
@@ -452,7 +457,7 @@ function EquityCurve({ equity, startingBankroll, totalEquity }) {
       <header className="card-head">
         <div>
           <h2>Equity curve</h2>
-          <p className="card-sub">cash + open positions · all time · seed {fmtUSD(seed)}</p>
+          <p className="card-sub">cash + open positions · all time · initial bankroll {fmtUSD(seed)}</p>
         </div>
         <div className="equity-stat">
           <div className={`mono lg ${change >= 0 ? 'pos' : 'neg'}`}>{fmtUSD(change, true)}</div>
@@ -712,6 +717,7 @@ function ScanFeed({ scanLog }) {
 function App() {
   const [data, setData] = useState(null);
   const [err, setErr] = useState(null);
+  const [activeTab, setActiveTab] = useState('desk');
 
   useEffect(() => {
     const load = async () => {
@@ -752,26 +758,37 @@ function App() {
   const M = data;
   return (
     <div className="app">
-      <TopBar portfolio={M.portfolio} scanLog={M.scanLog} />
-      <CircuitBreakerBanner portfolio={M.portfolio} />
-      <HeaderStrip portfolio={M.portfolio} />
-      <div className="row row-main">
-        <GlobePanel
-          cities={M.cities}
-          cityActivity={M.cityActivity}
-          positions={M.positions}
-          scanLog={M.scanLog}
-        />
-        <div className="col-stack">
-          <OpenPositions positions={M.positions} maxPositions={4} />
-          <EquityCurve equity={M.equity} startingBankroll={M.portfolio.starting_bankroll} totalEquity={M.portfolio.total_equity} />
+      <TopBar portfolio={M.portfolio} scanLog={M.scanLog} activeTab={activeTab} setActiveTab={setActiveTab} />
+      {activeTab === 'desk' && (
+        <>
+          <CircuitBreakerBanner portfolio={M.portfolio} />
+          <HeaderStrip portfolio={M.portfolio} />
+          <div className="row row-main">
+            <GlobePanel
+              cities={M.cities}
+              cityActivity={M.cityActivity}
+              positions={M.positions}
+              scanLog={M.scanLog}
+            />
+            <div className="col-stack">
+              <OpenPositions positions={M.positions} maxPositions={4} />
+              <EquityCurve equity={M.equity} startingBankroll={M.portfolio.starting_bankroll} totalEquity={M.portfolio.total_equity} />
+            </div>
+          </div>
+          <PerformanceStats stats={M.stats} />
+          <ScanFeed scanLog={M.scanLog} />
+        </>
+      )}
+      {activeTab === 'archive' && (
+        <div>
+          <RecentTrades trades={M.trades} />
         </div>
-      </div>
-      <PerformanceStats stats={M.stats} />
-      <div className="row row-bottom">
-        <RecentTrades trades={M.trades} />
-        <ModelAccuracy models={M.models} />
-      </div>
+      )}
+      {activeTab === 'models' && (
+        <div>
+          <ModelAccuracy models={M.models} />
+        </div>
+      )}
       <footer className="page-foot">
         <span className="dim">stormedge · {M.portfolio.mode.toLowerCase()}-mode · polymarket weather bot</span>
         <span className="mono dim">UTC {M.now.toISOString().replace('T', ' ').slice(0, 19)}</span>

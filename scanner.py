@@ -6,7 +6,7 @@ import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from weather import get_station_coords
+from weather import get_station_coords, STATIONS
 from db import execute_query
 from config import (
     MIN_VOLUME, MAX_HOURS_TO_RESOLUTION, GAMMA_EVENTS_URL, CLOB_BASE_URL,
@@ -47,7 +47,7 @@ def parse_bucket(question: str):
     q_original = question.lower()
 
     # Detect unit: prefer explicit marker; default to °F if absent
-    is_celsius = bool(re.search(r'°\s*c\b', q_original))
+    is_celsius = bool(re.search(r'(?:°\s*c\b|\b\d+\s*c\b|\bcelsius\b)', q_original))
 
     # Only match numbers that are directly adjacent to a degree symbol (°F or °C)
     # This avoids matching date numbers like "June 5" or "May 20".
@@ -682,7 +682,16 @@ def scan_markets():
                 do_skip("No station mapping", "no_station_match")
                 continue
 
-            target_date = end_date.strftime("%Y-%m-%d")
+            # Timezone-based calendar date alignment
+            from datetime import timedelta
+            lat_lon = STATIONS.get(city_key, {"lat": 0.0, "lon": 0.0})
+            lon = lat_lon.get("lon", 0.0)
+            approx_offset = round(lon / 15.0)
+            local_dt = end_date + timedelta(hours=approx_offset)
+            # Adjust for midnight edge case (local time past midnight refers to previous day's weather)
+            if local_dt.hour < 4:
+                local_dt -= timedelta(days=1)
+            target_date = local_dt.strftime("%Y-%m-%d")
 
             if not checks["bucket_parse_success"]:
                 do_skip("Cannot parse bucket", "bucket_parse_failed")

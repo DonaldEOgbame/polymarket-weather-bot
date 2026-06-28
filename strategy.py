@@ -197,16 +197,26 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
 
             # Enforce minimum position size
             if final_size < MIN_POSITION_SIZE:
-                signal = None
-                skip_reason = f"Calculated size ${final_size:.2f} below minimum ${MIN_POSITION_SIZE}"
+                # Micro-account rescue: if calculated size is below minimum, floor to MIN_POSITION_SIZE
+                # if we have the cash and it fits within our total exposure limit, preventing sizing deadlock.
+                if (MIN_POSITION_SIZE <= available_cash and
+                        locked_cash + MIN_POSITION_SIZE <= total_equity * MAX_TOTAL_EXPOSURE_FRACTION):
+                    logging.info(
+                        f"Micro-account rescue: calculated size ${final_size:.2f} floored "
+                        f"to MIN_POSITION_SIZE ${MIN_POSITION_SIZE:.2f} (equity=${total_equity:.2f})"
+                    )
+                    final_size = MIN_POSITION_SIZE
+                else:
+                    signal = None
+                    skip_reason = f"Calculated size ${final_size:.2f} below minimum ${MIN_POSITION_SIZE}"
 
             # Enforce maximum total exposure cap across the portfolio
-            elif locked_cash + final_size > total_equity * MAX_TOTAL_EXPOSURE_FRACTION:
+            if signal and locked_cash + final_size > total_equity * MAX_TOTAL_EXPOSURE_FRACTION:
                 signal = None
                 skip_reason = f"Total exposure cap reached. Locked: ${locked_cash:.2f}, Size: ${final_size:.2f}, Max Allowed: ${total_equity * MAX_TOTAL_EXPOSURE_FRACTION:.2f}"
 
             # Ensure we actually have the cash available to deploy
-            elif available_cash < final_size:
+            elif signal and available_cash < final_size:
                 signal = None
                 skip_reason = f"Insufficient available cash (${available_cash:.2f}) for trade size (${final_size:.2f})"
 

@@ -8,7 +8,7 @@ from alerts import send_trade_entry, send_trade_exit, send_model_alert
 from scanner import get_realtime_price, get_market_resolution
 from config import (
     PAPER_MODE, POLYMARKET_PK, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE,
-    MAX_CONCURRENT_POSITIONS, STOP_LOSS_PCT, EXIT_EDGE_FLOOR, CLOB_BASE_URL,
+    MAX_CONCURRENT_POSITIONS, STOP_LOSS_PCT, ENABLE_STOP_LOSS, EXIT_EDGE_FLOOR, CLOB_BASE_URL,
     MIN_MODEL_COUNT,
 )
 
@@ -247,7 +247,7 @@ class Executor:
 
         exit_reason = None
 
-        if pnl_pct <= -STOP_LOSS_PCT:
+        if ENABLE_STOP_LOSS and pnl_pct <= -STOP_LOSS_PCT:
             exit_reason = f"Stop Loss ({pnl_pct:.1%})"
         else:
             signals = fetch_query(

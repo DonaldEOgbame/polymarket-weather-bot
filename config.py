@@ -65,6 +65,7 @@ KELLY_CAP = float(os.getenv("KELLY_CAP", "0.08"))
 MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "0.50"))
 
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.15"))
+ENABLE_STOP_LOSS = os.getenv("ENABLE_STOP_LOSS", "false").lower() == "true"
 EXIT_EDGE_FLOOR = float(os.getenv("EXIT_EDGE_FLOOR", "0.05"))
 
 # --- Market Filters ---

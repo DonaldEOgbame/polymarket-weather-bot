@@ -26,12 +26,13 @@ STARTING_BANKROLL = float(os.getenv('STARTING_BANKROLL', '20.0'))
 from weather import STATIONS
 
 MODEL_META = {
-    'ECMWF IFS':   (0.40, 'global'),
-    'GFS 0.25°':   (0.20, 'global'),
-    'ICON Global': (0.20, 'global'),
-    'JMA GSM':     (0.35, 'AP'),
-    'GEM Global':  (0.10, 'AP'),
-    'best_match':  (0.35, 'US'),
+    'ecmwf_ifs04':   (0.40, 'global', 'ECMWF IFS 0.4°'),
+    'ecmwf_ifs025':  (0.35, 'AP', 'ECMWF IFS 0.25°'),
+    'gfs025':        (0.20, 'global', 'GFS 0.25°'),
+    'icon_global':   (0.20, 'global', 'ICON Global'),
+    'jma_gsm':       (0.35, 'AP', 'JMA GSM'),
+    'gem_global':    (0.10, 'AP', 'GEM Global'),
+    'best_match':    (0.35, 'US', 'Best Match'),
 }
 
 
@@ -281,10 +282,11 @@ def api_data():
     }
     models = []
     for m in ma_rows:
-        weight, region = MODEL_META.get(m['model'], (0.20, 'global'))
+        meta = MODEL_META.get(m['model'], (0.20, 'global', m['model']))
+        weight, region, display_name = meta[0], meta[1], meta[2]
         prev = ma_prev.get(m['model'], m['mae'])
         models.append({
-            'model': m['model'],
+            'model': display_name,
             'region': region,
             'mae': round(m['mae'] or 0.0, 3),
             'n': m['n'],
@@ -293,7 +295,7 @@ def api_data():
         })
     if not models:
         models = [
-            {'model': k, 'region': v[1], 'mae': 0.0, 'n': 0, 'weight': v[0], 'trend': 0}
+            {'model': v[2], 'region': v[1], 'mae': 0.0, 'n': 0, 'weight': v[0], 'trend': 0}
             for k, v in MODEL_META.items()
         ]
 
@@ -305,7 +307,8 @@ def api_data():
         try:
             rm = _json.loads(row['raw_models'])
             for mk in rm.keys():
-                model_trade_counts[mk] = model_trade_counts.get(mk, 0) + 1
+                display_name = MODEL_META.get(mk, (0.20, 'global', mk))[2]
+                model_trade_counts[display_name] = model_trade_counts.get(display_name, 0) + 1
         except Exception:
             pass
     for m in models:
