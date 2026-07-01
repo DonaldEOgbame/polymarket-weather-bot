@@ -92,9 +92,37 @@ def init_db():
                 model_spread REAL,
                 ensemble_std REAL,
                 raw_models TEXT,
-                signal_type TEXT
+                signal_type TEXT,
+                market_spread_frac REAL
             )
         ''')
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN market_spread_frac REAL")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN parser_version INTEGER")
+        except sqlite3.OperationalError:
+            pass
+
+        # Immutable per-market bucket metadata. Written once, on first discovery
+        # of a market_id, and never overwritten. scan_markets() looks this up
+        # instead of re-deriving bucket_low/bucket_high from the question text on
+        # every scan cycle — a market's bucket bounds must not silently drift over
+        # its lifetime just because parse_bucket() was later fixed or changed.
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS markets (
+                market_id TEXT PRIMARY KEY,
+                question TEXT,
+                city TEXT,
+                target_date TEXT,
+                bucket_low REAL,
+                bucket_high REAL,
+                parser_version INTEGER,
+                first_seen TEXT
+            )
+        ''')
+
         conn.execute('''
             CREATE TABLE IF NOT EXISTS model_accuracy (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -180,6 +208,7 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_model_acc_model_date ON model_accuracy(model, target_date)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_market ON positions(market_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_log_ts ON scan_log(id DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_markets_market_id ON markets(market_id)")
 
         conn.commit()
 

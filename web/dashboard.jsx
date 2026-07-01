@@ -393,7 +393,13 @@ function OpenPositions({ positions, maxPositions }) {
                   {p.bucket && <div className="dim small">{p.bucket}</div>}
                 </div>
                 <div className="r mono">{p.entry_price.toFixed(2)}</div>
-                <div className="r mono">{p.price_status === 'live' ? p.current_price.toFixed(2) : <span className="dim">—</span>}</div>
+                <div className="r mono">
+                  {p.price_status === 'live'
+                    ? p.current_price.toFixed(2)
+                    : p.price_status !== 'unavailable' && p.current_price != null
+                      ? <span className="dim">{p.current_price.toFixed(2)}</span>
+                      : <span className="dim">—</span>}
+                </div>
                 <div className="r mono">{fmtUSD(p.size_usdc)}</div>
                 <div className={`r mono ${p.price_status === 'live' ? (pnl >= 0 ? 'pos' : 'neg') : ''}`}>
                   {p.price_status === 'live'

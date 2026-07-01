@@ -106,3 +106,34 @@ class TestParseBucketEdgeCases:
         # So lb = 85.1 + 0.5 = 85.6
         assert lb == pytest.approx(85.6)
         assert ub is None
+
+
+class TestParseBucketExactCelsius:
+    """Regression tests for the exact-value °C case. This is the pattern that
+    shipped a bug (2026-06): "33°C" was parsed as a zero-width (91.4, 91.4)
+    Fahrenheit bucket instead of the correct rounding-tolerant (91.0, 91.8) —
+    the resolution source rounds to the nearest whole °C, so "33°C" really means
+    "32.5-33.5°C", not an exact point. These pin real historical question
+    strings from markets that were actually traded, so this exact regression
+    cannot silently reoccur."""
+
+    def test_exact_celsius_33_hong_kong(self):
+        lb, ub = parse_bucket("Will the highest temperature in Hong Kong be 33°C on July 1?")
+        assert lb == pytest.approx(91.0)
+        assert ub == pytest.approx(91.8)
+
+    def test_exact_celsius_12_wellington(self):
+        lb, ub = parse_bucket("Will the highest temperature in Wellington be 12°C on July 1?")
+        assert lb == pytest.approx(53.2)
+        assert ub == pytest.approx(54.0)
+
+    def test_exact_celsius_32_ankara(self):
+        lb, ub = parse_bucket("Will the highest temperature in Ankara be 32°C on July 1?")
+        assert lb == pytest.approx(89.2)
+        assert ub == pytest.approx(90.0)
+
+    def test_exact_celsius_never_zero_width(self):
+        """No exact-value °C question should ever produce a zero-width bucket —
+        that's precisely the shape of the original bug."""
+        lb, ub = parse_bucket("Will the highest temperature in Madrid be 36°C on June 29?")
+        assert lb != ub, "exact-value Celsius buckets must be padded, never zero-width"

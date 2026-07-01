@@ -1,6 +1,7 @@
 import json
 import logging
 from weather import get_signal_engine, get_bucket_probability
+from scanner import get_realtime_price, PARSER_VERSION
 from db import execute_query
 from datetime import datetime, timezone
 from config import (
@@ -11,17 +12,32 @@ from config import (
     ENABLE_SHADOW_EXPLORATION, PAPER_MODE,
     NARROW_BUCKET_WIDTH_F, NARROW_BUCKET_EDGE_THRESHOLD, NARROW_BUCKET_STD_INFLATION,
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION,
-    TAKER_FEE_RATE, SLIPPAGE_FRACTION,
+    TAKER_FEE_RATE, SLIPPAGE_FRACTION, MAX_ENTRY_SPREAD_FRACTION,
 )
 
 
-def transaction_cost(price):
+def transaction_cost(price, spread_fraction=None):
     """Per-share cost of taking liquidity at `price`: Polymarket's dynamic taker
     fee (feeRate * p * (1-p)) plus a spread/slippage allowance. Returned in price
-    units so it can be subtracted directly from per-share edge."""
+    units so it can be subtracted directly from per-share edge.
+
+    spread_fraction, when known (live half-spread / mid), replaces the flat
+    SLIPPAGE_FRACTION guess with the real cost of crossing the book right now."""
     fee = TAKER_FEE_RATE * price * (1.0 - price)
-    slippage = SLIPPAGE_FRACTION * price
+    slippage = (spread_fraction if spread_fraction is not None else SLIPPAGE_FRACTION) * price
     return fee + slippage
+
+
+def get_live_spread_fraction(token_id):
+    """Fetch the live half-spread as a fraction of mid price for a token.
+    Returns None if the book can't be read (falls back to SLIPPAGE_FRACTION)."""
+    ask, bid = get_realtime_price(token_id)
+    if ask <= 0 or bid <= 0:
+        return None
+    mid = (ask + bid) / 2.0
+    if mid <= 0:
+        return None
+    return ((ask - bid) / 2.0) / mid
 
 def calculate_kelly(edge, price):
     """Fractional Kelly criterion for binary prediction markets.
@@ -79,11 +95,18 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
 
     prob = get_bucket_probability(engine_res, opp.bucket_low, opp.bucket_high)
 
+    # Real live spread at evaluation time, replacing the flat SLIPPAGE_FRACTION guess.
+    # A wide spread means the cost of actually crossing the book is likely to eat
+    # most or all of the modeled edge, so it gates entry outright rather than just
+    # being netted out of the edge calculation.
+    yes_spread_frac = get_live_spread_fraction(opp.token_id_yes)
+    no_spread_frac = get_live_spread_fraction(opp.token_id_no)
+
     # Subtract the real per-share transaction cost (Polymarket dynamic taker fee +
     # spread/slippage) from raw edge so the threshold check is on *net* edge after
     # frictions. Cost is priced at the side actually bought.
-    yes_edge = (prob - opp.yes_price) - transaction_cost(opp.yes_price)
-    no_edge = ((1.0 - prob) - opp.no_price) - transaction_cost(opp.no_price)
+    yes_edge = (prob - opp.yes_price) - transaction_cost(opp.yes_price, yes_spread_frac)
+    no_edge = ((1.0 - prob) - opp.no_price) - transaction_cost(opp.no_price, no_spread_frac)
 
     agreement = engine_res["model_agreement"]
     spread = engine_res["model_spread"]
@@ -103,6 +126,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             skip_reason = f"YES edge {yes_edge:.3f} but agreement too low ({agreement:.2f} < {MIN_MODEL_AGREEMENT})"
         elif spread > MAX_MODEL_SPREAD:
             skip_reason = f"YES edge {yes_edge:.3f} but spread too wide ({spread:.1f}°F > {MAX_MODEL_SPREAD}°F)"
+        elif yes_spread_frac is not None and yes_spread_frac > MAX_ENTRY_SPREAD_FRACTION:
+            skip_reason = f"YES edge {yes_edge:.3f} but market spread too wide ({yes_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"
         else:
             signal = "BUY_YES"
             side = "YES"
@@ -117,6 +142,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             skip_reason = f"NO edge {no_edge:.3f} but agreement too low ({agreement:.2f} < {MIN_MODEL_AGREEMENT})"
         elif spread > MAX_MODEL_SPREAD:
             skip_reason = f"NO edge {no_edge:.3f} but spread too wide ({spread:.1f}°F > {MAX_MODEL_SPREAD}°F)"
+        elif no_spread_frac is not None and no_spread_frac > MAX_ENTRY_SPREAD_FRACTION:
+            skip_reason = f"NO edge {no_edge:.3f} but market spread too wide ({no_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"
         else:
             signal = "BUY_NO"
             side = "NO"
@@ -230,16 +257,23 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     # Log every evaluation to signals table for research
     timestamp = datetime.now(timezone.utc).isoformat()
     raw_models_json = json.dumps(engine_res.get("raw_models", {}))
+    # Spread for whichever side drove the decision (the traded side, or the
+    # higher-edge side if skipped) — lets calibrate.py separate real edge from
+    # edge that was actually just spread cost.
+    logged_spread_frac = (
+        (yes_spread_frac if side == "YES" else no_spread_frac) if side
+        else (yes_spread_frac if yes_edge >= no_edge else no_spread_frac)
+    )
     execute_query('''
         INSERT INTO signals (timestamp, market_id, city, target_date, bucket_low, bucket_high,
             model_prob, yes_price, no_price, edge, confidence, model_spread, ensemble_std,
-            raw_models, signal_type)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            raw_models, signal_type, market_spread_frac, parser_version)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         timestamp, opp.market_id, opp.city, opp.date, opp.bucket_low, opp.bucket_high,
         prob, opp.yes_price, opp.no_price, edge_used or max(yes_edge, no_edge),
         agreement, spread, engine_res["ensemble_std"], raw_models_json,
-        signal or f"SKIP: {skip_reason}"
+        signal or f"SKIP: {skip_reason}", logged_spread_frac, PARSER_VERSION
     ))
 
     if not signal:

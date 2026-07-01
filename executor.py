@@ -5,7 +5,8 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, MarketOrderArgs, OrderType
 from db import execute_query, fetch_query, update_bankroll, get_open_position, close_position_atomic
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
-from scanner import get_realtime_price, get_market_resolution
+from scanner import get_realtime_price, get_market_resolution, get_gamma_mid_price
+from weather import get_signal_engine, get_bucket_probability
 from config import (
     PAPER_MODE, POLYMARKET_PK, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE,
     MAX_CONCURRENT_POSITIONS, STOP_LOSS_PCT, ENABLE_STOP_LOSS, EXIT_EDGE_FLOOR, CLOB_BASE_URL,
@@ -302,8 +303,26 @@ class Executor:
         else:
             current_price = ask_price or bid_price
 
+        used_gamma_fallback = False
         if current_price <= 0.0:
-            return
+            # CLOB book unreadable (empty/thin book, rate limit, network hiccup).
+            # Previously this just returned — silently skipping the exit check
+            # entirely, which meant a position sitting at a real, extreme price
+            # (e.g. 99%+) could sit un-exited indefinitely if its order book
+            # happened to be empty at read time. Fall back to Gamma's last-known
+            # price so the edge-decay decision below still runs; this is NOT
+            # treated as a real fillable bid (see exit_fill below).
+            gamma_price = get_gamma_mid_price(pos["market_id"], pos["side"])
+            if gamma_price is None or gamma_price <= 0.0:
+                return
+            current_price = gamma_price
+            used_gamma_fallback = True
+
+        if used_gamma_fallback:
+            logging.warning(
+                f"CLOB book unreadable for {pos['market_id']} ({pos['side']}) — "
+                f"using Gamma fallback price ${current_price:.4f} for exit check"
+            )
 
         entry_price = pos["entry_price"]
         pnl_pct = (current_price - entry_price) / entry_price if entry_price > 0 else 0
@@ -311,7 +330,10 @@ class Executor:
         # the spread) minus the Polymarket taker fee — not the optimistic mid. The
         # mid (current_price) is still used for the edge-decay decision below.
         # Resolution exits settle exactly ($1/$0) and never reach this path; live
-        # mode overrides pnl from the actual fill in _close_position.
+        # mode overrides pnl from the actual fill in _close_position. If we're on
+        # the Gamma fallback, bid_price is 0 (no real book), so exit_fill correctly
+        # falls through to current_price (the Gamma estimate) rather than a
+        # fabricated bid — this is an estimate, not a guaranteed fill price.
         shares = pos["size_usdc"] / entry_price if entry_price > 0 else 0
         exit_fill = bid_price if bid_price > 0 else current_price
         exit_fee = TAKER_FEE_RATE * exit_fill * (1.0 - exit_fill) * shares
@@ -323,11 +345,27 @@ class Executor:
             exit_reason = f"Stop Loss ({pnl_pct:.1%})"
         else:
             signals = fetch_query(
-                "SELECT model_prob, target_date FROM signals WHERE market_id=? ORDER BY id DESC LIMIT 1",
+                "SELECT bucket_low, bucket_high, target_date, model_prob FROM signals "
+                "WHERE market_id=? ORDER BY id DESC LIMIT 1",
                 (pos["market_id"],)
             )
             if signals:
-                latest_prob = signals[0]["model_prob"]
+                # Re-run the ensemble live rather than trusting the cached model_prob
+                # from signals — that value is frozen at whichever scan last touched
+                # this market and does NOT track new forecast data arriving after entry.
+                # A stale prob makes current_edge look permanently favorable even after
+                # the market (and the weather) has genuinely moved against the position,
+                # so the edge-decay exit silently stops firing exactly when it matters most.
+                latest_prob = signals[0]["model_prob"]  # fallback if live refresh fails
+                engine_res = get_signal_engine(
+                    pos["city"], pos["target_date"], bool(pos["is_high"])
+                )
+                if engine_res:
+                    fresh_prob = get_bucket_probability(
+                        engine_res, signals[0]["bucket_low"], signals[0]["bucket_high"]
+                    )
+                    latest_prob = fresh_prob
+
                 if pos["side"] == "YES":
                     current_edge = latest_prob - current_price
                 else:
@@ -335,7 +373,7 @@ class Executor:
 
                 # Time-adaptive exit floor: raise threshold in the final 4 hours before
                 # resolution when volatility spikes and late-market chop can whipsaw exits.
-                target_date_str = signals[0].get("target_date")
+                target_date_str = signals[0]["target_date"]
                 adaptive_floor = self._adaptive_exit_floor(target_date_str, now)
 
                 if current_edge < adaptive_floor:

@@ -8,7 +8,7 @@ from db import (
     init_db, fetch_query, get_portfolio_state, get_daily_pnl, execute_query,
     purge_old_signals, purge_old_scan_log, purge_old_notifications,
 )
-from scanner import scan_markets
+from scanner import scan_markets, verify_parser_fixtures
 from strategy import evaluate_opportunity
 from executor import Executor
 from alerts import send_daily_summary, send_error_alert, send_circuit_breaker_alert
@@ -305,6 +305,7 @@ def run_bot(in_thread=False):
     logging.getLogger("urllib3.util.retry").setLevel(logging.ERROR)
     logging.getLogger("schedule").setLevel(logging.WARNING)
 
+    verify_parser_fixtures()
     init_db()
     executor = Executor()
     _print_startup_summary()

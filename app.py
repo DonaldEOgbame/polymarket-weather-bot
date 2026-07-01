@@ -128,12 +128,29 @@ def api_data():
 
     # ---- open positions (with live mid prices from CLOB) ----
     from scanner import get_realtime_price_status as _live_price
+    # Bucket bounds actually used at entry, from the immutable markets table —
+    # NOT a live re-parse of the question, which would show today's parser
+    # output even for a position entered under an older (possibly buggy)
+    # parser version, silently mislabeling what actually drove the trade.
+    market_ids = [p['market_id'] for p in pos_rows if p.get('market_id')]
+    bucket_by_market = {}
+    if market_ids:
+        placeholders = ','.join('?' for _ in market_ids)
+        for r in _q(
+            f'SELECT market_id, bucket_low, bucket_high FROM markets '
+            f'WHERE market_id IN ({placeholders})',
+            tuple(market_ids)
+        ):
+            bucket_by_market[r['market_id']] = (r['bucket_low'], r['bucket_high'])
+
     positions = []
     for p in pos_rows:
         city = p.get('city') or _extract_city(p.get('question') or '')
-        # Parse bucket bounds from the question when not stored on the position row
-        bl, bh = p.get('bucket_low'), p.get('bucket_high')
+        bl, bh = bucket_by_market.get(p.get('market_id'), (None, None))
         if bl is None and bh is None:
+            # Market predates the markets table (pre-migration) — best-effort
+            # fallback only; this may not reflect the bucket actually used
+            # at entry if the parser has since changed.
             from scanner import parse_bucket as _parse_bucket
             bl, bh = _parse_bucket(p.get('question') or '')
         bucket = f'{bl}–{bh}°F' if bl is not None and bh is not None else ''

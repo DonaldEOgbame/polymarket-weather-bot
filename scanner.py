@@ -7,9 +7,9 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from weather import get_station_coords, STATIONS
-from db import execute_query
+from db import execute_query, fetch_query
 from config import (
-    MIN_VOLUME, MAX_HOURS_TO_RESOLUTION, GAMMA_EVENTS_URL, CLOB_BASE_URL,
+    MIN_VOLUME, MAX_HOURS_TO_RESOLUTION, GAMMA_EVENTS_URL, GAMMA_API_URL, CLOB_BASE_URL,
     DEBUG_MARKET_SCAN, DEBUG_MARKET_SCAN_VERBOSE, DEBUG_WEATHER_DISCOVERY,
     MARKET_DISCOVERY_LIMIT, MARKET_DISCOVERY_MAX_PAGES,
     MARKET_DISCOVERY_STOP_AFTER_WEATHER, MAX_CLOB_CANDIDATES,
@@ -36,6 +36,15 @@ class MarketOpportunity:
 
 def _c_to_f(c: float) -> float:
     return c * 9.0 / 5.0 + 32.0
+
+
+# Bump this any time parse_bucket's bucket-math logic changes (not just cosmetic
+# edits). Written to signals.parser_version and markets.parser_version so a bug
+# like the 2026-06 Celsius zero-width bucket issue (exact "33°C" parsed as a
+# zero-width (91.4, 91.4) bucket instead of the correct rounding-tolerant
+# (91.0, 91.8)) is instantly detectable from the DB, instead of requiring a
+# multi-hour forensic timestamp-correlation audit to even notice it happened.
+PARSER_VERSION = 2
 
 
 def parse_bucket(question: str):
@@ -113,6 +122,71 @@ def parse_bucket(question: str):
     return (None, None)
 
 
+# Fixed fixtures for parse_bucket, checked at process startup (verify_parser_fixtures)
+# and pinned in tests/test_scanner.py::TestParseBucketExactCelsius. Keep both in
+# sync — this is intentionally a small, hand-picked subset (the real historical
+# questions that triggered the 2026-06 bug), not a full copy of the test suite.
+_PARSER_FIXTURES = [
+    ("Will the highest temperature in Hong Kong be 33°C on July 1?", (91.0, 91.8)),
+    ("Will the highest temperature in Wellington be 12°C on July 1?", (53.2, 54.0)),
+    ("Will the highest temperature in Ankara be 32°C on July 1?", (89.2, 90.0)),
+]
+
+
+def verify_parser_fixtures():
+    """Fail fast at startup if parse_bucket's output drifts from pinned known-good
+    values. Catches a regression like the 2026-06 Celsius zero-width bucket bug
+    before the scanner ever writes a bad bucket to the DB, rather than relying
+    solely on the test suite (which may not run before every deploy)."""
+    for question, expected in _PARSER_FIXTURES:
+        lb, ub = parse_bucket(question)
+        exp_lb, exp_ub = expected
+        if lb is None or ub is None or abs(lb - exp_lb) > 0.01 or abs(ub - exp_ub) > 0.01:
+            raise RuntimeError(
+                f"parse_bucket() regression detected at startup: "
+                f"question={question!r} expected={expected} got=({lb}, {ub}). "
+                f"Refusing to start — this is exactly the failure mode that caused "
+                f"the 2026-06 Celsius bucket bug."
+            )
+
+
+def get_or_store_bucket(market_id: str, question: str, city: str, target_date: str):
+    """Return (bucket_low, bucket_high) for market_id, immutably.
+
+    First call for a market_id parses the question and persists the result to
+    the `markets` table. Every subsequent call — even after parse_bucket's logic
+    changes — returns the ORIGINALLY stored bucket, not a fresh re-parse. This is
+    what prevents a parser fix (or future bug) from silently changing the bucket
+    definition of a market that's still being actively scanned/traded, which is
+    exactly the failure mode that let the 2026-06 Celsius zero-width bucket bug
+    change bucket bounds mid-trade for ~26% of markets with no audit trail.
+    """
+    existing = fetch_query(
+        "SELECT bucket_low, bucket_high FROM markets WHERE market_id=?", (market_id,)
+    )
+    if existing:
+        return existing[0]["bucket_low"], existing[0]["bucket_high"]
+
+    lb, ub = parse_bucket(question)
+    execute_query(
+        "INSERT OR IGNORE INTO markets "
+        "(market_id, question, city, target_date, bucket_low, bucket_high, parser_version, first_seen) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        (market_id, question, city, target_date, lb, ub, PARSER_VERSION,
+         datetime.now(timezone.utc).isoformat())
+    )
+    # Re-read rather than trust the just-computed values, in case a concurrent
+    # scan cycle won the INSERT race first — INSERT OR IGNORE silently no-ops
+    # in that case, so the values we hold locally could be stale for THIS market_id
+    # if two scans discovered it in the same instant.
+    row = fetch_query(
+        "SELECT bucket_low, bucket_high FROM markets WHERE market_id=?", (market_id,)
+    )
+    if row:
+        return row[0]["bucket_low"], row[0]["bucket_high"]
+    return lb, ub
+
+
 def get_realtime_price_status(token_id):
     """Fetch best ask/bid for a token. Returns (ask, bid, reachable)."""
     cached = get_cached_price(token_id)
@@ -147,6 +221,36 @@ def get_mid_price(token_id):
     if ask > 0 and bid > 0:
         return (ask + bid) / 2.0
     return ask or bid
+
+
+def get_gamma_mid_price(market_id: str, side: str):
+    """Fallback mid price for `side` ('YES' or 'NO') via Gamma's outcomePrices,
+    used when the CLOB order book can't be read (empty/thin book, rate limit,
+    network hiccup). Gamma's outcomePrices reflects the market's last-settled
+    price even when the live order book has nothing resting, so this catches
+    exactly the case that silently disabled the edge-decay exit check —
+    a position sitting at a real, extreme price with a temporarily unreadable
+    order book. Returns None if the market can't be found or fields are missing."""
+    try:
+        resp = safe_get(f"{GAMMA_API_URL}?condition_ids={market_id}", timeout=10)
+        if resp.status_code != 200:
+            return None
+        data = resp.json()
+        if not data:
+            return None
+        m = data[0]
+        outcome_prices = m.get("outcomePrices")
+        try:
+            op = json.loads(outcome_prices) if isinstance(outcome_prices, str) else outcome_prices
+        except (TypeError, ValueError):
+            op = None
+        if not op or len(op) < 2:
+            return None
+        yes_price = float(op[0])
+        return yes_price if side == "YES" else (1.0 - yes_price)
+    except Exception as e:
+        logging.error(f"Gamma fallback price fetch failed for {market_id}: {e}")
+        return None
 
 
 _RESOLUTION_CACHE = {}
@@ -721,6 +825,10 @@ def scan_markets():
             if not checks["bucket_parse_success"]:
                 do_skip("Cannot parse bucket", "bucket_parse_failed")
                 continue
+
+            # Use the immutably-stored bucket for this market_id, not a fresh
+            # re-parse — see get_or_store_bucket's docstring for why this matters.
+            lb, ub = get_or_store_bucket(market_id, question, city_key, target_date)
 
             token_yes, token_no = _resolve_token_sides(m)
             if not token_yes or not token_no:

@@ -6,7 +6,7 @@ import time as _time
 from config import (
     OPEN_METEO_URL, BASE_FORECAST_ERROR,
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION, CONVECTIVE_CITIES,
-    GFS_BIAS_CORRECTIONS,
+    GFS_BIAS_CORRECTIONS, MODEL_BIAS_CORRECTIONS,
 )
 
 def _pstdev(data):
@@ -192,7 +192,15 @@ def fetch_forecasts(city_name, is_high=True, force_refresh=False):
                     correction = GFS_BIAS_CORRECTIONS[city_key]
                     val += correction
                     logging.debug(f"GFS bias correction ({correction:+.1f}°F) for {city_key}")
-                
+
+                # Global per-model cold-bias correction (from calibrate.py verification,
+                # not city-specific). MODEL_BIAS_CORRECTIONS values are the model's
+                # measured cold bias magnitude, so adding it shifts the forecast warmer.
+                if model in MODEL_BIAS_CORRECTIONS:
+                    model_correction = MODEL_BIAS_CORRECTIONS[model]
+                    val += model_correction
+                    logging.debug(f"Model bias correction ({model_correction:+.1f}°F) for {model}")
+
                 model_temps[model] = val
         forecasts_by_date[date_str] = model_temps
         

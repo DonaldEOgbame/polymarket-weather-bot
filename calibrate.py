@@ -117,13 +117,37 @@ def main():
         params = (cutoff, f"-{args.days} days")
 
     signals = fetch_query(
-        f"SELECT city, target_date, bucket_low, bucket_high, model_prob, ensemble_std, "
-        f"raw_models FROM signals WHERE {where} ORDER BY target_date",
+        f"SELECT market_id, city, target_date, bucket_low, bucket_high, model_prob, "
+        f"ensemble_std, raw_models FROM signals WHERE {where} ORDER BY target_date",
         params,
     )
     if not signals:
         print("No signals found. Run the scanner first, then come back.")
         return
+
+    # Canonical bucket per market_id: use the LAST (most recent) bucket_low/high
+    # logged for each market_id, not whatever happens to be on any given row.
+    # A market's bucket can legitimately change over its scan history if the
+    # parser itself changes (as it did for the 2026-06 Celsius zero-width bug) —
+    # mixing old and new bucket definitions for the same market silently
+    # contaminates the reliability/Brier numbers below (measured impact: ~29%
+    # of resolved rows affected, Brier score understated by ~0.015 / ~10%
+    # relative in the DB this was found against). Rows are already ORDER BY
+    # target_date, not by id, so re-derive the canonical bucket explicitly
+    # rather than assume row order reflects recency.
+    canonical_bucket = {}
+    for s in signals:
+        mid = s["market_id"]
+        if mid:
+            canonical_bucket[mid] = (s["bucket_low"], s["bucket_high"])
+    stale_bucket_rows = 0
+    for s in signals:
+        mid = s["market_id"]
+        if mid and mid in canonical_bucket:
+            canon_lb, canon_ub = canonical_bucket[mid]
+            if (s["bucket_low"], s["bucket_high"]) != (canon_lb, canon_ub):
+                stale_bucket_rows += 1
+            s["bucket_low"], s["bucket_high"] = canon_lb, canon_ub
 
     session = get_session()
     archive_cache = {}
@@ -199,6 +223,11 @@ def main():
     print(f"resolved         : {resolved}")
     print(f"pending (archive lag / future): {pending}")
     print(f"unmapped city    : {unmapped}")
+    if stale_bucket_rows:
+        print(f"stale-bucket rows normalized to canonical: {stale_bucket_rows} "
+              f"({stale_bucket_rows / len(signals):.1%} of all rows) — these had a "
+              f"bucket_low/high that differs from this market_id's most recent value; "
+              f"scored against the canonical bucket instead of what was logged")
 
     if resolved == 0:
         print("\nNothing resolved yet — ERA5 archive lags ~5 days. Re-run once your")

@@ -30,9 +30,13 @@ MAX_MODEL_SPREAD = float(os.getenv("MAX_MODEL_SPREAD", "2.7"))
 # NO tails the bot favours (~0.5-1%), expensive on cheap YES longshots (up to ~4%).
 TAKER_FEE_RATE = float(os.getenv("TAKER_FEE_RATE", "0.05"))
 # Separate allowance for crossing the bid/ask spread on thin books, as a fraction
-# of the entry price. The measurement-week run exists to replace this estimate with
-# the real slippage logged on actual fills.
+# of the entry price. Used as a fallback when the live order book can't be fetched.
 SLIPPAGE_FRACTION = float(os.getenv("SLIPPAGE_FRACTION", "0.015"))
+
+# Maximum tolerable bid/ask spread (as a fraction of mid price) to enter a trade.
+# Measured live from the order book at evaluation time. Wide spreads mean the real
+# cost of crossing is likely to eat most or all of the modeled edge.
+MAX_ENTRY_SPREAD_FRACTION = float(os.getenv("MAX_ENTRY_SPREAD_FRACTION", "0.15"))
 
 # Minimum number of weather models required to enter a trade.
 # Two models that agree proves nothing — ECMWF dropping out silently leaves only 2.
@@ -126,6 +130,23 @@ GFS_BIAS_CORRECTIONS = {
     k: float(v) for k, v in (
         pair.split(":") for pair in
         os.getenv("GFS_BIAS_CORRECTIONS", "Miami:-1.5,Houston:-1.5,Dallas:-1.2,Atlanta:-1.0,Tampa:-1.3").split(",")
+        if ":" in pair
+    )
+}
+
+# --- Global per-model cold-bias corrections (°F), applied to every city ---
+# Derived from calibrate.py's per-model signed bias (mean(model - actual) across
+# resolved forecasts, n=38 as of 2026-07-01). Unlike GFS_BIAS_CORRECTIONS above,
+# these run cold everywhere in the sample, not just specific cities, so they're
+# applied globally rather than city-keyed. Re-run calibrate.py periodically and
+# update these as more forecasts resolve — n=38 is a first read, not a settled value.
+MODEL_BIAS_CORRECTIONS = {
+    k: float(v) for k, v in (
+        pair.split(":") for pair in
+        os.getenv(
+            "MODEL_BIAS_CORRECTIONS",
+            "ecmwf_ifs025:0.29,icon_global:0.03,gem_global:1.32,jma_gsm:1.55"
+        ).split(",")
         if ":" in pair
     )
 }
