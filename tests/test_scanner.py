@@ -101,6 +101,8 @@ class TestParseBucketEdgeCases:
     def test_celsius_converted_to_fahrenheit(self):
         """°C markets (international cities) are converted to °F for the strategy engine."""
         lb, ub = parse_bucket("Will London high be above 30°C?")
-        # 30°C == 86°F
-        assert lb == pytest.approx(86.0)
+        # 30°C with Celsius rounding resolves to >= 29.5°C (85.1°F).
+        # We adjust the input to get_bucket_probability by adding 0.5 to balance the 0.5 subtraction.
+        # So lb = 85.1 + 0.5 = 85.6
+        assert lb == pytest.approx(85.6)
         assert ub is None

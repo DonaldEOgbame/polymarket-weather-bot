@@ -354,7 +354,7 @@ function OpenPositions({ positions, maxPositions }) {
     return () => clearInterval(i);
   }, []);
   return (
-    <section className="card">
+    <section className="card positions-card">
       <header className="card-head">
         <div>
           <h2>Open positions</h2>
@@ -375,7 +375,8 @@ function OpenPositions({ positions, maxPositions }) {
             <div className="r">P&L</div>
             <div className="r">Resolves in</div>
           </div>
-          {positions.map(p => {
+          <div className="positions-scroll-wrapper">
+            {positions.map(p => {
             const countdown = fmtCountdown(p.resolves_at);
             // entry_price and current_price are both the token's own price (YES or NO).
             // PnL = (current - entry) / entry * size for both sides.
@@ -406,6 +407,7 @@ function OpenPositions({ positions, maxPositions }) {
               </div>
             );
           })}
+          </div>
         </div>
       )}
     </section>
@@ -414,7 +416,24 @@ function OpenPositions({ positions, maxPositions }) {
 
 // ---------- EquityCurve ----------
 function EquityCurve({ equity, startingBankroll, totalEquity }) {
-  const W = 560, H = 200, padL = 38, padR = 12, padT = 18, padB = 28;
+  const [W, setWidth] = useState(1000);
+  const containerRef = useRef(null);
+
+  useEffect(() => {
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver(entries => {
+      for (let entry of entries) {
+        const w = entry.contentRect.width;
+        if (w > 0) setWidth(w);
+      }
+    });
+    observer.observe(containerRef.current);
+    const rect = containerRef.current.getBoundingClientRect();
+    if (rect.width > 0) setWidth(rect.width);
+    return () => observer.disconnect();
+  }, []);
+
+  const H = 200, padL = 38, padR = 12, padT = 18, padB = 28;
 
   // Normalise: ensure Date objects
   const pts = equity.map(p => ({
@@ -464,8 +483,8 @@ function EquityCurve({ equity, startingBankroll, totalEquity }) {
           <div className={`mono small ${change >= 0 ? 'pos' : 'neg'}`}>{fmtPctSigned(changePct)}</div>
         </div>
       </header>
-      <div className="equity-chart">
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height="200">
+      <div className="equity-chart" ref={containerRef}>
+        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}>
           <defs>
             <linearGradient id="area-grad" x1="0" x2="0" y1="0" y2="1">
               <stop offset="0%" stopColor="rgba(245,177,60,0.28)" />
@@ -514,7 +533,7 @@ function PerformanceStats({ stats }) {
     { label: 'Avg edge at entry',  value: fmtPct(s.avg_edge),            sub: 'threshold 8.0%' },
     { label: 'Avg hold',           value: fmtHold(s.avg_hold_hours),     sub: 'time in position' },
     { label: 'Best trade',         value: fmtUSD(s.best_trade, true),    sub: 'single trade', tone: 'pos' },
-    { label: 'Worst trade',        value: fmtUSD(s.worst_trade, true),   sub: 'single trade', tone: 'neg' },
+    { label: 'Worst trade',        value: fmtUSD(s.worst_trade, true),   sub: 'single trade', tone: s.worst_trade >= 0 ? 'pos' : 'neg' },
   ];
 
   return (
@@ -767,6 +786,7 @@ function App() {
         <>
           <CircuitBreakerBanner portfolio={M.portfolio} />
           <HeaderStrip portfolio={M.portfolio} />
+          <PerformanceStats stats={M.stats} />
           <div className="row row-main">
             <GlobePanel
               cities={M.cities}
@@ -774,13 +794,9 @@ function App() {
               positions={M.positions}
               scanLog={M.scanLog}
             />
-            <div className="col-stack">
-              <OpenPositions positions={M.positions} maxPositions={4} />
-              <EquityCurve equity={M.equity} startingBankroll={M.portfolio.starting_bankroll} totalEquity={M.portfolio.total_equity} />
-            </div>
+            <OpenPositions positions={M.positions} maxPositions={4} />
           </div>
-          <PerformanceStats stats={M.stats} />
-          <ScanFeed scanLog={M.scanLog} />
+          <EquityCurve equity={M.equity} startingBankroll={M.portfolio.starting_bankroll} totalEquity={M.portfolio.total_equity} />
         </>
       )}
       {activeTab === 'archive' && (

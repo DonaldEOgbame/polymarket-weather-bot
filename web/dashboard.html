@@ -382,7 +382,8 @@
     border: 1px solid var(--line-2);
     user-select: none;
     touch-action: none;
-    min-height: 520px;
+    height: 100%;
+    min-height: 0;
     width: 100%;
   }
   .globe-tip {
@@ -503,6 +504,35 @@
   .positions-table .thead,
   .positions-table .trow {
     grid-template-columns: 2.4fr 0.9fr 0.7fr 0.7fr 0.8fr 1fr 0.7fr;
+  }
+  .positions-card {
+    height: 560px;
+    box-sizing: border-box;
+  }
+  .positions-table {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    min-height: 0;
+  }
+  .positions-scroll-wrapper {
+    flex: 1;
+    overflow-y: auto;
+    min-height: 0;
+    padding-right: 4px;
+  }
+  .positions-scroll-wrapper::-webkit-scrollbar {
+    width: 6px;
+  }
+  .positions-scroll-wrapper::-webkit-scrollbar-track {
+    background: transparent;
+  }
+  .positions-scroll-wrapper::-webkit-scrollbar-thumb {
+    background: var(--line-2);
+    border-radius: 3px;
+  }
+  .positions-scroll-wrapper::-webkit-scrollbar-thumb:hover {
+    background: var(--line);
   }
   .cell-city .city-line { color: var(--text); font-weight: 600; font-size: 13px; }
   .cell-city .city-q { font-size: 11.5px; color: var(--muted); margin-top: 2px; }

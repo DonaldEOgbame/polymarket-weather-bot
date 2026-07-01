@@ -69,25 +69,46 @@ def parse_bucket(question: str):
         range_pattern2 = r'(-?\d+(?:\.\d+)?)\s+to\s+(-?\d+(?:\.\d+)?)\s*°\s*[cfCF]'
         range_match = re.search(range_pattern2, question, re.IGNORECASE)
 
-    def convert(val: float) -> float:
-        return _c_to_f(val) if is_celsius else val
-
-    if "below" in q_original or "under" in q_original or "or below" in q_original:
-        if temp_matches:
-            return (None, convert(float(temp_matches[-1])))
-    elif ("above" in q_original or "or more" in q_original or "exceed" in q_original
-          or "at least" in q_original or "or higher" in q_original):
-        if temp_matches:
-            return (convert(float(temp_matches[0])), None)
-    elif range_match:
-        low, high = float(range_match.group(1)), float(range_match.group(2))
-        if low < high:
-            return (convert(low), convert(high))
-
-    if temp_matches:
-        val = float(temp_matches[0])
-        if -100 <= val <= 200:
-            return (convert(val), convert(val))
+    if is_celsius:
+        # For Celsius weather markets:
+        # Since the resolution source resolves using whole degrees Celsius, the
+        # range is extended by +/- 0.5°C in Celsius. To correct for the fact that
+        # get_bucket_probability() adds/subtracts 0.5 in Fahrenheit, we convert the
+        # bounds with a correction factor of +/- 0.5 in the Fahrenheit input.
+        if "below" in q_original or "under" in q_original or "or below" in q_original:
+            if temp_matches:
+                val = float(temp_matches[-1])
+                return (None, _c_to_f(val - 0.5) - 0.5)
+        elif ("above" in q_original or "or more" in q_original or "exceed" in q_original
+              or "at least" in q_original or "or higher" in q_original):
+            if temp_matches:
+                val = float(temp_matches[0])
+                return (_c_to_f(val - 0.5) + 0.5, None)
+        elif range_match:
+            low, high = float(range_match.group(1)), float(range_match.group(2))
+            if low < high:
+                return (_c_to_f(low - 0.5) + 0.5, _c_to_f(high + 0.5) - 0.5)
+        elif temp_matches:
+            val = float(temp_matches[0])
+            if -100 <= val <= 200:
+                return (_c_to_f(val - 0.5) + 0.5, _c_to_f(val + 0.5) - 0.5)
+    else:
+        # Standard Fahrenheit logic
+        if "below" in q_original or "under" in q_original or "or below" in q_original:
+            if temp_matches:
+                return (None, float(temp_matches[-1]))
+        elif ("above" in q_original or "or more" in q_original or "exceed" in q_original
+              or "at least" in q_original or "or higher" in q_original):
+            if temp_matches:
+                return (float(temp_matches[0]), None)
+        elif range_match:
+            low, high = float(range_match.group(1)), float(range_match.group(2))
+            if low < high:
+                return (low, high)
+        elif temp_matches:
+            val = float(temp_matches[0])
+            if -100 <= val <= 200:
+                return (val, val)
 
     return (None, None)
 
@@ -682,16 +703,10 @@ def scan_markets():
                 do_skip("No station mapping", "no_station_match")
                 continue
 
-            # Timezone-based calendar date alignment
-            from datetime import timedelta
-            lat_lon = STATIONS.get(city_key, {"lat": 0.0, "lon": 0.0})
-            lon = lat_lon.get("lon", 0.0)
-            approx_offset = round(lon / 15.0)
-            local_dt = end_date + timedelta(hours=approx_offset)
-            # Adjust for midnight edge case (local time past midnight refers to previous day's weather)
-            if local_dt.hour < 4:
-                local_dt -= timedelta(days=1)
-            target_date = local_dt.strftime("%Y-%m-%d")
+            # Timezone-independent calendar date alignment:
+            # Every weather market closes at 00:00:00 UTC on its target date.
+            # Thus, the UTC calendar date of end_date matches the target date exactly.
+            target_date = end_date.strftime("%Y-%m-%d")
 
             if not checks["bucket_parse_success"]:
                 do_skip("Cannot parse bucket", "bucket_parse_failed")

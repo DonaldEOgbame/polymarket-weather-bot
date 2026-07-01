@@ -18,10 +18,8 @@ app.secret_key = os.getenv('DASHBOARD_SECRET', 'stormedge-change-in-prod')
 
 DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', 'stormedge')
 DASHBOARD_EMAIL    = os.getenv('DASHBOARD_EMAIL', 'donaldemmaogbame@gmail.com')
-DB_PATH = os.path.abspath(os.getenv('DB_PATH', 'data/bot.db'))
-PAPER_MODE = os.getenv('PAPER_MODE', 'true').lower() == 'true'
-DAILY_LOSS_LIMIT = float(os.getenv('DAILY_LOSS_LIMIT', '-5.00'))
-STARTING_BANKROLL = float(os.getenv('STARTING_BANKROLL', '20.0'))
+from config import DB_PATH, PAPER_MODE, DAILY_LOSS_LIMIT, STARTING_BANKROLL
+DB_PATH = os.path.abspath(DB_PATH)
 
 from weather import STATIONS
 
@@ -515,15 +513,15 @@ def _extract_city(text):
 def _extract_bucket(text):
     if not text:
         return ''
-    m = re.search(r'(\d+)\s*[–—-]\s*(\d+)\s*°[Ff]', text)
+    m = re.search(r'(\d+)\s*[–—-]\s*(\d+)\s*°\s*([CFcf])', text)
     if m:
-        return f"{m.group(1)}–{m.group(2)}°F"
-    m = re.search(r'(?:above|over)\s+(\d+)\s*°[Ff]', text, re.I)
+        return f"{m.group(1)}–{m.group(2)}°{m.group(3).upper()}"
+    m = re.search(r'(?:above|over)\s+(\d+)\s*°\s*([CFcf])', text, re.I)
     if m:
-        return f">{m.group(1)}°F"
-    m = re.search(r'(?:below|under)\s+(\d+)\s*°[Ff]', text, re.I)
+        return f">{m.group(1)}°{m.group(2).upper()}"
+    m = re.search(r'(?:below|under)\s+(\d+)\s*°\s*([CFcf])', text, re.I)
     if m:
-        return f"<{m.group(1)}°F"
+        return f"<{m.group(1)}°{m.group(2).upper()}"
     return ''
 
 
