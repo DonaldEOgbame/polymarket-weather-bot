@@ -98,17 +98,9 @@ def api_data():
     cash_rows = _q('SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1')
     available_cash = cash_rows[0]['balance'] if cash_rows else STARTING_BANKROLL
 
-    pos_rows = _q('''
-        SELECT p.*, s.city, s.bucket_low, s.bucket_high
-        FROM positions p
-        LEFT JOIN (
-            SELECT market_id, city, bucket_low, bucket_high
-            FROM signals
-            WHERE id IN (
-                SELECT MAX(id) FROM signals GROUP BY market_id
-            )
-        ) s ON p.market_id = s.market_id
-    ''')
+    # Fetch positions directly — no join against signals (44k+ rows).
+    # bucket_low/high are extracted from the question string if not on the position.
+    pos_rows = _q('SELECT * FROM positions')
     locked_cash = sum(r['size_usdc'] for r in pos_rows)
     total_equity = available_cash + locked_cash
 
@@ -139,7 +131,11 @@ def api_data():
     positions = []
     for p in pos_rows:
         city = p.get('city') or _extract_city(p.get('question') or '')
+        # Parse bucket bounds from the question when not stored on the position row
         bl, bh = p.get('bucket_low'), p.get('bucket_high')
+        if bl is None and bh is None:
+            from scanner import parse_bucket as _parse_bucket
+            bl, bh = _parse_bucket(p.get('question') or '')
         bucket = f'{bl}–{bh}°F' if bl is not None and bh is not None else ''
         entry = p['entry_price'] or 0.5
         ask, bid, current, illiquid = 0.0, 0.0, entry, True
@@ -191,18 +187,14 @@ def api_data():
         })
 
     # ---- all closed trades, paginated client-side ----
-    trade_rows = _q('''
-        SELECT t.*, s.city AS sig_city
-        FROM trades t
-        LEFT JOIN (
-            SELECT market_id, city FROM signals GROUP BY market_id
-        ) s ON t.market_id = s.market_id
-        WHERE t.status = 'CLOSED'
-        ORDER BY t.exit_time DESC
-    ''')
+    # Use the city column stored directly on trades (populated since mid-June).
+    # Avoids a full GROUP BY scan of the 44k-row signals table on every dashboard poll.
+    trade_rows = _q(
+        "SELECT * FROM trades WHERE status = 'CLOSED' ORDER BY exit_time DESC"
+    )
     trades = []
     for t in trade_rows:
-        city = t.get('sig_city') or ''
+        city = t.get('city') or ''
         hold = _hold_hours(t.get('entry_time'), t.get('exit_time'))
         fill = t['fill_price'] or 0.5
         size = t['size_usdc'] or 1.0
@@ -295,18 +287,27 @@ def api_data():
             for k, v in MODEL_META.items()
         ]
 
-    # count how many filled trades each model appeared in (via raw_models JSON)
+    # Count how many filled trades each model appeared in (via raw_models JSON).
+    # Restrict to signals whose market_id matches an actual trade — avoids scanning
+    # 44k+ SKIP signals and is fast via the idx_signals_market index.
     import json as _json
-    trade_rows = _q("SELECT raw_models FROM signals WHERE signal_type NOT LIKE 'SKIP%' AND raw_models IS NOT NULL LIMIT 500")
+    traded_market_ids = [t['market_id'] for t in trade_rows if t.get('market_id')]
     model_trade_counts = {}
-    for row in trade_rows:
-        try:
-            rm = _json.loads(row['raw_models'])
-            for mk in rm.keys():
-                display_name = MODEL_META.get(mk, (0.20, 'global', mk))[2]
-                model_trade_counts[display_name] = model_trade_counts.get(display_name, 0) + 1
-        except Exception:
-            pass
+    if traded_market_ids:
+        placeholders = ','.join('?' * len(traded_market_ids))
+        raw_model_rows = _q(
+            f"SELECT raw_models FROM signals WHERE market_id IN ({placeholders})"
+            " AND signal_type NOT LIKE 'SKIP%' AND raw_models IS NOT NULL",
+            traded_market_ids,
+        )
+        for row in raw_model_rows:
+            try:
+                rm = _json.loads(row['raw_models'])
+                for mk in rm.keys():
+                    display_name = MODEL_META.get(mk, (0.20, 'global', mk))[2]
+                    model_trade_counts[display_name] = model_trade_counts.get(display_name, 0) + 1
+            except Exception:
+                pass
     for m in models:
         m['trades_used'] = model_trade_counts.get(m['model'], 0)
 

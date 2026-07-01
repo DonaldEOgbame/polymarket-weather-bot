@@ -1,7 +1,5 @@
 import math
 import json
-import numpy as np
-from scipy.stats import norm
 import logging
 from db import execute_query
 import time as _time
@@ -10,6 +8,21 @@ from config import (
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION, CONVECTIVE_CITIES,
     GFS_BIAS_CORRECTIONS,
 )
+
+def _pstdev(data):
+    """Calculate the population standard deviation of data (equivalent to np.std(data))."""
+    n = len(data)
+    if n == 0:
+        return 0.0
+    mean = sum(data) / n
+    variance = sum((x - mean) ** 2 for x in data) / n
+    return math.sqrt(variance)
+
+def _norm_cdf(x, loc=0.0, scale=1.0):
+    """Calculate the standard normal CDF (equivalent to norm.cdf(x, loc, scale))."""
+    if scale <= 0.0:
+        scale = 0.5  # safe clamp to match weather.py's minimum std logic
+    return 0.5 * (1.0 + math.erf((x - loc) / (scale * math.sqrt(2.0))))
 
 # Cross-scan in-memory forecast cache: {(city, is_high): (fetch_timestamp, result)}
 # Avoids re-fetching Open-Meteo on every 10-minute scan cycle.
@@ -219,7 +232,7 @@ def get_signal_engine(city_name, target_date, is_high=True, hours_to_resolution=
         if m in weights
     )
 
-    model_spread_std = float(np.std(list(model_temps.values())))
+    model_spread_std = float(_pstdev(list(model_temps.values())))
 
     base_error = _interpolate_base_error(hours_to_resolution)
 
@@ -275,7 +288,7 @@ def get_bucket_probability(engine_result, bucket_lower, bucket_upper):
     elif bucket_upper is not None and bucket_lower is None:
         ub += 0.5
 
-    prob = norm.cdf(ub, loc=mean, scale=std) - norm.cdf(lb, loc=mean, scale=std)
+    prob = _norm_cdf(ub, loc=mean, scale=std) - _norm_cdf(lb, loc=mean, scale=std)
     return max(0.0, min(1.0, float(prob)))
 
 def prefetch_signal_engines(opportunities) -> dict:
@@ -349,7 +362,7 @@ def prefetch_signal_engines(opportunities) -> dict:
             temp * (weights[m] / total_weight)
             for m, temp in model_temps.items() if m in weights
         )
-        model_spread_std = float(np.std(list(model_temps.values())))
+        model_spread_std = float(_pstdev(list(model_temps.values())))
 
         base_error = _interpolate_base_error(opp.hours_to_resolution)
 

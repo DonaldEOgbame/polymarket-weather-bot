@@ -72,6 +72,12 @@ class Executor:
         entry_price = pos["entry_price"]
         size_usdc = pos["size_usdc"]
 
+        target_date = pos.get("target_date")
+        if target_date:
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            if target_date > today:
+                return False
+
         resolution = get_market_resolution(market_id)
         if not (resolution and resolution["resolved"]):
             return False

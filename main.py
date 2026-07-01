@@ -1,5 +1,6 @@
 import time
 import signal
+import gc
 import logging
 import json
 from datetime import datetime, timezone
@@ -180,6 +181,8 @@ def run_scan_cycle():
     except Exception as e:
         logging.error(f"Error in scan cycle: {e}", exc_info=True)
         send_error_alert(e)
+    finally:
+        gc.collect()
 
 def run_monitor_cycle():
     try:
@@ -195,6 +198,8 @@ def run_monitor_cycle():
     except Exception as e:
         logging.error(f"Error in monitor cycle: {e}", exc_info=True)
         send_error_alert(e)
+    finally:
+        gc.collect()
 
 def _daily_purge():
     try:

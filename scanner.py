@@ -15,7 +15,7 @@ from config import (
     MARKET_DISCOVERY_STOP_AFTER_WEATHER, MAX_CLOB_CANDIDATES,
     MAX_BUCKETS_PER_CITY_DATE,
 )
-from utils import get_session, parse_utc_datetime
+from utils import get_session, parse_utc_datetime, safe_get, get_cached_price, set_cached_price
 
 @dataclass
 class MarketOpportunity:
@@ -114,24 +114,26 @@ def parse_bucket(question: str):
 
 
 def get_realtime_price_status(token_id):
-    """Fetch best ask/bid for a token. Returns (ask, bid, reachable).
+    """Fetch best ask/bid for a token. Returns (ask, bid, reachable)."""
+    cached = get_cached_price(token_id)
+    if cached is not None:
+        return cached[0], cached[1], cached[2]
 
-    reachable is False only when the CLOB request itself failed (network down,
-    timeout, non-200) — distinct from a reachable-but-empty orderbook, which
-    returns (0.0, 0.0, True). Callers can use this to tell "API down" apart
-    from "market genuinely has no liquidity"."""
     try:
-        resp = get_session().get(f"{CLOB_BASE_URL}/book?token_id={token_id}", timeout=10)
+        resp = safe_get(f"{CLOB_BASE_URL}/book?token_id={token_id}", timeout=10)
         if resp.status_code == 200:
             data = resp.json()
             asks = data.get("asks", [])
             bids = data.get("bids", [])
             best_ask = float(asks[0]["price"]) if asks else 0.0
             best_bid = float(bids[0]["price"]) if bids else 0.0
+            set_cached_price(token_id, best_ask, best_bid, True)
             return best_ask, best_bid, True
         logging.warning(f"Orderbook for {token_id}: HTTP {resp.status_code}")
     except Exception as e:
         logging.error(f"Error fetching orderbook for {token_id}: {e}")
+    
+    set_cached_price(token_id, 0.0, 0.0, False)
     return 0.0, 0.0, False
 
 
@@ -147,6 +149,8 @@ def get_mid_price(token_id):
     return ask or bid
 
 
+_RESOLUTION_CACHE = {}
+
 def get_market_resolution(market_id: str) -> dict | None:
     """
     Query the CLOB API for a market's resolution status using its conditionId.
@@ -158,9 +162,12 @@ def get_market_resolution(market_id: str) -> dict | None:
 
     Returns None if the API call fails or the market is not found.
     """
+    if market_id in _RESOLUTION_CACHE:
+        return _RESOLUTION_CACHE[market_id]
+
     try:
         url = f"{CLOB_BASE_URL}/markets/{market_id}"
-        resp = get_session().get(url, timeout=10)
+        resp = safe_get(url, timeout=10)
         if resp.status_code != 200:
             logging.warning(f"Resolution check for {market_id}: HTTP {resp.status_code}")
             return None
@@ -181,11 +188,14 @@ def get_market_resolution(market_id: str) -> dict | None:
         if outcome:
             resolved = True
 
-        return {
+        res = {
             "resolved": resolved,
             "outcome": outcome,
             "question": data.get("question", ""),
         }
+        if resolved:
+            _RESOLUTION_CACHE[market_id] = res
+        return res
     except Exception as e:
         logging.error(f"Error fetching market resolution for {market_id}: {e}")
         return None
@@ -295,7 +305,7 @@ def _fetch_events_page(offset: int, limit: int, session) -> list | None:
         f"&order=createdAt&ascending=false"
     )
     try:
-        resp = session.get(url, timeout=15)
+        resp = safe_get(url, timeout=15)
     except Exception as e:
         logging.error(f"Discovery: failed to fetch events page at offset={offset}: {e}")
         return None
