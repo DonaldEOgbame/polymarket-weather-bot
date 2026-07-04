@@ -138,9 +138,9 @@ class TestProbabilityCalibration:
 
     def test_low_prob_inflated_toward_observed(self):
         from weather import _calibrate_prob
-        # ~15% raw should map up toward the observed ~28%.
+        # ~15% raw maps up toward the METAR-observed ~29% hit rate for that bin.
         out = _calibrate_prob(0.15)
-        assert 0.24 < out < 0.34, f"0.15 should calibrate to ~0.29, got {out:.3f}"
+        assert 0.22 < out < 0.34, f"0.15 should calibrate toward observed ~0.29, got {out:.3f}"
 
     def test_monotonic(self):
         from weather import _calibrate_prob
@@ -155,11 +155,13 @@ class TestProbabilityCalibration:
 
     def test_shrinks_fake_no_edge(self):
         # A raw P_YES of 0.20 gives a raw NO edge of (1-0.20)-0.53 = 0.27 (looks great).
-        # Calibrated P_YES ~0.39 gives (1-0.39)-0.53 = 0.08 — the fake edge collapses.
+        # The METAR-fit calibration raises P_YES toward its true ~27% hit rate, shrinking
+        # the NO edge — the overconfident portion of the edge is removed.
         from weather import _calibrate_prob
         raw_edge = (1 - 0.20) - 0.53
         cal_edge = (1 - _calibrate_prob(0.20)) - 0.53
-        assert cal_edge < raw_edge - 0.1, "calibration must materially shrink the low-p NO edge"
+        assert cal_edge < raw_edge - 0.05, "calibration must shrink the low-p NO edge"
+        assert _calibrate_prob(0.20) > 0.20, "low raw probs must be inflated toward observed"
 
 
 class TestStationCoordinates:

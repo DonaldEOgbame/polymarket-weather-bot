@@ -94,8 +94,15 @@ CONVECTIVE_CITIES = set(os.getenv("CONVECTIVE_CITIES", "Miami,Houston,Dallas,Atl
 # reproduces the training condition (they compose, they do not double-count). If you
 # ever change or disable NARROW_BUCKET_STD_INFLATION, re-fit these from fresh signals.
 ENABLE_PROB_CALIBRATION = os.getenv("ENABLE_PROB_CALIBRATION", "true").lower() == "true"
-PROB_CALIBRATION_INTERCEPT = float(os.getenv("PROB_CALIBRATION_INTERCEPT", "1.1182"))
-PROB_CALIBRATION_SLOPE = float(os.getenv("PROB_CALIBRATION_SLOPE", "1.1619"))
+# Constants RE-FIT against the METAR resolution ruler (373 forecasts, 2026-07-04) — the
+# feed Polymarket actually settles on. Against METAR the raw model is even more
+# overconfident than it looked against ERA5 (predicted 5% → observed 19%; 15% → 29%),
+# so the correcting curve is stronger: low slope compresses probabilities toward the
+# realized base rate, reflecting that our forecast has less discriminating power against
+# noisy whole-°C observations than the smooth reanalysis suggested. (Old ERA5 fit was
+# INTERCEPT=1.1182 SLOPE=1.1619.) Re-fit from `calibrate.py --source metar` as data grows.
+PROB_CALIBRATION_INTERCEPT = float(os.getenv("PROB_CALIBRATION_INTERCEPT", "-0.1715"))
+PROB_CALIBRATION_SLOPE = float(os.getenv("PROB_CALIBRATION_SLOPE", "0.4457"))
 
 # Base forecast uncertainty in °F, keyed by hours to resolution.
 # Interpolated at runtime; values reflect NWS skill decay with lead time.
