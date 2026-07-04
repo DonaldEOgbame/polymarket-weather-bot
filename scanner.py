@@ -187,6 +187,37 @@ def get_or_store_bucket(market_id: str, question: str, city: str, target_date: s
     return lb, ub
 
 
+def _best_ask_bid_from_book(data):
+    """Extract (best_ask, best_bid) from a CLOB /book response WITHOUT trusting
+    array order.
+
+    The Polymarket CLOB /book endpoint does not return price levels best-first.
+    Verified live 2026-07-04 across 6 markets: `asks` come back sorted DESCENDING
+    (worst/highest price at index 0) and `bids` ASCENDING (worst/lowest at index
+    0). Reading asks[0]/bids[0] as "best" therefore inverts the book — it returns
+    the WORST prices, producing a fake ~98%% spread (which the entry spread gate
+    then rejects) and a mid that only coincidentally lands near the true mid by
+    symmetry. The best executable ask is the MINIMUM ask; the best executable bid
+    is the MAXIMUM bid. Never rely on the returned index.
+
+    Returns (0.0, 0.0) for a missing side. Malformed level entries are skipped.
+    """
+    def _prices(levels):
+        out = []
+        for lvl in levels or []:
+            try:
+                out.append(float(lvl["price"]))
+            except (TypeError, ValueError, KeyError):
+                continue
+        return out
+
+    ask_prices = _prices(data.get("asks", []))
+    bid_prices = _prices(data.get("bids", []))
+    best_ask = min(ask_prices) if ask_prices else 0.0
+    best_bid = max(bid_prices) if bid_prices else 0.0
+    return best_ask, best_bid
+
+
 def get_realtime_price_status(token_id):
     """Fetch best ask/bid for a token. Returns (ask, bid, reachable)."""
     cached = get_cached_price(token_id)
@@ -197,10 +228,7 @@ def get_realtime_price_status(token_id):
         resp = safe_get(f"{CLOB_BASE_URL}/book?token_id={token_id}", timeout=10)
         if resp.status_code == 200:
             data = resp.json()
-            asks = data.get("asks", [])
-            bids = data.get("bids", [])
-            best_ask = float(asks[0]["price"]) if asks else 0.0
-            best_bid = float(bids[0]["price"]) if bids else 0.0
+            best_ask, best_bid = _best_ask_bid_from_book(data)
             set_cached_price(token_id, best_ask, best_bid, True)
             return best_ask, best_bid, True
         logging.warning(f"Orderbook for {token_id}: HTTP {resp.status_code}")

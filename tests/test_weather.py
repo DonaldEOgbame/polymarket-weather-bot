@@ -122,3 +122,58 @@ class TestUncertaintyModel:
         low_spread = math.sqrt(base**2 + 0.5**2)
         high_spread = math.sqrt(base**2 + 3.0**2)
         assert high_spread > low_spread
+
+
+class TestProbabilityCalibration:
+    """Regression tests for the Platt probability calibration (weather._calibrate_prob).
+
+    The raw Gaussian bucket prob is ~1.9x overconfident in the low-p region where the
+    bot bets NO (measured on 96,307 resolved signals: predicted ~15% hit ~28%). The
+    calibration remap pulls raw probs back onto the observed reliability curve. This was
+    the single biggest driver of the -$20 true loss on the first 19 live trades — with
+    calibration on, 12 of 14 losing bets are refused.
+    """
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+    def test_low_prob_inflated_toward_observed(self):
+        from weather import _calibrate_prob
+        # ~15% raw should map up toward the observed ~28%.
+        out = _calibrate_prob(0.15)
+        assert 0.24 < out < 0.34, f"0.15 should calibrate to ~0.29, got {out:.3f}"
+
+    def test_monotonic(self):
+        from weather import _calibrate_prob
+        xs = [0.02, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9]
+        ys = [_calibrate_prob(x) for x in xs]
+        assert ys == sorted(ys), "calibration must be monotonic (never reorder opportunities)"
+
+    def test_endpoints_pass_through(self):
+        from weather import _calibrate_prob
+        assert _calibrate_prob(0.0) == 0.0
+        assert _calibrate_prob(1.0) == 1.0
+
+    def test_shrinks_fake_no_edge(self):
+        # A raw P_YES of 0.20 gives a raw NO edge of (1-0.20)-0.53 = 0.27 (looks great).
+        # Calibrated P_YES ~0.39 gives (1-0.39)-0.53 = 0.08 — the fake edge collapses.
+        from weather import _calibrate_prob
+        raw_edge = (1 - 0.20) - 0.53
+        cal_edge = (1 - _calibrate_prob(0.20)) - 0.53
+        assert cal_edge < raw_edge - 0.1, "calibration must materially shrink the low-p NO edge"
+
+
+class TestStationCoordinates:
+    """Guard the two coordinates fixed 2026-07-04 (were resolving on the wrong station)."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+    def test_seoul_is_city_not_incheon(self):
+        from weather import STATIONS
+        lat, lon = STATIONS["Seoul"]["lat"], STATIONS["Seoul"]["lon"]
+        # Seoul city ~ (37.57, 126.98); Incheon airport ~ 126.44 read ~6.6°F too cold.
+        assert lon > 126.8, f"Seoul lon {lon} looks like Incheon, not the Seoul city station"
+
+    def test_london_west_of_prime_meridian(self):
+        from weather import STATIONS
+        lon = STATIONS["London"]["lon"]
+        assert lon < 0, f"London lon {lon} is east of the prime meridian (wrong station)"

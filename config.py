@@ -56,6 +56,25 @@ NARROW_BUCKET_STD_INFLATION = float(os.getenv("NARROW_BUCKET_STD_INFLATION", "1.
 CONVECTIVE_STD_INFLATION = float(os.getenv("CONVECTIVE_STD_INFLATION", "1.3"))
 CONVECTIVE_CITIES = set(os.getenv("CONVECTIVE_CITIES", "Miami,Houston,Dallas,Atlanta,Tampa").split(","))
 
+# --- Probability calibration (Platt scaling on the raw Gaussian bucket prob) ---
+# The raw normal-CDF bucket probability is systematically OVERCONFIDENT: measured on
+# 96,307 resolved signals (2026-07-04), buckets the model called ~15% actually hit
+# ~28%, and ~24% hit ~43% — a ~1.9x under-statement of hit rate in exactly the
+# low-probability region where the bot places its NO bets. That manufactured fake NO
+# edge and is the single biggest driver of the -$20 true loss on the first 19 trades.
+# Fix: remap raw prob p through a logistic fitted to the reliability curve:
+#   logit(p_cal) = INTERCEPT + SLOPE * logit(p_raw)
+# The fitted curve reproduces the observed hit rates to within ~1% per bin. Re-fit from
+# calibrate.py's reliability table as more data resolves; set ENABLE_PROB_CALIBRATION=
+# false to fall back to the raw (overconfident) Gaussian probability.
+# COUPLING: these constants were fit on logged model_prob that ALREADY included the
+# NARROW_BUCKET_STD_INFLATION (1.4x) step. Keeping that inflation on + this remap
+# reproduces the training condition (they compose, they do not double-count). If you
+# ever change or disable NARROW_BUCKET_STD_INFLATION, re-fit these from fresh signals.
+ENABLE_PROB_CALIBRATION = os.getenv("ENABLE_PROB_CALIBRATION", "true").lower() == "true"
+PROB_CALIBRATION_INTERCEPT = float(os.getenv("PROB_CALIBRATION_INTERCEPT", "1.1182"))
+PROB_CALIBRATION_SLOPE = float(os.getenv("PROB_CALIBRATION_SLOPE", "1.1619"))
+
 # Base forecast uncertainty in °F, keyed by hours to resolution.
 # Interpolated at runtime; values reflect NWS skill decay with lead time.
 BASE_FORECAST_ERROR = {

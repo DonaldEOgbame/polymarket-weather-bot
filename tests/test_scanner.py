@@ -137,3 +137,86 @@ class TestParseBucketExactCelsius:
         that's precisely the shape of the original bug."""
         lb, ub = parse_bucket("Will the highest temperature in Madrid be 36°C on June 29?")
         assert lb != ub, "exact-value Celsius buckets must be padded, never zero-width"
+
+
+class TestOrderBookBestPriceSelection:
+    """Regression tests for the CLOB /book best-bid/best-ask selection bug.
+
+    The Polymarket CLOB /book endpoint does NOT return asks sorted best-first.
+    Empirically (verified 2026-07-04 against 6 live markets): asks come back
+    sorted DESCENDING (highest/worst price at index 0) and bids ASCENDING
+    (lowest/worst at index 0). Trusting asks[0]/bids[0] therefore reads the
+    WORST prices as best — producing a fake ~98% spread and a mid that only
+    coincidentally lands near the true mid by symmetry. Best ask must be the
+    MINIMUM ask; best bid must be the MAXIMUM bid, never a positional index.
+    """
+
+    def _parse(self, data):
+        from scanner import _best_ask_bid_from_book
+        return _best_ask_bid_from_book(data)
+
+    def test_asks_descending_bids_ascending_live_shape(self):
+        # Exact shape observed live for "Will 2026 be the second-hottest year..."
+        data = {
+            "asks": [{"price": "0.99", "size": "10"}, {"price": "0.80", "size": "5"},
+                     {"price": "0.70", "size": "5"}, {"price": "0.66", "size": "5"}],
+            "bids": [{"price": "0.01", "size": "10"}, {"price": "0.20", "size": "5"},
+                     {"price": "0.55", "size": "5"}, {"price": "0.64", "size": "5"}],
+        }
+        best_ask, best_bid = self._parse(data)
+        assert best_ask == 0.66, "best ask must be the lowest ask, not asks[0]"
+        assert best_bid == 0.64, "best bid must be the highest bid, not bids[0]"
+        # Sanity: this yields a tight, realistic spread, not the fake 0.98
+        assert (best_ask - best_bid) < 0.05
+
+    def test_one_sided_book_asks_only(self):
+        data = {"asks": [{"price": "0.40"}, {"price": "0.45"}], "bids": []}
+        best_ask, best_bid = self._parse(data)
+        assert best_ask == 0.40
+        assert best_bid == 0.0
+
+    def test_empty_book(self):
+        best_ask, best_bid = self._parse({"asks": [], "bids": []})
+        assert best_ask == 0.0 and best_bid == 0.0
+
+    def test_crossed_book_still_picks_extremes(self):
+        # Degenerate/crossed book: best ask below best bid. Still pick min ask / max bid.
+        data = {"asks": [{"price": "0.55"}, {"price": "0.50"}],
+                "bids": [{"price": "0.52"}, {"price": "0.60"}]}
+        best_ask, best_bid = self._parse(data)
+        assert best_ask == 0.50
+        assert best_bid == 0.60
+
+
+class TestExactBucketResolutionWidth:
+    """Regression guard for the 2026-06 Celsius zero-width bucket bug.
+
+    The invariant is about the EFFECTIVE resolution window, not raw bucket width.
+    get_bucket_probability pads an exact (lb==ub) bucket by ±0.5°F. That ±0.5°F
+    padding is exactly right for a Fahrenheit exact bucket (1°F resolution
+    granularity), so (90.0, 90.0) is legitimate. But a Celsius market resolves on
+    a whole degree Celsius ≈ 1.8°F, so a Celsius exact bucket must be parsed WIDER
+    than zero — otherwise the ±0.5°F padding under-covers the true window,
+    collapsing P(YES) and manufacturing a fake NO edge. That was the v1 bug; it
+    flipped real historical trade id 120 (Hong Kong 31°C) from a booked win to an
+    actual loss once the correct wider bucket was applied.
+    """
+    import pytest
+
+    @pytest.mark.parametrize("q,min_effective_width", [
+        # Celsius exact → effective window must be ≈1.8°F (1°C), so raw width > 0.
+        ("Will the highest temperature in Hong Kong be 31°C on June 29?", 1.6),
+        ("Will the highest temperature in Istanbul be 29°C on June 29?", 1.6),
+        ("Will the highest temperature in Madrid be 36°C on June 28?", 1.6),
+        ("Will the lowest temperature in Tokyo be 22°C on June 30?", 1.6),
+        # Fahrenheit exact → 1°F window from padding alone is correct.
+        ("Will the highest temperature in NYC be 90°F on July 1?", 0.9),
+    ])
+    def test_effective_window_covers_resolution_granularity(self, q, min_effective_width):
+        lb, ub = parse_bucket(q)
+        assert lb is not None and ub is not None, f"exact bucket should parse: {q!r}"
+        effective_width = (ub + 0.5) - (lb - 0.5)  # mirror get_bucket_probability padding
+        assert effective_width >= min_effective_width, (
+            f"{q!r}: effective window {effective_width:.2f}°F under-covers "
+            f"resolution granularity (need ≥ {min_effective_width}°F)"
+        )

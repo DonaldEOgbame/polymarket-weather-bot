@@ -84,18 +84,6 @@ def _fetch_actuals(coords, date_str, session, cache):
     return result
 
 
-def _norm_cdf(x):
-    return 0.5 * (1.0 + math.erf(x / math.sqrt(2.0)))
-
-
-def _bucket_prob(mean, std, lb, ub):
-    """Mirror weather.get_bucket_probability: ±0.5°F padding, open-ended bounds."""
-    std = max(std, 0.5)
-    lo = (lb - 0.5) if lb is not None else -1000.0
-    hi = (ub + 0.5) if ub is not None else 1000.0
-    return max(0.0, min(1.0, _norm_cdf((hi - mean) / std) - _norm_cdf((lo - mean) / std)))
-
-
 def _in_bucket(actual, lb, ub):
     lo = (lb - 0.5) if lb is not None else -1e9
     hi = (ub + 0.5) if ub is not None else 1e9
