@@ -7,6 +7,7 @@ from config import (
     OPEN_METEO_URL, BASE_FORECAST_ERROR,
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION, CONVECTIVE_CITIES,
     GFS_BIAS_CORRECTIONS, MODEL_BIAS_CORRECTIONS,
+    ENABLE_PROB_CALIBRATION, PROB_CALIBRATION_INTERCEPT, PROB_CALIBRATION_SLOPE,
 )
 
 def _pstdev(data):
@@ -51,7 +52,7 @@ STATIONS = {
     "Buenos Aires": {"lat": -34.8222, "lon": -58.5358, "region": "GLOBAL"},
     "Sao Paulo": {"lat": -23.4356, "lon": -46.4731, "region": "GLOBAL"},
     # Europe
-    "London": {"lat": 51.5053, "lon": 0.0553, "region": "EU"},
+    "London": {"lat": 51.4700, "lon": -0.4543, "region": "EU"},  # Heathrow EGLL — was (51.5053, +0.0553), east London, wrong side of prime meridian (~1.7°F off)
     "Paris": {"lat": 48.9694, "lon": 2.4414, "region": "EU"},
     "Berlin": {"lat": 52.3667, "lon": 13.5033, "region": "EU"},
     "Amsterdam": {"lat": 52.3105, "lon": 4.7683, "region": "EU"},
@@ -72,7 +73,7 @@ STATIONS = {
     # Asia-Pacific
     "Tokyo": {"lat": 35.5494, "lon": 139.7798, "region": "AP"},
     "Hong Kong": {"lat": 22.3080, "lon": 113.9185, "region": "AP"},
-    "Seoul": {"lat": 37.4602, "lon": 126.4407, "region": "AP"},
+    "Seoul": {"lat": 37.5665, "lon": 126.9780, "region": "AP"},  # Seoul city (SI) — was (37.46, 126.44) = Incheon, ~6.6°F too cold vs the Seoul station markets resolve on
     "Shanghai": {"lat": 31.1443, "lon": 121.8083, "region": "AP"},
     "Beijing": {"lat": 40.0799, "lon": 116.5847, "region": "AP"},
     "Guangzhou": {"lat": 23.3924, "lon": 113.2988, "region": "AP"},
@@ -275,15 +276,44 @@ def get_signal_engine(city_name, target_date, is_high=True, hours_to_resolution=
         "convective_inflated": convective_inflated,
     }
 
+def _calibrate_prob(p):
+    """Platt-scale the raw Gaussian bucket probability onto the empirically observed
+    hit-rate curve. The raw normal-CDF prob is ~1.9x overconfident in the low-p region
+    where the bot bets (measured on 96,307 resolved signals); this remap pulls it back
+    onto the reliability curve so the edge calculation is honest. Monotonic, so it never
+    reorders opportunities — it only rescales confidence. Identity if disabled."""
+    if not ENABLE_PROB_CALIBRATION:
+        return p
+    # clamp away from 0/1 for the logit; degenerate probs pass through
+    if p <= 0.0 or p >= 1.0:
+        return p
+    # Only correct the low-probability region (p < 0.5). That is where the reliability
+    # data is dense (tens of thousands of narrow-bucket signals) and where every NO bet
+    # lives; the high bins are sparse (n<100) and calibrating a wide, already-likely
+    # bucket up toward 1.0 on that thin evidence would over-inflate it. Blend smoothly
+    # to identity as p approaches 0.5 so there's no discontinuity at the boundary.
+    if p >= 0.5:
+        return p
+    eps = 1e-4
+    pc = min(max(p, eps), 1.0 - eps)
+    logit = math.log(pc / (1.0 - pc))
+    z = PROB_CALIBRATION_INTERCEPT + PROB_CALIBRATION_SLOPE * logit
+    cal = 1.0 / (1.0 + math.exp(-z))
+    # linear taper of the correction: full strength at p=0, fading to none at p=0.5,
+    # keeping the function continuous and monotonic across the whole [0,1] range.
+    w = (0.5 - p) / 0.5
+    return p + w * (cal - p)
+
+
 def get_bucket_probability(engine_result, bucket_lower, bucket_upper):
     mean = engine_result["ensemble_mean"]
     std = engine_result["ensemble_std"]
-    
+
     std = max(std, 0.5)
-    
+
     lb = bucket_lower if bucket_lower is not None else -1000.0
     ub = bucket_upper if bucket_upper is not None else 1000.0
-    
+
     if bucket_lower is not None and bucket_upper is not None:
         if bucket_lower == bucket_upper:
             lb -= 0.5
@@ -297,6 +327,17 @@ def get_bucket_probability(engine_result, bucket_lower, bucket_upper):
         ub += 0.5
 
     prob = _norm_cdf(ub, loc=mean, scale=std) - _norm_cdf(lb, loc=mean, scale=std)
+    prob = max(0.0, min(1.0, float(prob)))
+
+    # Calibrate ONLY closed (bounded) buckets — exact-degree and narrow ranges. Those
+    # are where the overconfidence lives (the model calls them ~15% but they hit ~28%)
+    # and where every NO bet is placed. Open-ended above/below buckets are left raw:
+    # they sit near 0.5 by construction and are self-consistent (P(above)+P(below)=1),
+    # so a one-sided remap there would break that complementarity and is not supported
+    # by the reliability data (which is dominated by narrow buckets).
+    is_bounded = bucket_lower is not None and bucket_upper is not None
+    if is_bounded:
+        prob = _calibrate_prob(prob)
     return max(0.0, min(1.0, float(prob)))
 
 def prefetch_signal_engines(opportunities) -> dict:

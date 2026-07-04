@@ -289,11 +289,36 @@ class Executor:
         for pos in positions:
             self._check_exit_for_position(pos)
 
+    @staticmethod
+    def _target_date_passed(target_date, now):
+        """True if this position's weather target date is in the past (UTC).
+        Once it has passed, the outcome is fixed and only resolution ($1/$0)
+        should close the position — a paper market-exit at a stale/thin quote
+        would fabricate a fill (see _check_exit_for_position)."""
+        if not target_date:
+            return False
+        return target_date < now.strftime("%Y-%m-%d")
+
     def _check_exit_for_position(self, pos):
         entry_time = datetime.fromisoformat(pos["entry_time"])
         now = datetime.now(timezone.utc)
         hold_minutes = (now - entry_time).total_seconds() / 60.0
         if hold_minutes < 30:
+            return
+
+        # Once the target date has passed the temperature is already realized and
+        # the market is converging to $1/$0. Do NOT run the paper edge-decay /
+        # stop-loss market-exit path here: on a resolving book the only resting
+        # quotes are extreme (~0.999) with no real depth, and booking a fill there
+        # fabricated the 5 "edge decayed @ 0.999" exits in the historical DB —
+        # phantom fills at a price never once observed with size (max NO in 44,879
+        # logged signals was 0.81). Leave it for check_resolved_positions() to
+        # settle at the true resolution value instead.
+        if self._target_date_passed(pos.get("target_date"), now):
+            logging.debug(
+                f"Exit check skipped for {pos['market_id']} ({pos['side']}): target "
+                f"date {pos.get('target_date')} passed — holding for resolution settlement."
+            )
             return
 
         ask_price, bid_price = get_realtime_price(pos["token_id"])

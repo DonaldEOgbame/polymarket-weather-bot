@@ -1,0 +1,19 @@
+pred_bin_low,n,predicted_prob,observed_hit_rate,overconfidence_ratio
+0.0,24286,0.053,0.117,2.21
+0.1,16017,0.139,0.304,2.19
+0.2,3152,0.233,0.353,1.52
+0.3,829,0.337,0.545,1.62
+0.4,394,0.439,0.792,1.8
+0.5,66,0.507,1.0,1.97
+0.6,47,0.636,0.979,1.54
+0.7,83,0.732,0.916,1.25
+0.9,5,0.928,1.0,1.08
+
+metric,value
+signals_examined,44879
+forecasts_scored_sigma,213
+mean_z,0.144
+std_z,0.69
+brier_score,0.1667
+stale_bucket_rows_pct,0.328
+verdict,reliability shows 2-2.5x overconfidence on low-p buckets

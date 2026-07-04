@@ -1,0 +1,21 @@
+id,city,date,field,ensemble_mean,actual,error,z_score,ensemble_std,model_spread,n_models,no_bet_correct,per_model_error,failure_category
+120,Hong Kong,2026-06-29,high,86.95,87.1,0.14,0.09,1.59,1.5,4,True,"{""ecmwf_ifs025"": -0.7, ""jma_gsm"": 0.0, ""icon_global"": -0.1, ""gem_global"": 0.8}",
+121,Istanbul,2026-06-28,high,82.07,78.4,-3.67,-1.9,1.93,2.6,4,True,"{""ecmwf_ifs025"": 2.7, ""icon_global"": 4.4, ""gfs_global"": 3.7, ""gem_global"": 5.3}",
+122,Madrid,2026-06-28,high,93.25,94.2,0.95,0.56,1.69,1.7,4,True,"{""ecmwf_ifs025"": -0.6, ""icon_global"": -1.8, ""gfs_global"": -0.1, ""gem_global"": -1.5}",
+123,Istanbul,2026-06-28,high,82.07,78.4,-3.67,-1.9,1.93,2.6,4,True,"{""ecmwf_ifs025"": 2.7, ""icon_global"": 4.4, ""gfs_global"": 3.7, ""gem_global"": 5.3}",
+124,Wellington,2026-06-30,high,52.32,51.7,-0.62,-0.42,1.48,1.0,4,True,"{""ecmwf_ifs025"": 0.6, ""jma_gsm"": 0.6, ""icon_global"": 1.1, ""gem_global"": 0.1}",
+125,Warsaw,2026-06-28,high,100.65,100.0,-0.65,-0.46,1.41,0.3,4,True,"{""ecmwf_ifs025"": 0.5, ""icon_global"": 0.7, ""gfs_global"": 0.8, ""gem_global"": 0.8}",
+126,Cape Town,2026-06-30,high,56.01,59.1,3.09,2.19,1.41,0.3,4,False,"{""ecmwf_ifs025"": -3.1, ""icon_global"": -3.1, ""gem_global"": -3.2, ""jma_gsm"": -2.9}",NO_BET_WRONG_actual_in_bucket
+127,Tokyo,2026-06-30,low,69.69,69.5,-0.19,-0.09,2.15,3.1,4,True,"{""ecmwf_ifs025"": 0.2, ""jma_gsm"": -0.9, ""icon_global"": 2.2, ""gem_global"": -0.3}",
+128,Sao Paulo,2026-06-28,high,75.82,77.7,1.88,0.91,2.08,2.8,4,True,"{""ecmwf_ifs025"": -2.6, ""icon_global"": -0.4, ""gem_global"": -1.3, ""jma_gsm"": -3.2}",
+129,Seoul,2026-06-29,low,69.84,68.7,-1.14,-0.61,1.87,2.1,4,True,"{""ecmwf_ifs025"": 0.3, ""jma_gsm"": 2.3, ""icon_global"": 1.6, ""gem_global"": 0.2}",
+130,Istanbul,2026-06-29,high,88.97,84.9,-4.07,-2.39,1.71,1.8,4,True,"{""ecmwf_ifs025"": 3.8, ""icon_global"": 4.6, ""gfs_global"": 3.3, ""gem_global"": 5.1}",
+131,Wellington,2026-07-01,high,52.24,52.4,0.16,0.1,1.66,1.6,4,True,"{""ecmwf_ifs025"": -0.9, ""jma_gsm"": 0.7, ""icon_global"": -0.5, ""gem_global"": 0.3}",
+132,Ankara,2026-07-01,high,86.47,88.6,2.13,0.95,2.23,3.1,4,True,"{""ecmwf_ifs025"": -2.5, ""icon_global"": -1.0, ""gfs_global"": -3.8, ""gem_global"": -0.7}",
+133,Tokyo,2026-07-01,low,70.03,68.9,-1.13,-0.53,2.13,2.9,4,True,"{""ecmwf_ifs025"": 0.3, ""jma_gsm"": 1.5, ""icon_global"": 2.9, ""gem_global"": 0.0}",
+134,Hong Kong,2026-07-01,low,81.36,83.1,1.74,0.8,2.17,2.3,4,True,"{""ecmwf_ifs025"": -2.8, ""jma_gsm"": -0.5, ""icon_global"": -2.6, ""gem_global"": -0.6}",
+135,Hong Kong,2026-07-01,high,89.3,88.5,-0.8,-0.46,1.76,2.1,4,True,"{""ecmwf_ifs025"": -0.1, ""jma_gsm"": 1.1, ""icon_global"": 2.0, ""gem_global"": 0.7}",
+136,Istanbul,2026-07-01,high,86.8,84.2,-2.6,-1.54,1.68,1.8,4,True,"{""ecmwf_ifs025"": 2.7, ""icon_global"": 1.7, ""gfs_global"": 3.5, ""gem_global"": 3.1}",
+137,London,2026-07-02,low,58.0,62.9,4.9,1.89,2.59,2.4,4,False,"{""ecmwf_ifs025"": -3.6, ""icon_global"": -5.9, ""gfs_global"": -6.0, ""gem_global"": -4.9}",NO_BET_WRONG_actual_in_bucket
+138,Tokyo,2026-07-02,low,70.53,70.6,0.07,0.03,2.44,1.8,4,False,"{""ecmwf_ifs025"": 0.3, ""jma_gsm"": 0.3, ""icon_global"": -0.2, ""gem_global"": -1.5}",NO_BET_WRONG_actual_in_bucket
+139,Wellington,2026-07-02,high,53.0,53.7,0.7,0.25,2.81,3.2,4,True,"{""ecmwf_ifs025"": -2.5, ""jma_gsm"": 0.7, ""icon_global"": -0.4, ""gem_global"": 0.3}",

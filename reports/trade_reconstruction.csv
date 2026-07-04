@@ -1,0 +1,21 @@
+id,city,date,field,v1_bucket,corrected_bucket,side,fill,size,actual,no_wins,booked_pnl,corrected_pnl,status,booked_mechanism
+120,Hong Kong,2026-06-29,high,87.8-87.8,87.4-88.2,NO,0.55,2.0,87.1,False,1.6325456363636361,-2.0,CLOSED,resolution
+121,Istanbul,2026-06-28,high,84.2-84.2,83.8-84.6,NO,0.56,2.0,78.4,True,1.5676787499999998,1.57,CLOSED,resolution
+122,Madrid,2026-06-28,high,96.8-96.8,96.4-97.2,NO,0.43,2.0,94.2,True,2.6511627906976747,2.65,CLOSED,resolution
+123,Istanbul,2026-06-28,high,86.0-86.0,85.6-86.4,NO,0.6,2.0,78.4,True,1.3333333333333335,1.33,CLOSED,resolution
+124,Wellington,2026-06-30,high,53.6-53.6,53.2-54.0,NO,0.48,2.0,51.7,True,2.162291875,2.17,CLOSED,resolution
+125,Warsaw,2026-06-28,high,98.6-98.6,98.2-99.0,NO,0.58,2.0,100.0,True,1.4482758620689657,1.45,CLOSED,resolution
+126,Cape Town,2026-06-30,high,59.0-59.0,59.0-59.0,NO,0.6,2.0,59.1,False,,-2.0,OPEN,open
+127,Tokyo,2026-06-30,low,71.6-71.6,71.2-72.0,NO,0.54,2.0,69.5,True,1.6998149999999996,1.7,CLOSED,resolution
+128,Sao Paulo,2026-06-28,high,78.8-78.8,78.4-79.2,NO,0.61,2.0,77.7,True,1.278688524590164,1.28,CLOSED,resolution
+129,Seoul,2026-06-29,low,69.8-69.8,69.4-70.2,NO,0.56,2.0,68.7,True,1.5714285714285712,1.57,CLOSED,resolution
+130,Istanbul,2026-06-29,high,80.6-80.6,80.2-81.0,NO,0.49,2.0,84.9,True,2.077347142857143,2.08,CLOSED,resolution
+131,Wellington,2026-07-01,high,53.2-54.0,53.2-54.0,NO,0.48,2.0,52.4,True,,2.17,OPEN,open
+132,Ankara,2026-07-01,high,89.2-90.0,89.2-90.0,NO,0.59,2.0,88.6,True,,1.39,OPEN,open
+133,Tokyo,2026-07-01,low,71.6-71.6,71.6-71.6,NO,0.53,2.0,68.9,True,,1.77,OPEN,open
+134,Hong Kong,2026-07-01,low,82.4-82.4,82.4-82.4,NO,0.57,2.0,83.1,True,,1.51,OPEN,open
+135,Hong Kong,2026-07-01,high,91.0-91.8,91.0-91.8,NO,0.59,2.0,88.5,True,,1.39,OPEN,open
+136,Istanbul,2026-07-01,high,82.0-82.8,82.0-82.8,NO,0.49,2.0,84.2,True,,2.08,OPEN,open
+137,London,2026-07-02,low,62.2-63.0,62.2-63.0,NO,0.55,2.0,62.9,False,,-2.0,OPEN,open
+138,Tokyo,2026-07-02,low,69.4-70.2,69.4-70.2,NO,0.56,2.0,70.6,False,,-2.0,OPEN,open
+139,Wellington,2026-07-02,high,55.0-55.8,55.0-55.8,NO,0.48,2.0,53.7,True,,2.17,OPEN,open

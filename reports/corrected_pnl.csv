@@ -1,0 +1,10 @@
+metric,value
+closed_trades_booked_pnl,17.42
+closed_trades_corrected_pnl,13.8
+open_trades_marked_to_settlement,6.48
+total_corrected_pnl,20.28
+n_trades,20
+n_closed,10
+no_bet_win_rate_corrected,0.8
+starting_bankroll,40.0
+all_trades_side,NO (20/20)

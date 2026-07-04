@@ -8,6 +8,7 @@ primary_region = "lhr"
   PAPER_MODE = "true"
   DB_PATH = "/data/bot.db"
   PORT = "8080"
+  STARTING_BANKROLL = "20.0"
 
 [[mounts]]
   source = "bot_data"
