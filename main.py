@@ -14,6 +14,7 @@ from executor import Executor
 from alerts import send_daily_summary, send_error_alert, send_circuit_breaker_alert
 from config import SCAN_INTERVAL_MINUTES, MONITOR_INTERVAL_MINUTES, DAILY_LOSS_LIMIT
 from weather import log_model_accuracy, get_station_coords, prefetch_signal_engines
+from metar import resolved_extreme_f
 from utils import get_session
 import schedule
 
@@ -105,42 +106,23 @@ def check_resolutions():
 
             # is_high is now stored on the trade; fall back to high if missing.
             is_high = bool(is_high_val) if is_high_val is not None else True
-            temp_field = "temperature_2m_max" if is_high else "temperature_2m_min"
-
-            params = {
-                "latitude": coords["lat"],
-                "longitude": coords["lon"],
-                "start_date": target_date,
-                "end_date": target_date,
-                "daily": temp_field,
-                "timezone": "auto",
-                "temperature_unit": "fahrenheit",
-            }
 
             try:
-                resp = get_session().get(
-                    "https://archive-api.open-meteo.com/v1/archive",
-                    params=params,
-                    timeout=15,
-                )
-                if resp.status_code == 200:
-                    data = resp.json()
-                    actual_temps = data.get("daily", {}).get(temp_field, [])
-                    if actual_temps and actual_temps[0] is not None:
-                        actual_temp = actual_temps[0]
-                        for model_name, forecast_temp in raw_models.items():
-                            log_model_accuracy(city, target_date, model_name, forecast_temp, actual_temp)
-                        execute_query("UPDATE trades SET resolution_logged=1 WHERE id=?", (t["id"],))
-                        logging.info(
-                            f"Model accuracy logged for {city} {target_date}: actual={actual_temp}°F"
-                        )
-                elif resp.status_code == 400:
-                    logging.debug(
-                        f"Archive data not yet available for {city} {target_date} (HTTP 400)"
+                # Verify against the METAR feed — the SAME source Polymarket resolves
+                # against (Wunderground = airport METAR). Learning per-model bias
+                # against ERA5 taught the model to hit the wrong ruler; the actual is
+                # rounded to whole °C to match resolution precision.
+                actual_temp = resolved_extreme_f(city, target_date, is_high)
+                if actual_temp is not None:
+                    for model_name, forecast_temp in raw_models.items():
+                        log_model_accuracy(city, target_date, model_name, forecast_temp, actual_temp)
+                    execute_query("UPDATE trades SET resolution_logged=1 WHERE id=?", (t["id"],))
+                    logging.info(
+                        f"Model accuracy logged (METAR) for {city} {target_date}: actual={actual_temp:.1f}°F"
                     )
                 else:
-                    logging.warning(
-                        f"Archive API returned {resp.status_code} for {city} {target_date}"
+                    logging.debug(
+                        f"METAR not yet published for {city} {target_date} — will retry next cycle"
                     )
             except Exception as e:
                 logging.error(f"Error fetching historical resolution for {city} {target_date}: {e}")
