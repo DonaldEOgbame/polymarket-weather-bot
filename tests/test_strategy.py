@@ -90,3 +90,53 @@ class TestEdgeCalculation:
         # don't always sum to 1.0 (spread exists), but the formulas should be consistent
         assert abs(yes_edge - 0.10) < 0.001
         assert abs(no_edge - (-0.13)) < 0.001
+
+
+class TestForecastMarginGate:
+    """The margin gate ('stop cutting it close'): only bet when the ensemble mean is
+    a safe distance from the bucket boundary in the direction the bet needs."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+    def test_no_bet_needs_mean_clear_outside_bucket(self):
+        from strategy import forecast_margin_ok
+        # bucket 80-80 (padded 79.5-80.5). NO bet, margin 2.5.
+        assert forecast_margin_ok("NO", 76.0, 80.0, 80.0, 2.5) is True   # 76 << 79.5-2.5
+        assert forecast_margin_ok("NO", 79.0, 80.0, 80.0, 2.5) is False  # only 0.5 clear
+        assert forecast_margin_ok("NO", 83.5, 80.0, 80.0, 2.5) is True   # 83.5 >> 80.5+2.5
+
+    def test_yes_bet_needs_mean_clear_inside_bucket(self):
+        from strategy import forecast_margin_ok
+        # wide bucket 70-90 (padded 69.5-90.5), YES bet, margin 2.5
+        assert forecast_margin_ok("YES", 80.0, 70.0, 90.0, 2.5) is True   # centre, clear
+        assert forecast_margin_ok("YES", 71.0, 70.0, 90.0, 2.5) is False  # within 2.5 of low edge
+
+    def test_open_ended_and_zero_margin_always_pass(self):
+        from strategy import forecast_margin_ok
+        assert forecast_margin_ok("NO", 80.0, None, 85.0, 2.5) is True  # open-ended
+        assert forecast_margin_ok("NO", 80.0, 79.9, 80.1, 0.0) is True  # margin disabled
+
+
+class TestParseTargetDate:
+    """Date must come from the market's 'on <DATE>' resolution text, not the endDate
+    timestamp whose UTC-close convention drifted and mis-dated far-offset stations."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+    def test_prefers_description_date(self):
+        from scanner import parse_target_date
+        from datetime import datetime, timezone
+        # endDate is the NEXT day at 00:00Z (old convention) but the market is "on 1 Jul"
+        end = datetime(2026, 7, 2, 0, 0, tzinfo=timezone.utc)
+        desc = "...highest temperature recorded at the Wellington Intl Airport Station in degrees Celsius on 1 Jul '26."
+        assert parse_target_date(desc, end) == "2026-07-01"
+
+    def test_falls_back_to_enddate_utc(self):
+        from scanner import parse_target_date
+        from datetime import datetime, timezone
+        end = datetime(2026, 7, 4, 12, 0, tzinfo=timezone.utc)
+        assert parse_target_date("no date phrase here", end) == "2026-07-04"
+
+    def test_full_month_name(self):
+        from scanner import parse_target_date
+        assert parse_target_date("... on 5 January '26.", None) == "2026-01-05"

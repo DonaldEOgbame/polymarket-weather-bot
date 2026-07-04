@@ -163,17 +163,41 @@ class TestProbabilityCalibration:
 
 
 class TestStationCoordinates:
-    """Guard the two coordinates fixed 2026-07-04 (were resolving on the wrong station)."""
+    """Coordinates must match the exact station Polymarket names as the resolution
+    source (verified 2026-07-04 from every live market's description). These pin the
+    two that are counterintuitive: Polymarket resolves Seoul on INCHEON and London on
+    LONDON CITY AIRPORT — NOT the city centre / Heathrow."""
     import sys, os
     sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-    def test_seoul_is_city_not_incheon(self):
+    def test_seoul_resolves_on_incheon(self):
         from weather import STATIONS
-        lat, lon = STATIONS["Seoul"]["lat"], STATIONS["Seoul"]["lon"]
-        # Seoul city ~ (37.57, 126.98); Incheon airport ~ 126.44 read ~6.6°F too cold.
-        assert lon > 126.8, f"Seoul lon {lon} looks like Incheon, not the Seoul city station"
+        lon = STATIONS["Seoul"]["lon"]
+        # Incheon (RKSI) ~ 126.44, well west of the Seoul city centre (126.98).
+        assert lon < 126.6, f"Seoul must resolve on Incheon (~126.44), got lon {lon}"
 
-    def test_london_west_of_prime_meridian(self):
+    def test_london_resolves_on_city_airport(self):
         from weather import STATIONS
         lon = STATIONS["London"]["lon"]
-        assert lon < 0, f"London lon {lon} is east of the prime meridian (wrong station)"
+        # London City Airport (EGLC) ~ +0.049, just east of the meridian — NOT
+        # Heathrow (-0.45). Pin tightly so a future "fix" back to Heathrow fails here.
+        assert 0.0 < lon < 0.1, f"London must resolve on City Airport (~+0.049), got lon {lon}"
+
+
+class TestMetarStationMapping:
+    """Every forecast city must have an ICAO/timezone mapping to Polymarket's METAR
+    resolution source, or trades on it can never be verified against the real ruler."""
+    import sys, os
+    sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
+
+    def test_every_station_has_icao(self):
+        from weather import STATIONS
+        from metar import STATION_ICAO
+        missing = [c for c in STATIONS if c not in STATION_ICAO]
+        assert not missing, f"cities with no METAR ICAO mapping: {missing}"
+
+    def test_icao_and_timezone_shape(self):
+        from metar import STATION_ICAO
+        for city, (icao, tz) in STATION_ICAO.items():
+            assert 3 <= len(icao) <= 4 and icao.isalnum(), f"{city}: bad ICAO {icao!r}"
+            assert "/" in tz, f"{city}: bad IANA tz {tz!r}"

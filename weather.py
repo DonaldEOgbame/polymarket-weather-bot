@@ -8,6 +8,7 @@ from config import (
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION, CONVECTIVE_CITIES,
     GFS_BIAS_CORRECTIONS, MODEL_BIAS_CORRECTIONS,
     ENABLE_PROB_CALIBRATION, PROB_CALIBRATION_INTERCEPT, PROB_CALIBRATION_SLOPE,
+    METAR_WARM_CORRECTION_F,
 )
 
 def _pstdev(data):
@@ -31,66 +32,73 @@ _FORECAST_CACHE: dict = {}
 _FORECAST_TTL_SECONDS = 480  # 8 minutes — safe within a 10-min scan interval
 from utils import get_session
 
+# Coordinates are the EXACT airport/station Polymarket names as each market's
+# resolution source (verified 2026-07-04 from every live market's description text:
+# "recorded at the <STATION>"). Matching the resolver's station is critical — a
+# wrong station is a systematic forecast error no model quality can fix. Two prior
+# "fixes" were WRONG and are reverted here: Seoul resolves on INCHEON (not the city
+# centre) and London on LONDON CITY AIRPORT (not Heathrow). "region" selects the
+# model-weight blend and is independent of the exact coordinate.
 STATIONS = {
     # North America
-    "NYC": {"lat": 40.7769, "lon": -73.8740, "region": "US"},
-    "New York": {"lat": 40.7769, "lon": -73.8740, "region": "US"},
-    "Chicago": {"lat": 41.9742, "lon": -87.9073, "region": "US"},
-    "Miami": {"lat": 25.7959, "lon": -80.2870, "region": "US"},
-    "Dallas": {"lat": 32.8471, "lon": -96.8518, "region": "US"},
-    "Los Angeles": {"lat": 34.0522, "lon": -118.2437, "region": "US"},
-    "San Francisco": {"lat": 37.6213, "lon": -122.3790, "region": "US"},
-    "Austin": {"lat": 30.1944, "lon": -97.6700, "region": "US"},
-    "Houston": {"lat": 29.7604, "lon": -95.3698, "region": "US"},
-    "Seattle": {"lat": 47.4502, "lon": -122.3088, "region": "US"},
-    "Denver": {"lat": 39.8561, "lon": -104.6737, "region": "US"},
-    "Atlanta": {"lat": 33.6407, "lon": -84.4277, "region": "US"},
-    "Toronto": {"lat": 43.6777, "lon": -79.6248, "region": "US"},
-    "Mexico City": {"lat": 19.4363, "lon": -99.0721, "region": "US"},
-    "Panama": {"lat": 8.9824, "lon": -79.5199, "region": "US"},
+    "NYC": {"lat": 40.7772, "lon": -73.8726, "region": "US"},          # LaGuardia (KLGA)
+    "New York": {"lat": 40.7772, "lon": -73.8726, "region": "US"},     # LaGuardia (KLGA)
+    "Chicago": {"lat": 41.9742, "lon": -87.9073, "region": "US"},      # O'Hare (KORD)
+    "Miami": {"lat": 25.7932, "lon": -80.2906, "region": "US"},        # Miami Intl (KMIA)
+    "Dallas": {"lat": 32.8471, "lon": -96.8518, "region": "US"},       # Love Field (KDAL)
+    "Los Angeles": {"lat": 33.9416, "lon": -118.4085, "region": "US"}, # LAX (KLAX)
+    "San Francisco": {"lat": 37.6213, "lon": -122.3790, "region": "US"}, # SFO (KSFO)
+    "Austin": {"lat": 30.1975, "lon": -97.6664, "region": "US"},       # Austin-Bergstrom (KAUS)
+    "Houston": {"lat": 29.6454, "lon": -95.2789, "region": "US"},      # Hobby (KHOU)
+    "Seattle": {"lat": 47.4502, "lon": -122.3088, "region": "US"},     # Sea-Tac (KSEA)
+    "Denver": {"lat": 39.7017, "lon": -104.7527, "region": "US"},      # Buckley SFB (KBKF)
+    "Atlanta": {"lat": 33.6407, "lon": -84.4277, "region": "US"},      # Hartsfield (KATL)
+    "Toronto": {"lat": 43.6777, "lon": -79.6248, "region": "US"},      # Pearson (CYYZ)
+    "Mexico City": {"lat": 19.4363, "lon": -99.0721, "region": "US"},  # Benito Juárez (MMMX)
+    "Panama": {"lat": 8.9733, "lon": -79.5556, "region": "US"},        # Marcos A. Gelabert (MPMG)
     # South America (GFS unavailable here — GLOBAL blend, no GFS)
-    "Buenos Aires": {"lat": -34.8222, "lon": -58.5358, "region": "GLOBAL"},
-    "Sao Paulo": {"lat": -23.4356, "lon": -46.4731, "region": "GLOBAL"},
+    "Buenos Aires": {"lat": -34.8222, "lon": -58.5358, "region": "GLOBAL"}, # Ezeiza/Pistarini (SAEZ)
+    "Sao Paulo": {"lat": -23.4356, "lon": -46.4731, "region": "GLOBAL"},    # Guarulhos (SBGR)
     # Europe
-    "London": {"lat": 51.4700, "lon": -0.4543, "region": "EU"},  # Heathrow EGLL — was (51.5053, +0.0553), east London, wrong side of prime meridian (~1.7°F off)
-    "Paris": {"lat": 48.9694, "lon": 2.4414, "region": "EU"},
-    "Berlin": {"lat": 52.3667, "lon": 13.5033, "region": "EU"},
-    "Amsterdam": {"lat": 52.3105, "lon": 4.7683, "region": "EU"},
-    "Helsinki": {"lat": 60.3172, "lon": 24.9633, "region": "EU"},
-    "Istanbul": {"lat": 41.2622, "lon": 28.7278, "region": "EU"},
-    "Madrid": {"lat": 40.4719, "lon": -3.5626, "region": "EU"},
-    "Milan": {"lat": 45.6306, "lon": 8.7231, "region": "EU"},
-    "Moscow": {"lat": 55.5915, "lon": 37.2615, "region": "EU"},
-    "Munich": {"lat": 48.3537, "lon": 11.7750, "region": "EU"},
-    "Warsaw": {"lat": 52.1657, "lon": 20.9671, "region": "EU"},
+    "London": {"lat": 51.5048, "lon": 0.0495, "region": "EU"},         # London City Airport (EGLC) — NOT Heathrow
+    "Paris": {"lat": 48.9694, "lon": 2.4414, "region": "EU"},          # Le Bourget (LFPB)
+    "Berlin": {"lat": 52.3667, "lon": 13.5033, "region": "EU"},        # BER (EDDB)
+    "Amsterdam": {"lat": 52.3105, "lon": 4.7683, "region": "EU"},      # Schiphol (EHAM)
+    "Helsinki": {"lat": 60.3172, "lon": 24.9633, "region": "EU"},      # Vantaa (EFHK)
+    "Istanbul": {"lat": 41.2753, "lon": 28.7519, "region": "EU"},      # Istanbul Airport (LTFM)
+    "Madrid": {"lat": 40.4936, "lon": -3.5668, "region": "EU"},        # Barajas (LEMD)
+    "Milan": {"lat": 45.6306, "lon": 8.7231, "region": "EU"},          # Malpensa (LIMC)
+    "Moscow": {"lat": 55.4088, "lon": 37.9063, "region": "EU"},        # Domodedovo (UUDD)
+    "Munich": {"lat": 48.3537, "lon": 11.7750, "region": "EU"},        # Munich (EDDM)
+    "Warsaw": {"lat": 52.1657, "lon": 20.9671, "region": "EU"},        # Chopin (EPWA)
     # Middle East / Africa (GFS unavailable — GLOBAL blend, no GFS).
     # Ankara stays EU: ecmwf_ifs025 + gfs_global both return data there.
-    "Tel Aviv": {"lat": 31.9980, "lon": 34.9067, "region": "GLOBAL"},
-    "Ankara": {"lat": 40.1280, "lon": 32.9949, "region": "EU"},
-    "Jeddah": {"lat": 21.6796, "lon": 39.1566, "region": "GLOBAL"},
-    "Lagos": {"lat": 6.5774, "lon": 3.3212, "region": "GLOBAL"},
-    "Cape Town": {"lat": -33.9648, "lon": 18.6017, "region": "GLOBAL"},
+    "Tel Aviv": {"lat": 32.0114, "lon": 34.8867, "region": "GLOBAL"},  # Ben Gurion (LLBG)
+    "Ankara": {"lat": 40.1281, "lon": 32.9951, "region": "EU"},        # Esenboğa (LTAC)
+    "Jeddah": {"lat": 21.6796, "lon": 39.1566, "region": "GLOBAL"},    # King Abdulaziz (OEJN)
+    "Lagos": {"lat": 6.5774, "lon": 3.3212, "region": "GLOBAL"},       # Murtala Muhammed (DNMM)
+    "Cape Town": {"lat": -33.9648, "lon": 18.6017, "region": "GLOBAL"}, # Cape Town Intl (FACT)
     # Asia-Pacific
-    "Tokyo": {"lat": 35.5494, "lon": 139.7798, "region": "AP"},
-    "Hong Kong": {"lat": 22.3080, "lon": 113.9185, "region": "AP"},
-    "Seoul": {"lat": 37.5665, "lon": 126.9780, "region": "AP"},  # Seoul city (SI) — was (37.46, 126.44) = Incheon, ~6.6°F too cold vs the Seoul station markets resolve on
-    "Shanghai": {"lat": 31.1443, "lon": 121.8083, "region": "AP"},
-    "Beijing": {"lat": 40.0799, "lon": 116.5847, "region": "AP"},
-    "Guangzhou": {"lat": 23.3924, "lon": 113.2988, "region": "AP"},
-    "Shenzhen": {"lat": 22.6393, "lon": 113.8107, "region": "AP"},
-    "Chengdu": {"lat": 30.5785, "lon": 103.9469, "region": "AP"},
-    "Chongqing": {"lat": 29.7192, "lon": 106.6517, "region": "AP"},
-    "Wuhan": {"lat": 30.7835, "lon": 114.2084, "region": "AP"},
-    "Qingdao": {"lat": 36.3619, "lon": 120.0883, "region": "AP"},
-    "Busan": {"lat": 35.1795, "lon": 128.9380, "region": "AP"},
-    "Taipei": {"lat": 25.0777, "lon": 121.5737, "region": "AP"},
-    "Singapore": {"lat": 1.3644, "lon": 103.9915, "region": "AP"},
-    "Kuala Lumpur": {"lat": 2.7456, "lon": 101.7072, "region": "AP"},
-    "Jakarta": {"lat": -6.1256, "lon": 106.6559, "region": "AP"},
-    "Manila": {"lat": 14.5086, "lon": 121.0197, "region": "AP"},
-    "Karachi": {"lat": 24.9056, "lon": 67.1608, "region": "AP"},
-    "Lucknow": {"lat": 26.7606, "lon": 80.8893, "region": "AP"},
-    "Wellington": {"lat": -41.3272, "lon": 174.8053, "region": "AP"},
+    "Tokyo": {"lat": 35.5523, "lon": 139.7798, "region": "AP"},        # Haneda (RJTT)
+    "Hong Kong": {"lat": 22.3080, "lon": 113.9185, "region": "AP"},    # HKG (VHHH)
+    "Seoul": {"lat": 37.4602, "lon": 126.4407, "region": "AP"},        # INCHEON (RKSI) — NOT the city centre
+    "Shanghai": {"lat": 31.1443, "lon": 121.8083, "region": "AP"},     # Pudong (ZSPD)
+    "Beijing": {"lat": 40.0799, "lon": 116.5847, "region": "AP"},      # Capital (ZBAA)
+    "Guangzhou": {"lat": 23.3924, "lon": 113.2988, "region": "AP"},    # Baiyun (ZGGG)
+    "Shenzhen": {"lat": 22.6393, "lon": 113.8107, "region": "AP"},     # Bao'an (ZGSZ)
+    "Chengdu": {"lat": 30.5785, "lon": 103.9469, "region": "AP"},      # Shuangliu (ZUUU)
+    "Chongqing": {"lat": 29.7192, "lon": 106.6417, "region": "AP"},    # Jiangbei (ZUCK)
+    "Wuhan": {"lat": 30.7838, "lon": 114.2081, "region": "AP"},        # Tianhe (ZHHH)
+    "Qingdao": {"lat": 36.3319, "lon": 120.3742, "region": "AP"},      # Jiaodong (ZSQD)
+    "Busan": {"lat": 35.1795, "lon": 128.9380, "region": "AP"},        # Gimhae (RKPK)
+    "Taipei": {"lat": 25.0694, "lon": 121.5525, "region": "AP"},       # Songshan (RCSS)
+    "Singapore": {"lat": 1.3644, "lon": 103.9915, "region": "AP"},     # Changi (WSSS)
+    "Kuala Lumpur": {"lat": 2.7456, "lon": 101.7072, "region": "AP"},  # KLIA (WMKK)
+    "Jakarta": {"lat": -6.1256, "lon": 106.6559, "region": "AP"},      # Soekarno-Hatta (WIII)
+    "Manila": {"lat": 14.5086, "lon": 121.0197, "region": "AP"},       # NAIA (RPLL)
+    "Karachi": {"lat": 24.8936, "lon": 66.9385, "region": "AP"},       # Masroor Airbase (OPMR)
+    "Lucknow": {"lat": 26.7606, "lon": 80.8893, "region": "AP"},       # CCS Intl (VILK)
+    "Wellington": {"lat": -41.3272, "lon": 174.8053, "region": "AP"},  # Wellington Intl (NZWN)
 }
 
 # Two rules for this table:
@@ -240,6 +248,10 @@ def get_signal_engine(city_name, target_date, is_high=True, hours_to_resolution=
         for m, temp in model_temps.items()
         if m in weights
     )
+    # Shift toward the METAR resolution source Polymarket settles on (runs warmer
+    # than Open-Meteo). Applied to the mean only — it moves where the distribution
+    # is centred without touching model spread/agreement.
+    weighted_mean += METAR_WARM_CORRECTION_F
 
     model_spread_std = float(_pstdev(list(model_temps.values())))
 
@@ -411,6 +423,7 @@ def prefetch_signal_engines(opportunities) -> dict:
             temp * (weights[m] / total_weight)
             for m, temp in model_temps.items() if m in weights
         )
+        weighted_mean += METAR_WARM_CORRECTION_F  # match METAR resolution source (see get_signal_engine)
         model_spread_std = float(_pstdev(list(model_temps.values())))
 
         base_error = _interpolate_base_error(opp.hours_to_resolution)

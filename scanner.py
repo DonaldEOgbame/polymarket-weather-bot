@@ -150,6 +150,47 @@ def verify_parser_fixtures():
             )
 
 
+_MONTHS = {
+    "jan": 1, "feb": 2, "mar": 3, "apr": 4, "may": 5, "jun": 6,
+    "jul": 7, "aug": 8, "sep": 9, "oct": 10, "nov": 11, "dec": 12,
+}
+
+
+def parse_target_date(description: str, end_date, question: str = ""):
+    """Return the temperature measurement date (YYYY-MM-DD) a market resolves on.
+
+    Polymarket resolves on a named calendar day at a specific station ("...recorded
+    at the X Station in degrees Celsius on 1 Jul '26"). That "on <DATE>" phrase is the
+    unambiguous source of truth. Deriving the date from the endDate timestamp instead
+    is fragile: the endDate convention has drifted (older markets close 00:00Z, newer
+    ones 12:00Z on the named day), and for far-east/-west stations the UTC calendar
+    date of a T00:00Z close can fall on the wrong local day — which mis-dated the
+    forecast for cities like Wellington (UTC+12) and flipped real trades.
+
+    Prefers the description's "on <D Mon 'YY>"; falls back to the UTC date of end_date.
+    """
+    if description:
+        m = re.search(
+            r"\bon\s+(\d{1,2})\s+([A-Za-z]{3,9})\s+'?(\d{2,4})\b",
+            description,
+        )
+        if m:
+            day = int(m.group(1))
+            mon = _MONTHS.get(m.group(2)[:3].lower())
+            yr = int(m.group(3))
+            if yr < 100:
+                yr += 2000
+            if mon and 1 <= day <= 31:
+                try:
+                    return datetime(yr, mon, day, tzinfo=timezone.utc).strftime("%Y-%m-%d")
+                except ValueError:
+                    pass
+    # Fallback: UTC calendar date of the close timestamp.
+    if end_date is not None:
+        return end_date.strftime("%Y-%m-%d")
+    return None
+
+
 def get_or_store_bucket(market_id: str, question: str, city: str, target_date: str):
     """Return (bucket_low, bucket_high) for market_id, immutably.
 
@@ -845,10 +886,12 @@ def scan_markets():
                 do_skip("No station mapping", "no_station_match")
                 continue
 
-            # Timezone-independent calendar date alignment:
-            # Every weather market closes at 00:00:00 UTC on its target date.
-            # Thus, the UTC calendar date of end_date matches the target date exactly.
-            target_date = end_date.strftime("%Y-%m-%d")
+            # Resolve the measurement date from the market's own "...on <DATE>"
+            # description text (the resolver's source of truth), not from the endDate
+            # timestamp — the close-time convention drifted (00:00Z → 12:00Z) and a
+            # UTC-date read mis-dates far-offset stations. Falls back to the endDate
+            # UTC date when the description has no parseable date.
+            target_date = parse_target_date(m.get("description", ""), end_date, question)
 
             if not checks["bucket_parse_success"]:
                 do_skip("Cannot parse bucket", "bucket_parse_failed")

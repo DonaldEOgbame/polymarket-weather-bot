@@ -13,6 +13,7 @@ from config import (
     NARROW_BUCKET_WIDTH_F, NARROW_BUCKET_EDGE_THRESHOLD, NARROW_BUCKET_STD_INFLATION,
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION,
     TAKER_FEE_RATE, SLIPPAGE_FRACTION, MAX_ENTRY_SPREAD_FRACTION,
+    FORECAST_MARGIN_F,
 )
 
 
@@ -38,6 +39,26 @@ def get_live_spread_fraction(token_id):
     if mid <= 0:
         return None
     return ((ask - bid) / 2.0) / mid
+
+def forecast_margin_ok(side, ensemble_mean, bucket_low, bucket_high, margin_f):
+    """True if the ensemble mean sits at least `margin_f` °F clear of the bucket in
+    the direction the bet needs.
+
+    Only applies to bounded (exact/range) buckets — an open-ended above/below market
+    has no near boundary to cut close to. For a NO bet (temp will MISS the bucket) the
+    mean must be at least margin_f OUTSIDE the bucket: below (low-0.5)-margin or above
+    (high+0.5)+margin. For a YES bet (temp will LAND in the bucket) the mean must be at
+    least margin_f INSIDE — i.e. not within margin_f of either edge. margin_f<=0 or an
+    open-ended bucket always passes (nothing to gate)."""
+    if margin_f <= 0 or bucket_low is None or bucket_high is None:
+        return True
+    lo = bucket_low - 0.5   # same ±0.5 padding get_bucket_probability uses
+    hi = bucket_high + 0.5
+    if side == "NO":
+        return ensemble_mean <= lo - margin_f or ensemble_mean >= hi + margin_f
+    # YES: mean must be comfortably inside the bucket, clear of both edges
+    return lo + margin_f <= ensemble_mean <= hi - margin_f
+
 
 def calculate_kelly(edge, price):
     """Fractional Kelly criterion for binary prediction markets.
@@ -128,6 +149,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             skip_reason = f"YES edge {yes_edge:.3f} but spread too wide ({spread:.1f}°F > {MAX_MODEL_SPREAD}°F)"
         elif yes_spread_frac is not None and yes_spread_frac > MAX_ENTRY_SPREAD_FRACTION:
             skip_reason = f"YES edge {yes_edge:.3f} but market spread too wide ({yes_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"
+        elif not forecast_margin_ok("YES", engine_res["ensemble_mean"], opp.bucket_low, opp.bucket_high, FORECAST_MARGIN_F):
+            skip_reason = f"YES edge {yes_edge:.3f} but forecast too close to bucket edge (mean {engine_res['ensemble_mean']:.1f}°F, need ≥{FORECAST_MARGIN_F}°F clear)"
         else:
             signal = "BUY_YES"
             side = "YES"
@@ -144,6 +167,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             skip_reason = f"NO edge {no_edge:.3f} but spread too wide ({spread:.1f}°F > {MAX_MODEL_SPREAD}°F)"
         elif no_spread_frac is not None and no_spread_frac > MAX_ENTRY_SPREAD_FRACTION:
             skip_reason = f"NO edge {no_edge:.3f} but market spread too wide ({no_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"
+        elif not forecast_margin_ok("NO", engine_res["ensemble_mean"], opp.bucket_low, opp.bucket_high, FORECAST_MARGIN_F):
+            skip_reason = f"NO edge {no_edge:.3f} but forecast too close to bucket edge (mean {engine_res['ensemble_mean']:.1f}°F, need ≥{FORECAST_MARGIN_F}°F clear of bucket)"
         else:
             signal = "BUY_NO"
             side = "NO"

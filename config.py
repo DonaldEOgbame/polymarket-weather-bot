@@ -42,6 +42,28 @@ MAX_ENTRY_SPREAD_FRACTION = float(os.getenv("MAX_ENTRY_SPREAD_FRACTION", "0.15")
 # Two models that agree proves nothing — ECMWF dropping out silently leaves only 2.
 MIN_MODEL_COUNT = int(os.getenv("MIN_MODEL_COUNT", "3"))
 
+# --- Open-Meteo → METAR resolution-source correction (°F) ---
+# Polymarket resolves off the airport METAR feed (via Wunderground), which was measured
+# to run ~+0.72°C (~+1.3°F) WARMER than Open-Meteo's forecast at these stations across
+# the first 19 traded station-days (14/19 positive; biggest gaps on the trades we lost:
+# Hong Kong +2.6, Tokyo +2.5). Our forecasts were systematically too cold vs the ruler
+# that actually pays out. Shift the ensemble mean warmer by this amount so probabilities
+# target the METAR reading, not the ERA5 reanalysis. Re-fit from calibrate.py --source
+# metar as more trades resolve; per-station corrections can later replace this global one.
+METAR_WARM_CORRECTION_F = float(os.getenv("METAR_WARM_CORRECTION_F", "1.3"))
+
+# --- Forecast margin gate ("stop cutting it close") ---
+# Only enter when the ensemble mean is at least this many °F clear of the NEAREST
+# bucket boundary we're betting the temperature will miss. Rationale: the market
+# resolves off a Wunderground station reading that runs up to ~1°C (~1.8°F) different
+# from our Open-Meteo forecast/verification, and a whole-degree-Celsius bucket is only
+# ~1.8°F wide — so a forecast sitting <2°F from a boundary is a coin flip we lose as
+# often as we win regardless of model quality. Measured on the first 19 trades, the
+# losers all sat within ~2.1°F of a boundary. Requiring real daylight between the
+# forecast and the boundary is what separates a defensible bet from a gamble.
+# Set to 0 to disable. Applies only to bounded (exact/range) buckets.
+FORECAST_MARGIN_F = float(os.getenv("FORECAST_MARGIN_F", "2.5"))
+
 # Narrow-bucket guard: buckets ≤ this width (°F) require higher edge to enter.
 # Exact and 1°F-range buckets are structurally disadvantaged vs above/below markets.
 NARROW_BUCKET_WIDTH_F = float(os.getenv("NARROW_BUCKET_WIDTH_F", "2.0"))

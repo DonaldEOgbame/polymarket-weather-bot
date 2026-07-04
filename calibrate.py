@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from db import fetch_query
 from weather import WEIGHTS, get_station_coords
 from utils import get_session
+from metar import fetch_day_extremes, get_station
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
@@ -50,6 +51,24 @@ def _reconstruct_mean(raw_models: dict, region: str):
     if total == 0:
         return None
     return sum(t * (weights[m] / total) for m, t in raw_models.items() if m in weights)
+
+
+def _fetch_actuals_metar(city_key, date_str, cache):
+    """Return (actual_max_F, actual_min_F) from the METAR observation feed — the SAME
+    source Polymarket resolves against — rounded to whole °C then converted to °F.
+    (None, None) if the station is unmapped or the day isn't published yet."""
+    key = ("metar", city_key, date_str)
+    if key in cache:
+        return cache[key]
+    icao, tz = get_station(city_key)
+    result = (None, None)
+    if icao:
+        mx_c, mn_c = fetch_day_extremes(icao, tz, date_str)
+        def to_f(c):
+            return round(c) * 9.0 / 5.0 + 32.0 if c is not None else None
+        result = (to_f(mx_c), to_f(mn_c))
+    cache[key] = result
+    return result
 
 
 def _fetch_actuals(coords, date_str, session, cache):
@@ -96,7 +115,14 @@ def main():
                     help="Only signals whose target_date is within N days of today.")
     ap.add_argument("--no-fetch", action="store_true",
                     help="Skip archive fetches; only summarize what already resolves.")
+    ap.add_argument("--source", choices=("metar", "era5"), default="metar",
+                    help="Actuals source. 'metar' (default) is the SAME feed Polymarket "
+                         "resolves against — use it to measure real-settlement calibration. "
+                         "'era5' uses Open-Meteo's archive (differs by up to ~1°C).")
     args = ap.parse_args()
+    print(f"Actuals source: {args.source.upper()}"
+          + ("  (Polymarket's resolution ruler)" if args.source == "metar"
+             else "  (ERA5 reanalysis — NOT the resolution source)"))
 
     where, params = "raw_models IS NOT NULL", ()
     if args.days is not None:
@@ -169,6 +195,8 @@ def main():
 
         if args.no_fetch or date_str > today:
             actual_hi, actual_lo = (None, None)
+        elif args.source == "metar":
+            actual_hi, actual_lo = _fetch_actuals_metar(city, date_str, archive_cache)
         else:
             actual_hi, actual_lo = _fetch_actuals(coords, date_str, session, archive_cache)
         if actual_hi is None and actual_lo is None:
