@@ -131,6 +131,22 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.15"))
 ENABLE_STOP_LOSS = os.getenv("ENABLE_STOP_LOSS", "false").lower() == "true"
 EXIT_EDGE_FLOOR = float(os.getenv("EXIT_EDGE_FLOOR", "0.05"))
 
+# Edge-decay exit gating. The raw edge = (1 - model_prob) - price for a NO bet drops
+# below EXIT_EDGE_FLOOR for TWO opposite reasons, and only one is a reason to sell:
+#   (a) the PRICE converged in our favour (NO rose toward 1.0) — the bet is WINNING and
+#       the thesis is intact. Exiting here caps a winner for pennies (the bug: three
+#       live NO trades bailed at +$0.05 instead of holding to a ~$1.00 settlement).
+#   (b) the FORECAST turned against us (model_prob rose vs entry) — the thesis is broken.
+# HOLD_WINNERS_TO_RESOLUTION makes edge decay fire only on case (b): the model's own
+# probability for the bet must have deteriorated by more than THESIS_BREAK_PROB_DELTA
+# from entry, OR the position must be in a real loss. A position that's simply converged
+# in our favour is held for the full $1/$0 settlement instead of scalped early.
+HOLD_WINNERS_TO_RESOLUTION = os.getenv("HOLD_WINNERS_TO_RESOLUTION", "true").lower() == "true"
+# How much the model's probability-for-our-side must worsen vs entry before edge decay
+# counts the thesis as broken (in probability units). 0.10 = the bucket we bet AGAINST
+# became 10 percentage points more likely than when we entered.
+THESIS_BREAK_PROB_DELTA = float(os.getenv("THESIS_BREAK_PROB_DELTA", "0.10"))
+
 # --- Market Filters ---
 MIN_VOLUME = float(os.getenv("MIN_VOLUME", "500"))
 MAX_HOURS_TO_RESOLUTION = float(os.getenv("MAX_HOURS_TO_RESOLUTION", "72"))
