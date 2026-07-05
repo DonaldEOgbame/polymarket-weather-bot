@@ -11,6 +11,7 @@ from config import (
     PAPER_MODE, POLYMARKET_PK, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE,
     MAX_CONCURRENT_POSITIONS, STOP_LOSS_PCT, ENABLE_STOP_LOSS, EXIT_EDGE_FLOOR, CLOB_BASE_URL,
     MIN_MODEL_COUNT, TAKER_FEE_RATE,
+    HOLD_WINNERS_TO_RESOLUTION, THESIS_BREAK_PROB_DELTA,
 )
 
 
@@ -402,13 +403,68 @@ class Executor:
                 adaptive_floor = self._adaptive_exit_floor(target_date_str, now)
 
                 if current_edge < adaptive_floor:
-                    exit_reason = (
-                        f"Edge decayed ({current_edge:.3f} < {adaptive_floor:.3f}"
-                        + (" [late-market]" if adaptive_floor > EXIT_EDGE_FLOOR else "") + ")"
-                    )
+                    # Edge fell below the floor — but WHY? Two opposite causes, only one
+                    # worth selling on:
+                    #   thesis broken  -> the model's probability for OUR side got worse
+                    #                     vs entry (new forecast disagrees), or we're in a
+                    #                     real loss. Exit.
+                    #   just converged -> price moved TOWARD us (bet winning) while the
+                    #                     forecast still supports it. Holding to $1/$0
+                    #                     settlement pays far more than scalping now.
+                    thesis_broken = self._thesis_broken(pos, latest_prob, current_price, entry_price)
+                    if thesis_broken or not HOLD_WINNERS_TO_RESOLUTION:
+                        exit_reason = (
+                            f"Edge decayed ({current_edge:.3f} < {adaptive_floor:.3f}"
+                            + (" [late-market]" if adaptive_floor > EXIT_EDGE_FLOOR else "")
+                            + (" [thesis broken]" if thesis_broken else "") + ")"
+                        )
+                    else:
+                        logging.info(
+                            f"HOLD {pos['market_id']} ({pos['side']}): edge {current_edge:.3f} "
+                            f"below floor but thesis intact (price converged in our favour) — "
+                            f"holding for resolution instead of scalping."
+                        )
 
         if exit_reason:
             self._close_position(pos, pnl_dollars, exit_reason)
+
+    def _thesis_broken(self, pos, latest_prob, current_price, entry_price):
+        """Decide whether an edge-decay trigger reflects a genuinely broken thesis
+        (sell) rather than the price simply converging in our favour (hold).
+
+        Returns True — exit — when EITHER:
+          * the position is in a real loss (current mid below entry), OR
+          * the model's probability FOR OUR SIDE has deteriorated by more than
+            THESIS_BREAK_PROB_DELTA versus entry (the forecast now disagrees with the bet).
+
+        Returns False when the forecast still supports the bet and we're not losing — the
+        edge only shrank because the market moved toward us, so we hold for settlement.
+
+        `latest_prob` is the fresh model P(bucket)=P(YES). Our-side prob is that for YES,
+        1-that for NO. The entry P(YES) is read from the trade row; if it's missing we
+        can't compare, so we conservatively treat the thesis as broken (exit)."""
+        # Real loss? mid below entry means the bet is underwater regardless of forecast.
+        if current_price < entry_price:
+            return True
+
+        entry = fetch_query(
+            "SELECT model_prob FROM trades WHERE market_id=? AND side=? AND status='OPEN' "
+            "ORDER BY id DESC LIMIT 1",
+            (pos["market_id"], pos["side"]),
+        )
+        entry_yes_prob = entry[0]["model_prob"] if entry and entry[0]["model_prob"] is not None else None
+        if entry_yes_prob is None:
+            return True  # can't compare — fail safe to the old behaviour (exit)
+
+        if pos["side"] == "YES":
+            entry_side_prob = entry_yes_prob
+            now_side_prob = latest_prob
+        else:  # NO bet: our side wins if the bucket is MISSED
+            entry_side_prob = 1.0 - entry_yes_prob
+            now_side_prob = 1.0 - latest_prob
+
+        # Thesis broken if our side's model probability dropped materially since entry.
+        return now_side_prob < entry_side_prob - THESIS_BREAK_PROB_DELTA
 
     def _adaptive_exit_floor(self, target_date_str, now):
         """Scale EXIT_EDGE_FLOOR upward as resolution approaches.

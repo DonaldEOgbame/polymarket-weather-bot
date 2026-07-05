@@ -41,3 +41,54 @@ class TestTargetDatePassedGuard:
     def test_missing_target_date_is_safe(self):
         assert Executor._target_date_passed(None, self._now()) is False
         assert Executor._target_date_passed("", self._now()) is False
+
+
+class TestThesisBrokenGate:
+    """Edge decay must only sell when the thesis is broken, not when a NO bet is simply
+    winning (price converged toward 1.0). Three live NO trades bailed at ~+$0.05 instead
+    of holding to a ~$1.00 settlement because edge decay fired on a converging winner."""
+
+    def _exec(self):
+        # Build an Executor without running __init__ (which needs a CLOB client / DB).
+        return Executor.__new__(Executor)
+
+    def _patch_entry_prob(self, monkeypatch, prob):
+        import executor as ex
+        monkeypatch.setattr(ex, "fetch_query",
+                            lambda *a, **k: [{"model_prob": prob}] if prob is not None else [])
+
+    def test_no_bet_converged_winner_holds(self, monkeypatch):
+        # Entry P(YES)=0.20 → our-side (NO) prob 0.80. Model still says P(YES)=0.20.
+        # Price converged to 0.90 (winning), above entry 0.55. Thesis intact → HOLD.
+        self._patch_entry_prob(monkeypatch, 0.20)
+        e = self._exec()
+        pos = {"market_id": "0x1", "side": "NO"}
+        assert e._thesis_broken(pos, latest_prob=0.20, current_price=0.90, entry_price=0.55) is False
+
+    def test_no_bet_forecast_turned_exits(self, monkeypatch):
+        # Entry P(YES)=0.20 → NO prob 0.80. Forecast now says P(YES)=0.45 → NO prob 0.55,
+        # a 0.25 drop (> 0.10 delta). Thesis broken → EXIT even though price ok.
+        self._patch_entry_prob(monkeypatch, 0.20)
+        e = self._exec()
+        pos = {"market_id": "0x1", "side": "NO"}
+        assert e._thesis_broken(pos, latest_prob=0.45, current_price=0.60, entry_price=0.55) is True
+
+    def test_real_loss_exits_regardless(self, monkeypatch):
+        # Price below entry = underwater. Exit regardless of forecast.
+        self._patch_entry_prob(monkeypatch, 0.20)
+        e = self._exec()
+        pos = {"market_id": "0x1", "side": "NO"}
+        assert e._thesis_broken(pos, latest_prob=0.20, current_price=0.40, entry_price=0.55) is True
+
+    def test_missing_entry_prob_fails_safe_to_exit(self, monkeypatch):
+        self._patch_entry_prob(monkeypatch, None)
+        e = self._exec()
+        pos = {"market_id": "0x1", "side": "NO"}
+        assert e._thesis_broken(pos, latest_prob=0.20, current_price=0.90, entry_price=0.55) is True
+
+    def test_yes_bet_converged_winner_holds(self, monkeypatch):
+        # YES bet: entry P(YES)=0.70, still 0.70, price converged up to 0.90. Hold.
+        self._patch_entry_prob(monkeypatch, 0.70)
+        e = self._exec()
+        pos = {"market_id": "0x1", "side": "YES"}
+        assert e._thesis_broken(pos, latest_prob=0.70, current_price=0.90, entry_price=0.60) is False
