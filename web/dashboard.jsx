@@ -800,7 +800,7 @@ function App() {
               positions={M.positions}
               scanLog={M.scanLog}
             />
-            <OpenPositions positions={M.positions} maxPositions={4} />
+            <OpenPositions positions={M.positions} maxPositions={M.portfolio?.max_concurrent_positions} />
           </div>
           <EquityCurve equity={M.equity} startingBankroll={M.portfolio.starting_bankroll} totalEquity={M.portfolio.total_equity} />
         </>

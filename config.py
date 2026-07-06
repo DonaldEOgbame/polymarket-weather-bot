@@ -130,6 +130,7 @@ MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "1.00"))
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.15"))
 ENABLE_STOP_LOSS = os.getenv("ENABLE_STOP_LOSS", "false").lower() == "true"
 EXIT_EDGE_FLOOR = float(os.getenv("EXIT_EDGE_FLOOR", "0.05"))
+TAKE_PROFIT_PRICE = float(os.getenv("TAKE_PROFIT_PRICE", "0.98"))
 
 # Edge-decay exit gating. The raw edge = (1 - model_prob) - price for a NO bet drops
 # below EXIT_EDGE_FLOOR for TWO opposite reasons, and only one is a reason to sell:

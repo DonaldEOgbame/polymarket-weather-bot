@@ -18,7 +18,7 @@ app.secret_key = os.getenv('DASHBOARD_SECRET', 'stormedge-change-in-prod')
 
 DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', 'stormedge')
 DASHBOARD_EMAIL    = os.getenv('DASHBOARD_EMAIL', 'donaldemmaogbame@gmail.com')
-from config import DB_PATH, PAPER_MODE, DAILY_LOSS_LIMIT, STARTING_BANKROLL
+from config import DB_PATH, PAPER_MODE, DAILY_LOSS_LIMIT, STARTING_BANKROLL, MAX_CONCURRENT_POSITIONS
 DB_PATH = os.path.abspath(DB_PATH)
 
 from weather import STATIONS
@@ -124,6 +124,7 @@ def api_data():
         'exposure_pct': locked_cash / total_equity if total_equity else 0.0,
         'circuit_breaker_used': circuit_used,
         'circuit_tripped': circuit_tripped,
+        'max_concurrent_positions': MAX_CONCURRENT_POSITIONS,
     }
 
     # ---- open positions (with live mid prices from CLOB) ----

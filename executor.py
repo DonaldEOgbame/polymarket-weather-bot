@@ -11,7 +11,7 @@ from config import (
     PAPER_MODE, POLYMARKET_PK, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE,
     MAX_CONCURRENT_POSITIONS, STOP_LOSS_PCT, ENABLE_STOP_LOSS, EXIT_EDGE_FLOOR, CLOB_BASE_URL,
     MIN_MODEL_COUNT, TAKER_FEE_RATE,
-    HOLD_WINNERS_TO_RESOLUTION, THESIS_BREAK_PROB_DELTA,
+    HOLD_WINNERS_TO_RESOLUTION, THESIS_BREAK_PROB_DELTA, TAKE_PROFIT_PRICE,
 )
 
 
@@ -369,6 +369,8 @@ class Executor:
 
         if ENABLE_STOP_LOSS and pnl_pct <= -STOP_LOSS_PCT:
             exit_reason = f"Stop Loss ({pnl_pct:.1%})"
+        elif exit_fill >= TAKE_PROFIT_PRICE:
+            exit_reason = f"Take Profit (Price {exit_fill:.2f} >= {TAKE_PROFIT_PRICE:.2f})"
         else:
             signals = fetch_query(
                 "SELECT bucket_low, bucket_high, target_date, model_prob FROM signals "

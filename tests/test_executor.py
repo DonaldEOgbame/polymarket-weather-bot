@@ -92,3 +92,31 @@ class TestThesisBrokenGate:
         e = self._exec()
         pos = {"market_id": "0x1", "side": "YES"}
         assert e._thesis_broken(pos, latest_prob=0.70, current_price=0.90, entry_price=0.60) is False
+
+
+class TestTakeProfitExit:
+    def test_take_profit_triggers_exit(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+        
+        pos = {
+            "id": 1,
+            "market_id": "0x1",
+            "token_id": "tok_1",
+            "side": "NO",
+            "entry_price": 0.55,
+            "size_usdc": 2.0,
+            "entry_time": "2026-06-30T10:00:00+00:00",
+            "target_date": "2026-07-10"  # Target date in future relative to today
+        }
+        
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.99, 0.99))
+        
+        exits_called = []
+        monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits_called.append(reason))
+        
+        e._check_exit_for_position(pos)
+        
+        assert len(exits_called) == 1
+        assert "Take Profit" in exits_called[0]
+
