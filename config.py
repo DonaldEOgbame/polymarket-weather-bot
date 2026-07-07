@@ -131,6 +131,11 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.15"))
 ENABLE_STOP_LOSS = os.getenv("ENABLE_STOP_LOSS", "false").lower() == "true"
 EXIT_EDGE_FLOOR = float(os.getenv("EXIT_EDGE_FLOOR", "0.05"))
 TAKE_PROFIT_PRICE = float(os.getenv("TAKE_PROFIT_PRICE", "0.98"))
+# Number of consecutive monitor cycles (each 5 min) the mid-price must sit BELOW the
+# entry price before the position is force-exited, regardless of what the edge formula
+# computes. This catches cases where the forecast probability is stale/wrong and inflates
+# the apparent edge while the market is telling a different story. Default 3 = 15 minutes.
+SUSTAINED_LOSS_POLLS = int(os.getenv("SUSTAINED_LOSS_POLLS", "3"))
 
 # Edge-decay exit gating. The raw edge = (1 - model_prob) - price for a NO bet drops
 # below EXIT_EDGE_FLOOR for TWO opposite reasons, and only one is a reason to sell:

@@ -6,12 +6,14 @@ from py_clob_client.clob_types import OrderArgs, MarketOrderArgs, OrderType
 from db import execute_query, fetch_query, update_bankroll, get_open_position, close_position_atomic
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
 from scanner import get_realtime_price, get_market_resolution, get_gamma_mid_price
-from weather import get_signal_engine, get_bucket_probability
+from zoneinfo import ZoneInfo
+from weather import get_signal_engine, get_bucket_probability, _norm_cdf
+from metar import get_station, fetch_day_extremes
 from config import (
     PAPER_MODE, POLYMARKET_PK, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE,
     MAX_CONCURRENT_POSITIONS, STOP_LOSS_PCT, ENABLE_STOP_LOSS, EXIT_EDGE_FLOOR, CLOB_BASE_URL,
     MIN_MODEL_COUNT, TAKER_FEE_RATE,
-    HOLD_WINNERS_TO_RESOLUTION, THESIS_BREAK_PROB_DELTA, TAKE_PROFIT_PRICE,
+    HOLD_WINNERS_TO_RESOLUTION, THESIS_BREAK_PROB_DELTA, TAKE_PROFIT_PRICE, SUSTAINED_LOSS_POLLS,
 )
 
 
@@ -24,6 +26,9 @@ class Executor:
                 CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE
             ))
         self.reconcile_positions()
+        # Tracks consecutive below-entry mid-price polls per position id.
+        # Reset on price recovery. Used by the sustained-loss guard in _check_exit_for_position.
+        self._loss_streak: dict = {}
 
     def reconcile_positions(self):
         positions = fetch_query("SELECT * FROM positions")
@@ -367,7 +372,24 @@ class Executor:
 
         exit_reason = None
 
-        if ENABLE_STOP_LOSS and pnl_pct <= -STOP_LOSS_PCT:
+        # --- Sustained-loss guard (independent of edge formula) ---
+        # Track how many consecutive 5-min polls the mid-price has sat below entry.
+        # This fires even when the edge formula looks positive (stale/wrong probability
+        # can inflate apparent edge while the market is genuinely moving against us).
+        if not hasattr(self, '_loss_streak'):
+            self._loss_streak = {}  # safety: Executor.__new__ skips __init__ in tests
+        pos_key = pos.get("id", pos.get("market_id"))
+        if current_price < entry_price:
+            self._loss_streak[pos_key] = self._loss_streak.get(pos_key, 0) + 1
+        else:
+            self._loss_streak.pop(pos_key, None)
+        streak = self._loss_streak.get(pos_key, 0)
+        if streak >= SUSTAINED_LOSS_POLLS:
+            exit_reason = (
+                f"Sustained loss ({streak} polls below entry, "
+                f"mid=${current_price:.3f} vs entry=${entry_price:.3f}, pnl={pnl_pct:.1%})"
+            )
+        elif ENABLE_STOP_LOSS and pnl_pct <= -STOP_LOSS_PCT:
             exit_reason = f"Stop Loss ({pnl_pct:.1%})"
         elif exit_fill >= TAKE_PROFIT_PRICE:
             exit_reason = f"Take Profit (Price {exit_fill:.2f} >= {TAKE_PROFIT_PRICE:.2f})"
@@ -393,6 +415,43 @@ class Executor:
                         engine_res, signals[0]["bucket_low"], signals[0]["bucket_high"]
                     )
                     latest_prob = fresh_prob
+
+                    # Real-time observations check (incorporate METAR on the target day)
+                    icao, tz = get_station(pos["city"])
+                    if tz:
+                        station_today = now.astimezone(ZoneInfo(tz)).strftime("%Y-%m-%d")
+                        if pos["target_date"] == station_today:
+                            obs_max_c, obs_min_c = fetch_day_extremes(icao, tz, pos["target_date"])
+                            is_high = bool(pos["is_high"])
+                            obs_val_c = obs_max_c if is_high else obs_min_c
+                            if obs_val_c is not None:
+                                obs_val_f = round(obs_val_c) * 9.0 / 5.0 + 32.0
+                                lb = signals[0]["bucket_low"]
+                                ub = signals[0]["bucket_high"]
+                                lb_pad = (lb - 0.5) if lb is not None else -1000.0
+                                ub_pad = (ub + 0.5) if ub is not None else 1000.0
+                                
+                                mean = engine_res["ensemble_mean"]
+                                std = max(engine_res["ensemble_std"], 0.5)
+                                
+                                if is_high:
+                                    if obs_val_f > ub_pad:
+                                        latest_prob = 0.0
+                                    elif lb_pad < obs_val_f <= ub_pad:
+                                        latest_prob = _norm_cdf(ub_pad, loc=mean, scale=std)
+                                        latest_prob = max(0.0, min(1.0, float(latest_prob)))
+                                else:
+                                    if obs_val_f < lb_pad:
+                                        latest_prob = 0.0
+                                    elif lb_pad <= obs_val_f <= ub_pad:
+                                        latest_prob = 1.0 - _norm_cdf(lb_pad, loc=mean, scale=std)
+                                        latest_prob = max(0.0, min(1.0, float(latest_prob)))
+                                
+                                logging.info(
+                                    f"Intraday METAR check for {pos['market_id']} ({pos['city']}): "
+                                    f"Observed={obs_val_f:.1f}°F | Forecast Mean={mean:.1f}°F Std={std:.1f}°F | "
+                                    f"Updated YES Prob={latest_prob:.4f} (was {fresh_prob:.4f})"
+                                )
 
                 if pos["side"] == "YES":
                     current_edge = latest_prob - current_price

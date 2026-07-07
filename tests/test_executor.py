@@ -120,3 +120,195 @@ class TestTakeProfitExit:
         assert len(exits_called) == 1
         assert "Take Profit" in exits_called[0]
 
+
+class TestIntradayMetarExit:
+    def _exec(self):
+        return Executor.__new__(Executor)
+
+    def test_low_temp_market_exits_when_obs_hits_bucket(self, monkeypatch):
+        import executor as ex
+        e = self._exec()
+        
+        # Target date is today
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        pos = {
+            "id": 1,
+            "market_id": "0x1",
+            "token_id": "tok_1",
+            "side": "NO",
+            "entry_price": 0.62,
+            "size_usdc": 2.0,
+            "entry_time": "2026-06-30T10:00:00+00:00",
+            "target_date": today_str,
+            "city": "New York",
+            "is_high": 0
+        }
+        
+        # Mock realtime price of NO is low (0.19)
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.19, 0.19))
+        
+        # Mock signal row in DB
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [{
+            "id": 1,
+            "model_prob": 0.22,
+            "target_date": today_str,
+            "bucket_low": 64.0,
+            "bucket_high": 65.0
+        }])
+        
+        # Mock get_signal_engine to return forecast
+        monkeypatch.setattr(ex, "get_signal_engine", lambda *a: {
+            "ensemble_mean": 65.2,
+            "ensemble_std": 1.5
+        })
+        
+        # Mock metar extremes: observed min is 18.33 C = 65.0 F (after round, rounds to 18 C = 64.4 F)
+        monkeypatch.setattr(ex, "fetch_day_extremes", lambda *a: (18.33, 18.33))
+        
+        exits_called = []
+        monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits_called.append(reason))
+        
+        e._check_exit_for_position(pos)
+        
+        # YES prob = 1.0 - CDF(63.5) = 1.0 - 0.1286 = 0.8714. NO prob = 0.1286.
+        # Edge = 0.1286 - 0.19 = -0.0614 < 0.05. Price is below entry, so thesis broken.
+        assert len(exits_called) == 1
+        assert "Edge decayed" in exits_called[0]
+        assert "thesis broken" in exits_called[0]
+
+    def test_low_temp_market_holds_when_obs_outside_bucket(self, monkeypatch):
+        import executor as ex
+        e = self._exec()
+        
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        pos = {
+            "id": 1,
+            "market_id": "0x1",
+            "token_id": "tok_1",
+            "side": "NO",
+            "entry_price": 0.62,
+            "size_usdc": 2.0,
+            "entry_time": "2026-06-30T10:00:00+00:00",
+            "target_date": today_str,
+            "city": "New York",
+            "is_high": 0
+        }
+        
+        # Price has risen to 0.70 (winning)
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.70, 0.70))
+        
+        # Consistent model prob mock: 0.45 YES -> 0.55 NO.
+        # Forecast prob also evaluates to ~0.45 YES, so no probability change.
+        def mock_fetch_query(sql, params=()):
+            if "trades" in sql:
+                return [{"model_prob": 0.45}]
+            return [{
+                "id": 1,
+                "model_prob": 0.45,
+                "target_date": today_str,
+                "bucket_low": 64.0,
+                "bucket_high": 65.0
+            }]
+        monkeypatch.setattr(ex, "fetch_query", mock_fetch_query)
+        
+        monkeypatch.setattr(ex, "get_signal_engine", lambda *a: {
+            "ensemble_mean": 65.2,
+            "ensemble_std": 1.5
+        })
+        
+        # Observed min is 22.0 C = 71.6 F (well above bucket)
+        monkeypatch.setattr(ex, "fetch_day_extremes", lambda *a: (22.0, 22.0))
+        
+        exits_called = []
+        monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits_called.append(reason))
+        
+        e._check_exit_for_position(pos)
+        
+        # Should hold because the price converged in our favor and thesis is intact.
+        assert len(exits_called) == 0
+
+
+class TestSustainedLossGuard:
+    """The sustained-loss guard must fire after SUSTAINED_LOSS_POLLS consecutive
+    below-entry polls, independent of edge formula, and must reset when price recovers."""
+
+    def _exec(self):
+        e = Executor.__new__(Executor)
+        e._loss_streak = {}
+        return e
+
+    def _pos(self):
+        return {
+            "id": 99,
+            "market_id": "0xABC",
+            "token_id": "tok_abc",
+            "side": "NO",
+            "entry_price": 0.60,
+            "size_usdc": 2.0,
+            "entry_time": "2026-06-30T10:00:00+00:00",
+            "target_date": "2099-12-31",   # far future — target date guard won't fire
+            "city": "New York",
+            "is_high": 0,
+        }
+
+    def test_fires_after_threshold_polls(self, monkeypatch):
+        import executor as ex
+        monkeypatch.setattr(ex, "SUSTAINED_LOSS_POLLS", 3)
+        # Price below entry (0.40 < 0.60)
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.40, 0.40))
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
+
+        e = self._exec()
+        pos = self._pos()
+        exits = []
+        monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits.append(reason))
+
+        # Two polls below entry — should NOT fire yet
+        e._check_exit_for_position(pos)
+        assert exits == []
+        e._check_exit_for_position(pos)
+        assert exits == []
+
+        # Third poll — fires
+        e._check_exit_for_position(pos)
+        assert len(exits) == 1
+        assert "Sustained loss" in exits[0]
+        assert "3 polls" in exits[0]
+
+    def test_does_not_fire_below_threshold(self, monkeypatch):
+        import executor as ex
+        monkeypatch.setattr(ex, "SUSTAINED_LOSS_POLLS", 3)
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.40, 0.40))
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
+
+        e = self._exec()
+        pos = self._pos()
+        exits = []
+        monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits.append(reason))
+
+        e._check_exit_for_position(pos)
+        e._check_exit_for_position(pos)
+        assert exits == []  # only 2 polls
+
+    def test_streak_resets_on_price_recovery(self, monkeypatch):
+        import executor as ex
+        monkeypatch.setattr(ex, "SUSTAINED_LOSS_POLLS", 3)
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
+
+        e = self._exec()
+        pos = self._pos()
+        exits = []
+        monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits.append(reason))
+
+        # Two polls below entry
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.40, 0.40))
+        e._check_exit_for_position(pos)
+        e._check_exit_for_position(pos)
+        assert e._loss_streak.get(99, 0) == 2
+
+        # Price recovers above entry — streak resets
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.70, 0.70))
+        e._check_exit_for_position(pos)
+        assert e._loss_streak.get(99, 0) == 0
+        assert exits == []
+
