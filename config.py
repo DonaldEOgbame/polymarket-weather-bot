@@ -131,11 +131,21 @@ STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.15"))
 ENABLE_STOP_LOSS = os.getenv("ENABLE_STOP_LOSS", "false").lower() == "true"
 EXIT_EDGE_FLOOR = float(os.getenv("EXIT_EDGE_FLOOR", "0.05"))
 TAKE_PROFIT_PRICE = float(os.getenv("TAKE_PROFIT_PRICE", "0.98"))
-# Number of consecutive monitor cycles (each 5 min) the mid-price must sit BELOW the
-# entry price before the position is force-exited, regardless of what the edge formula
-# computes. This catches cases where the forecast probability is stale/wrong and inflates
-# the apparent edge while the market is telling a different story. Default 3 = 15 minutes.
+# Number of consecutive monitor cycles (each 5 min) the mid-price must sit materially
+# BELOW the entry price before the position is force-exited, regardless of what the edge
+# formula computes. This catches cases where the forecast probability is stale/wrong and
+# inflates the apparent edge while the market is telling a different story. Default 3 = 15 min.
 SUSTAINED_LOSS_POLLS = int(os.getenv("SUSTAINED_LOSS_POLLS", "3"))
+# Minimum fractional drawdown (mid below entry) that COUNTS as a sustained loss. Without
+# this, the guard fired on 1-2¢ book noise (the Guangzhou churn: 8 exits at −2.3%, each a
+# winning position dumped then re-bought). On a $0-$1 instrument the max loss is the stake,
+# so a stop only makes sense once the move is real. Default 0.10 = mid must be ≥10% under
+# entry for the streak to accrue. Set to 0 to restore the old any-dip behaviour.
+SUSTAINED_LOSS_MIN_DROP = float(os.getenv("SUSTAINED_LOSS_MIN_DROP", "0.10"))
+# Cooldown (hours) before re-entering a market we previously EXITED. Blocks the exit-churn
+# loop where a position is force-closed on noise and immediately re-opened on the next scan,
+# paying spread+fee each round-trip. Default 24h ≈ don't re-touch the same market same day.
+REENTRY_COOLDOWN_HOURS = float(os.getenv("REENTRY_COOLDOWN_HOURS", "24"))
 
 # Edge-decay exit gating. The raw edge = (1 - model_prob) - price for a NO bet drops
 # below EXIT_EDGE_FLOOR for TWO opposite reasons, and only one is a reason to sell:

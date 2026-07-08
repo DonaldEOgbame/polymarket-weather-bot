@@ -14,6 +14,7 @@ from config import (
     MAX_CONCURRENT_POSITIONS, STOP_LOSS_PCT, ENABLE_STOP_LOSS, EXIT_EDGE_FLOOR, CLOB_BASE_URL,
     MIN_MODEL_COUNT, TAKER_FEE_RATE,
     HOLD_WINNERS_TO_RESOLUTION, THESIS_BREAK_PROB_DELTA, TAKE_PROFIT_PRICE, SUSTAINED_LOSS_POLLS,
+    SUSTAINED_LOSS_MIN_DROP, REENTRY_COOLDOWN_HOURS,
 )
 
 
@@ -220,6 +221,30 @@ class Executor:
             logging.info(f"Already holding position in {opp.market_id} — skipping")
             return
 
+        # Re-entry cooldown: don't re-open a market we recently EXITED. Without this the
+        # bot churns — a position force-closed on noise gets re-bought on the next scan,
+        # paying spread+fee each round-trip (the Guangzhou market took 9 entries this way).
+        if REENTRY_COOLDOWN_HOURS > 0:
+            last = fetch_query(
+                "SELECT exit_time FROM trades WHERE market_id=? AND exit_time IS NOT NULL "
+                "ORDER BY id DESC LIMIT 1",
+                (opp.market_id,),
+            )
+            if last and last[0]["exit_time"]:
+                try:
+                    exited = datetime.fromisoformat(last[0]["exit_time"])
+                    if exited.tzinfo is None:
+                        exited = exited.replace(tzinfo=timezone.utc)
+                    hrs = (datetime.now(timezone.utc) - exited).total_seconds() / 3600.0
+                    if hrs < REENTRY_COOLDOWN_HOURS:
+                        logging.info(
+                            f"Re-entry cooldown active for {opp.market_id}: exited "
+                            f"{hrs:.1f}h ago (< {REENTRY_COOLDOWN_HOURS}h) — skipping"
+                        )
+                        return
+                except (ValueError, TypeError):
+                    pass  # unparseable timestamp — don't block entry on it
+
         if self.get_open_positions_count() >= MAX_CONCURRENT_POSITIONS:
             logging.info(f"Max {MAX_CONCURRENT_POSITIONS} concurrent positions reached, skipping entry.")
             return
@@ -373,13 +398,16 @@ class Executor:
         exit_reason = None
 
         # --- Sustained-loss guard (independent of edge formula) ---
-        # Track how many consecutive 5-min polls the mid-price has sat below entry.
-        # This fires even when the edge formula looks positive (stale/wrong probability
-        # can inflate apparent edge while the market is genuinely moving against us).
+        # Track how many consecutive 5-min polls the mid-price has sat MATERIALLY below
+        # entry. This fires even when the edge formula looks positive (stale/wrong
+        # probability can inflate apparent edge while the market is genuinely moving
+        # against us). The streak only accrues once the drawdown exceeds
+        # SUSTAINED_LOSS_MIN_DROP — a 1-2¢ book wobble must NOT trip it, or the guard just
+        # churns winning positions (the Guangzhou bleed: 8 exits at −2.3%, each re-bought).
         if not hasattr(self, '_loss_streak'):
             self._loss_streak = {}  # safety: Executor.__new__ skips __init__ in tests
         pos_key = pos.get("id", pos.get("market_id"))
-        if current_price < entry_price:
+        if pnl_pct <= -SUSTAINED_LOSS_MIN_DROP:
             self._loss_streak[pos_key] = self._loss_streak.get(pos_key, 0) + 1
         else:
             self._loss_streak.pop(pos_key, None)
@@ -504,8 +532,12 @@ class Executor:
         `latest_prob` is the fresh model P(bucket)=P(YES). Our-side prob is that for YES,
         1-that for NO. The entry P(YES) is read from the trade row; if it's missing we
         can't compare, so we conservatively treat the thesis as broken (exit)."""
-        # Real loss? mid below entry means the bet is underwater regardless of forecast.
-        if current_price < entry_price:
+        # Real loss? Only a MATERIAL drawdown counts — a 1-2¢ dip below entry is book noise,
+        # not a broken thesis, and treating it as one dumped winning NO positions for pennies
+        # (NY id10 booked −$1.40 on a market that settled NO=+$1.19; the Guangzhou churn).
+        # Uses the same floor as the sustained-loss guard so the two agree on "real loss".
+        drawdown = (current_price - entry_price) / entry_price if entry_price > 0 else 0.0
+        if drawdown <= -SUSTAINED_LOSS_MIN_DROP:
             return True
 
         entry = fetch_query(
