@@ -64,29 +64,34 @@ def forecast_direction_agrees(side, raw_models, bucket_low, bucket_high):
     """True if the RAW model forecasts (simple average, BEFORE any resolution-
     source correction like METAR_WARM_CORRECTION_F — that shift is folded into
     engine_res["ensemble_mean"] upstream in get_signal_engine, not visible here)
-    point the same direction as the bet, on an OPEN-ENDED (above/below) bucket.
+    point the same direction as the bet. Hard rule, independent of edge size:
+    a trade must never bet against what the models themselves predict, only
+    exploit mispricing on the side the models already favor.
 
-    forecast_margin_ok is a no-op for open-ended buckets (no second edge to be
-    "inside" of), which let a real trade fire on 2026-07-10: Helsinki "above
-    29C", raw models averaging ~81F (they say it will NOT hit 29C — ~2.7F
-    under the threshold), but the resolution-source-corrected calibrated
-    probability (27.6%) still cleared edge on YES because the market priced NO
-    even more confidently (87.25%) than the raw forecast justified. That trade
-    bet against the models' own directional call, relying entirely on a
-    global (not city-verified) correction holding up in the distribution's
-    thin tail — never intentional, and against the same-side-as-the-models
-    discipline every historical NO trade (all on bounded buckets, where NO is
-    structurally favored) happened to follow without anyone encoding it.
-    This makes that discipline an explicit gate instead of an accident of
-    bucket shape: a YES bet on "above X" requires the raw models to already
-    predict landing above X; a NO bet requires them to predict landing below.
-    Bounded buckets return True — forecast_margin_ok already covers those."""
-    if bucket_low is not None and bucket_high is not None:
-        return True  # bounded buckets: forecast_margin_ok is the real gate
-    threshold = bucket_low if bucket_low is not None else bucket_high
-    if threshold is None or not raw_models:
+    Originated from a real trade 2026-07-10: Helsinki "above 29C", raw models
+    averaging ~81F (predicting NOT crossing it — ~2.7F under the threshold),
+    but the METAR-warm-corrected calibrated probability still cleared edge on
+    YES because the market priced NO even more confidently (87.25%) than the
+    raw forecast justified. That bet against the models' own directional call,
+    riding entirely on a global (not city-verified) correction in the
+    distribution's thin tail. Extended to bounded buckets too, by request —
+    NO requires the raw mean outside the (padded) bucket, YES requires it
+    inside, mirroring forecast_margin_ok's direction logic but as a hard
+    pass/fail independent of FORECAST_MARGIN_F (so it still applies even if
+    that margin is ever set to 0)."""
+    if not raw_models:
         return True
     raw_mean = sum(raw_models.values()) / len(raw_models)
+
+    if bucket_low is not None and bucket_high is not None:
+        lo = bucket_low - 0.5
+        hi = bucket_high + 0.5
+        model_predicts_yes = lo <= raw_mean <= hi  # models predict landing IN the bucket
+        return model_predicts_yes if side == "YES" else not model_predicts_yes
+
+    threshold = bucket_low if bucket_low is not None else bucket_high
+    if threshold is None:
+        return True
     is_above_bucket = bucket_low is not None  # "above X" has only bucket_low set
     if is_above_bucket:
         model_predicts_yes = raw_mean >= threshold

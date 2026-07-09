@@ -118,15 +118,19 @@ class TestForecastMarginGate:
 
 
 class TestForecastDirectionAgrees:
-    """Gate: on an open-ended (above/below) bucket, the bet's side must agree with
-    what the RAW models (pre resolution-source correction) actually predict.
-    forecast_margin_ok is a no-op on open-ended buckets (nothing to be "inside" of),
-    which let a real trade fire 2026-07-10: Helsinki "above 29C", raw models
-    averaging ~81F (predicting NO), but the METAR-corrected calibrated probability
-    still cleared edge on YES because the market priced NO even more confidently
-    than the raw forecast justified — a bet against the models' own directional
-    call, riding entirely on a global (not city-verified) correction in the
-    distribution's thin tail."""
+    """Hard rule, independent of edge size: a trade must never bet against what
+    the RAW models (pre resolution-source correction) themselves predict — only
+    exploit mispricing on the side the models already favor. Applies to both
+    open-ended (above/below) and bounded buckets.
+
+    Originated from a real trade 2026-07-10: Helsinki "above 29C", raw models
+    averaging ~81F (predicting NO), but the METAR-corrected calibrated
+    probability still cleared edge on YES because the market priced NO even
+    more confidently than the raw forecast justified — a bet against the
+    models' own directional call, riding entirely on a global (not
+    city-verified) correction in the distribution's thin tail. The user
+    subsequently asked for the same discipline on bounded buckets too, not
+    just open-ended ones."""
 
     def test_helsinki_yes_bet_against_raw_models_is_blocked(self):
         from strategy import forecast_direction_agrees
@@ -148,16 +152,25 @@ class TestForecastDirectionAgrees:
     def test_below_bucket_direction(self):
         from strategy import forecast_direction_agrees
         raw_models = {"ecmwf_ifs025": 40.0, "icon_global": 41.0, "gfs_global": 39.5}
-        # "below 45" — models predict landing below it, so NO... wait this is a
-        # "below X" market: YES means temp lands below X.
+        # "below 45" market: YES means temp lands below X. Models predict ~40, below 45.
         assert forecast_direction_agrees("YES", raw_models, None, 45.0) is True
         assert forecast_direction_agrees("NO", raw_models, None, 45.0) is False
 
-    def test_bounded_bucket_always_passes(self):
+    def test_bounded_bucket_no_bet_blocked_when_models_predict_landing_inside(self):
         from strategy import forecast_direction_agrees
-        # forecast_margin_ok is the real gate for bounded buckets; this one is a no-op there.
-        raw_models = {"ecmwf_ifs025": 90.0}
+        # bucket 80-82 (padded 79.5-82.5), models predict 81 — squarely inside.
+        # A NO bet (temp will MISS the bucket) contradicts that — must be blocked.
+        raw_models = {"ecmwf_ifs025": 81.0, "icon_global": 81.2, "gfs_global": 80.8}
+        assert forecast_direction_agrees("NO", raw_models, 80.0, 82.0) is False
         assert forecast_direction_agrees("YES", raw_models, 80.0, 82.0) is True
+
+    def test_bounded_bucket_yes_bet_blocked_when_models_predict_missing(self):
+        from strategy import forecast_direction_agrees
+        # bucket 80-82, models predict 90 — well outside. A YES bet contradicts
+        # the models (this mirrors every real historical NO trade's setup, just
+        # checking the opposite side is correctly rejected).
+        raw_models = {"ecmwf_ifs025": 90.0}
+        assert forecast_direction_agrees("YES", raw_models, 80.0, 82.0) is False
         assert forecast_direction_agrees("NO", raw_models, 80.0, 82.0) is True
 
     def test_missing_raw_models_fails_open(self):
