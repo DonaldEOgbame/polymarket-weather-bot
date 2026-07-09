@@ -60,6 +60,41 @@ def forecast_margin_ok(side, ensemble_mean, bucket_low, bucket_high, margin_f):
     return lo + margin_f <= ensemble_mean <= hi - margin_f
 
 
+def forecast_direction_agrees(side, raw_models, bucket_low, bucket_high):
+    """True if the RAW model forecasts (simple average, BEFORE any resolution-
+    source correction like METAR_WARM_CORRECTION_F — that shift is folded into
+    engine_res["ensemble_mean"] upstream in get_signal_engine, not visible here)
+    point the same direction as the bet, on an OPEN-ENDED (above/below) bucket.
+
+    forecast_margin_ok is a no-op for open-ended buckets (no second edge to be
+    "inside" of), which let a real trade fire on 2026-07-10: Helsinki "above
+    29C", raw models averaging ~81F (they say it will NOT hit 29C — ~2.7F
+    under the threshold), but the resolution-source-corrected calibrated
+    probability (27.6%) still cleared edge on YES because the market priced NO
+    even more confidently (87.25%) than the raw forecast justified. That trade
+    bet against the models' own directional call, relying entirely on a
+    global (not city-verified) correction holding up in the distribution's
+    thin tail — never intentional, and against the same-side-as-the-models
+    discipline every historical NO trade (all on bounded buckets, where NO is
+    structurally favored) happened to follow without anyone encoding it.
+    This makes that discipline an explicit gate instead of an accident of
+    bucket shape: a YES bet on "above X" requires the raw models to already
+    predict landing above X; a NO bet requires them to predict landing below.
+    Bounded buckets return True — forecast_margin_ok already covers those."""
+    if bucket_low is not None and bucket_high is not None:
+        return True  # bounded buckets: forecast_margin_ok is the real gate
+    threshold = bucket_low if bucket_low is not None else bucket_high
+    if threshold is None or not raw_models:
+        return True
+    raw_mean = sum(raw_models.values()) / len(raw_models)
+    is_above_bucket = bucket_low is not None  # "above X" has only bucket_low set
+    if is_above_bucket:
+        model_predicts_yes = raw_mean >= threshold
+    else:  # "below X" has only bucket_high set
+        model_predicts_yes = raw_mean <= threshold
+    return model_predicts_yes if side == "YES" else not model_predicts_yes
+
+
 def calculate_kelly(edge, price):
     """Fractional Kelly criterion for binary prediction markets.
     
@@ -151,6 +186,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             skip_reason = f"YES edge {yes_edge:.3f} but market spread too wide ({yes_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"
         elif not forecast_margin_ok("YES", engine_res["ensemble_mean"], opp.bucket_low, opp.bucket_high, FORECAST_MARGIN_F):
             skip_reason = f"YES edge {yes_edge:.3f} but forecast too close to bucket edge (mean {engine_res['ensemble_mean']:.1f}°F, need ≥{FORECAST_MARGIN_F}°F clear)"
+        elif not forecast_direction_agrees("YES", engine_res.get("raw_models"), opp.bucket_low, opp.bucket_high):
+            skip_reason = f"YES edge {yes_edge:.3f} but raw model forecast points the other way (bet requires models to predict landing in bucket, before resolution-source correction)"
         else:
             signal = "BUY_YES"
             side = "YES"
@@ -169,6 +206,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             skip_reason = f"NO edge {no_edge:.3f} but market spread too wide ({no_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"
         elif not forecast_margin_ok("NO", engine_res["ensemble_mean"], opp.bucket_low, opp.bucket_high, FORECAST_MARGIN_F):
             skip_reason = f"NO edge {no_edge:.3f} but forecast too close to bucket edge (mean {engine_res['ensemble_mean']:.1f}°F, need ≥{FORECAST_MARGIN_F}°F clear of bucket)"
+        elif not forecast_direction_agrees("NO", engine_res.get("raw_models"), opp.bucket_low, opp.bucket_high):
+            skip_reason = f"NO edge {no_edge:.3f} but raw model forecast points the other way (bet requires models to predict missing the bucket, before resolution-source correction)"
         else:
             signal = "BUY_NO"
             side = "NO"
