@@ -142,6 +142,15 @@ SUSTAINED_LOSS_POLLS = int(os.getenv("SUSTAINED_LOSS_POLLS", "3"))
 # so a stop only makes sense once the move is real. Default 0.10 = mid must be ≥10% under
 # entry for the streak to accrue. Set to 0 to restore the old any-dip behaviour.
 SUSTAINED_LOSS_MIN_DROP = float(os.getenv("SUSTAINED_LOSS_MIN_DROP", "0.10"))
+# MASTER SWITCH for the sustained-loss guard. Turned OFF after a backtest on the first 22
+# trades: even at a 10% floor the guard would have fired on 5 positions, and 4 of them were
+# eventual WINNERS whose price merely dipped mid-life before recovering to a $1 settlement
+# (id2/5/10/14/15). Honoring it would have forfeited ~$5.00 of winning settlements to avoid
+# ~$1.60 of loss — net −$3.40. Same-day weather books wobble 15-25% intraday and recover;
+# on a $0-$1 instrument the max loss is the stake anyway, so pure hold-to-resolution wins.
+# Flip back to true (and re-tune the floor / add a time-to-resolution gate) once a larger
+# sample shows a real thesis-break signature worth cutting on.
+ENABLE_SUSTAINED_LOSS_GUARD = os.getenv("ENABLE_SUSTAINED_LOSS_GUARD", "false").lower() == "true"
 # Cooldown (hours) before re-entering a market we previously EXITED. Blocks the exit-churn
 # loop where a position is force-closed on noise and immediately re-opened on the next scan,
 # paying spread+fee each round-trip. Default 24h ≈ don't re-touch the same market same day.
@@ -162,6 +171,14 @@ HOLD_WINNERS_TO_RESOLUTION = os.getenv("HOLD_WINNERS_TO_RESOLUTION", "true").low
 # counts the thesis as broken (in probability units). 0.10 = the bucket we bet AGAINST
 # became 10 percentage points more likely than when we entered.
 THESIS_BREAK_PROB_DELTA = float(os.getenv("THESIS_BREAK_PROB_DELTA", "0.10"))
+# MASTER SWITCH for the edge-decay / thesis-break early exit. Turned OFF alongside the
+# sustained-loss guard: the backtest showed a 10-point thesis-break would have fired on 5
+# of the first 22 trades, and 4 were eventual WINNERS (id2/6/14/15) — intraday forecast
+# runs swing 15-20 points before settling, so the "break" was just mid-life noise. With
+# this off the bot is PURE hold-to-resolution: no position exits early except Take Profit
+# (selling at $0.98+, which only captures near-certain wins) and true $1/$0 settlement.
+# Re-enable once a bigger sample distinguishes a real reversal from forecast wobble.
+ENABLE_THESIS_BREAK_EXIT = os.getenv("ENABLE_THESIS_BREAK_EXIT", "false").lower() == "true"
 
 # --- Market Filters ---
 MIN_VOLUME = float(os.getenv("MIN_VOLUME", "500"))

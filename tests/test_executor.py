@@ -127,8 +127,9 @@ class TestIntradayMetarExit:
 
     def test_low_temp_market_exits_when_obs_hits_bucket(self, monkeypatch):
         import executor as ex
+        monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", True)
         e = self._exec()
-        
+
         # Target date is today
         today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         pos = {
@@ -253,6 +254,7 @@ class TestSustainedLossGuard:
 
     def test_fires_after_threshold_polls(self, monkeypatch):
         import executor as ex
+        monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", True)
         monkeypatch.setattr(ex, "SUSTAINED_LOSS_POLLS", 3)
         # Price below entry (0.40 < 0.60)
         monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.40, 0.40))
@@ -292,6 +294,7 @@ class TestSustainedLossGuard:
 
     def test_streak_resets_on_price_recovery(self, monkeypatch):
         import executor as ex
+        monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", True)
         monkeypatch.setattr(ex, "SUSTAINED_LOSS_POLLS", 3)
         monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
 
@@ -311,4 +314,27 @@ class TestSustainedLossGuard:
         e._check_exit_for_position(pos)
         assert e._loss_streak.get(99, 0) == 0
         assert exits == []
+
+    def test_guard_disabled_by_default_holds_deep_underwater(self, monkeypatch):
+        """With ENABLE_SUSTAINED_LOSS_GUARD off (the default), a position sitting far
+        below entry across many polls is HELD to resolution, not force-exited. Backtest
+        showed early exits killed 4 winners for every 1 loss avoided."""
+        import executor as ex
+        # defaults: both guards off
+        monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", False)
+        monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", False)
+        monkeypatch.setattr(ex, "SUSTAINED_LOSS_POLLS", 3)
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
+        # deep drawdown (0.30 vs 0.60 entry = -50%), sustained across 5 polls
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.30, 0.30))
+
+        e = self._exec()
+        pos = self._pos()
+        exits = []
+        monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits.append(reason))
+
+        for _ in range(5):
+            e._check_exit_for_position(pos)
+        assert exits == []  # never exits — held to resolution
+        assert e._loss_streak.get(99, 0) == 0  # streak never accrues while guard is off
 

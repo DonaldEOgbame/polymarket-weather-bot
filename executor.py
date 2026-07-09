@@ -15,6 +15,7 @@ from config import (
     MIN_MODEL_COUNT, TAKER_FEE_RATE,
     HOLD_WINNERS_TO_RESOLUTION, THESIS_BREAK_PROB_DELTA, TAKE_PROFIT_PRICE, SUSTAINED_LOSS_POLLS,
     SUSTAINED_LOSS_MIN_DROP, REENTRY_COOLDOWN_HOURS,
+    ENABLE_SUSTAINED_LOSS_GUARD, ENABLE_THESIS_BREAK_EXIT,
 )
 
 
@@ -398,21 +399,20 @@ class Executor:
         exit_reason = None
 
         # --- Sustained-loss guard (independent of edge formula) ---
-        # Track how many consecutive 5-min polls the mid-price has sat MATERIALLY below
-        # entry. This fires even when the edge formula looks positive (stale/wrong
-        # probability can inflate apparent edge while the market is genuinely moving
-        # against us). The streak only accrues once the drawdown exceeds
-        # SUSTAINED_LOSS_MIN_DROP — a 1-2¢ book wobble must NOT trip it, or the guard just
-        # churns winning positions (the Guangzhou bleed: 8 exits at −2.3%, each re-bought).
+        # DISABLED by default (ENABLE_SUSTAINED_LOSS_GUARD=false). Backtest on the first 22
+        # trades showed even a 10% floor would exit 4 eventual winners for every 1 real loss
+        # avoided — same-day weather books wobble 15-25% intraday then recover. Kept intact
+        # behind the flag to re-enable once a larger sample justifies it. When on: track how
+        # many consecutive polls the mid sat ≥SUSTAINED_LOSS_MIN_DROP below entry, then exit.
         if not hasattr(self, '_loss_streak'):
             self._loss_streak = {}  # safety: Executor.__new__ skips __init__ in tests
         pos_key = pos.get("id", pos.get("market_id"))
-        if pnl_pct <= -SUSTAINED_LOSS_MIN_DROP:
+        if ENABLE_SUSTAINED_LOSS_GUARD and pnl_pct <= -SUSTAINED_LOSS_MIN_DROP:
             self._loss_streak[pos_key] = self._loss_streak.get(pos_key, 0) + 1
         else:
             self._loss_streak.pop(pos_key, None)
         streak = self._loss_streak.get(pos_key, 0)
-        if streak >= SUSTAINED_LOSS_POLLS:
+        if ENABLE_SUSTAINED_LOSS_GUARD and streak >= SUSTAINED_LOSS_POLLS:
             exit_reason = (
                 f"Sustained loss ({streak} polls below entry, "
                 f"mid=${current_price:.3f} vs entry=${entry_price:.3f}, pnl={pnl_pct:.1%})"
@@ -491,7 +491,7 @@ class Executor:
                 target_date_str = signals[0]["target_date"]
                 adaptive_floor = self._adaptive_exit_floor(target_date_str, now)
 
-                if current_edge < adaptive_floor:
+                if ENABLE_THESIS_BREAK_EXIT and current_edge < adaptive_floor:
                     # Edge fell below the floor — but WHY? Two opposite causes, only one
                     # worth selling on:
                     #   thesis broken  -> the model's probability for OUR side got worse
@@ -500,6 +500,8 @@ class Executor:
                     #   just converged -> price moved TOWARD us (bet winning) while the
                     #                     forecast still supports it. Holding to $1/$0
                     #                     settlement pays far more than scalping now.
+                    # DISABLED by default: backtest showed the thesis-break fired on 4
+                    # eventual winners (intraday forecast swings) for every 1 real loss cut.
                     thesis_broken = self._thesis_broken(pos, latest_prob, current_price, entry_price)
                     if thesis_broken or not HOLD_WINNERS_TO_RESOLUTION:
                         exit_reason = (
