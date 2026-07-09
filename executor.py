@@ -592,8 +592,14 @@ class Executor:
                 logging.warning(f"Exit SELL did not fill for {pos['market_id']}; leaving open for retry.")
                 return
             # Recompute realized PnL from the ACTUAL exit fill price, not the mid estimate.
+            # Must subtract the taker fee here too — the paper-mode estimate above does
+            # (exit_fee), but this live path previously dropped it entirely even though
+            # fee_bps was already fetched, silently overstating every live exit's PnL.
             exit_price = fill["price"]
-            pnl_dollars = (exit_price - pos["entry_price"]) * (pos["size_usdc"] / pos["entry_price"])
+            exit_shares = pos["size_usdc"] / pos["entry_price"]
+            fee_rate = (fill["fee_bps"] / 10000.0) if fill.get("fee_bps") else TAKER_FEE_RATE
+            exit_fee = fee_rate * exit_price * (1.0 - exit_price) * exit_shares
+            pnl_dollars = (exit_price - pos["entry_price"]) * exit_shares - exit_fee
             logging.info(
                 f"EXIT FILLED {pos['market_id']} ({pos['side']}): {fill['shares']} sh @ ${exit_price:.4f} "
                 f"| realized PnL ${pnl_dollars:.2f} | fee_bps={fill['fee_bps']}"

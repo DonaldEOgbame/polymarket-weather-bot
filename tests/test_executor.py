@@ -8,6 +8,7 @@ only resting quotes were extreme and shallow. The correct behavior is to hold
 such positions for resolution settlement ($1/$0), not to book a market exit.
 """
 import sys, os
+import pytest
 from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
@@ -116,9 +117,49 @@ class TestTakeProfitExit:
         monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits_called.append(reason))
         
         e._check_exit_for_position(pos)
-        
+
         assert len(exits_called) == 1
         assert "Take Profit" in exits_called[0]
+
+
+class TestLiveExitFeeDeduction:
+    """Live-mode exits recompute PnL from the actual fill price (not the paper
+    mid estimate), but must still subtract the taker fee — omitting it silently
+    overstates every live exit's realized PnL (stop-loss, take-profit, edge-decay)."""
+
+    def test_live_exit_pnl_subtracts_fee(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+
+        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(e, "_submit_taker",
+                            lambda token_id, side, amount: {"shares": 10.0, "price": 0.70, "fee_bps": 500})
+        monkeypatch.setattr(ex, "close_position_atomic", lambda **kwargs: kwargs)
+        monkeypatch.setattr(ex, "send_trade_exit", lambda *a, **k: None)
+
+        pos = {
+            "id": 1, "market_id": "0x1", "token_id": "tok_1", "side": "NO",
+            "entry_price": 0.55, "size_usdc": 5.5,
+            "entry_time": "2026-06-30T10:00:00+00:00", "question": "q",
+        }
+
+        captured = {}
+        orig_close_position_atomic = ex.close_position_atomic
+        def capture_close(**kwargs):
+            captured.update(kwargs)
+            return orig_close_position_atomic(**kwargs)
+        monkeypatch.setattr(ex, "close_position_atomic", capture_close)
+
+        e._close_position(pos, pnl_dollars=999.0, exit_reason="Stop Loss (-10.0%)")
+
+        shares = pos["size_usdc"] / pos["entry_price"]
+        expected_fee = (500 / 10000.0) * 0.70 * (1.0 - 0.70) * shares
+        expected_pnl = (0.70 - 0.55) * shares - expected_fee
+
+        assert captured["pnl_dollars"] == pytest.approx(expected_pnl)
+        # Sanity: the naive no-fee calc would have been strictly larger (fee > 0).
+        naive_pnl = (0.70 - 0.55) * shares
+        assert captured["pnl_dollars"] < naive_pnl
 
 
 class TestIntradayMetarExit:

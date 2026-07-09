@@ -319,5 +319,6 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         "size_usdc": final_size,
         "price": target_price,
         "model_prob": prob,
-        "edge": edge_used
+        "edge": edge_used,
+        "model_count": model_count
     }
