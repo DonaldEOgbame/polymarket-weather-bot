@@ -558,6 +558,25 @@ def _discover_weather_markets(now: datetime) -> tuple[list, dict]:
             for m in markets:
                 if not m.get("active") or m.get("closed"):
                     continue
+                # Gamma's active=true filter lags: events (and their nested bucket
+                # markets) commonly sit active=true/closed=false for hours after
+                # their own endDate passes, before Polymarket flips the flags.
+                # The event-level date check above catches the event's own
+                # endDate, but each market can carry a different endDate. Verified
+                # live: 220/248 unique markets scanned over 2026-07-07→09 were
+                # already past endDate, sailing through discovery every cycle only
+                # to be dropped as "Already expired" in Phase 2 — burning nearly
+                # all of MAX_CLOB_CANDIDATES on dead markets and starving out the
+                # few live ones (root cause of the 2-day trade drought).
+                m_end_str = m.get("endDateIso") or m.get("endDate")
+                if m_end_str:
+                    try:
+                        m_end = parse_utc_datetime(m_end_str)
+                        m_hours_away = (m_end - now).total_seconds() / 3600.0
+                        if m_hours_away < 0 or m_hours_away > MAX_HOURS_TO_RESOLUTION:
+                            continue
+                    except Exception:
+                        pass
                 weather_markets.append(m)
                 page_had_active = True
 
