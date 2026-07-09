@@ -264,8 +264,52 @@ def update_bankroll(event, amount, trade_id=None):
     return new_balance
 
 
+def open_position_atomic(market_id, token_id, side, price, size, now_iso, question,
+                          is_high, city, target_date, model_prob, edge):
+    """Insert the position row, the trade row, and debit the bankroll all in a
+    single transaction — see close_position_atomic for why the entry and exit
+    sides both need this: a process kill between separate connect()/commit()
+    calls (OOM-kill, deploy restart) could otherwise leave a position open
+    without its cash ever being debited, silently inflating available cash.
+    Returns the new trade_id."""
+    with _write_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "INSERT INTO positions (market_id, token_id, side, entry_price, size_usdc, "
+                "entry_time, question, is_high, city, target_date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (market_id, token_id, side, price, size, now_iso, question,
+                 1 if is_high else 0, city, target_date)
+            )
+            cur.execute(
+                "INSERT INTO trades (market_id, side, size_usdc, fill_price, model_prob, edge, "
+                "status, entry_time, is_high, city, target_date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (market_id, side, size, price, model_prob, edge, "OPEN", now_iso,
+                 1 if is_high else 0, city, target_date)
+            )
+            trade_id = cur.lastrowid
+            row = cur.execute("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1").fetchone()
+            current = row[0] if row else STARTING_BANKROLL
+            new_balance = current - size
+            cur.execute(
+                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id) VALUES (?, ?, ?, ?, ?)",
+                (now_iso, "TRADE_ENTRY", -size, new_balance, trade_id)
+            )
+            conn.commit()
+    return trade_id
+
+
 def close_position_atomic(pos_id, market_id, side, pnl_dollars, size_usdc, exit_reason):
-    """Delete position row and update trade record in a single transaction.
+    """Delete position row, update trade record, and credit the bankroll all in a
+    single transaction. Previously the bankroll credit was a separate connection/
+    commit after the position delete + trade update — a process kill between the
+    two (OOM-kill, deploy restart, host crash; not just the graceful SIGTERM path)
+    would leave the position gone and the trade marked CLOSED with a pnl, but the
+    bankroll ledger never receiving the size_usdc + pnl_dollars credit, silently
+    and permanently shrinking available cash. Folding the balance read + all three
+    writes into one transaction closes that window.
     Returns True on success, False if the position was already gone (idempotent)."""
     now = datetime.now(timezone.utc).isoformat()
     with _write_lock:
@@ -279,15 +323,12 @@ def close_position_atomic(pos_id, market_id, side, pnl_dollars, size_usdc, exit_
                 "WHERE market_id=? AND status='OPEN' AND side=?",
                 ("CLOSED", now, exit_reason, pnl_dollars, market_id, side)
             )
-            conn.commit()
-        # Bankroll update done outside the SQLite transaction but still inside _write_lock
-        current = get_current_bankroll()
-        new_balance = current + size_usdc + pnl_dollars
-        now2 = datetime.now(timezone.utc).isoformat()
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
+            row = cur.execute("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1").fetchone()
+            current = row[0] if row else STARTING_BANKROLL
+            new_balance = current + size_usdc + pnl_dollars
+            cur.execute(
                 "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id) VALUES (?, ?, ?, ?, ?)",
-                (now2, "TRADE_EXIT", size_usdc + pnl_dollars, new_balance, None)
+                (now, "TRADE_EXIT", size_usdc + pnl_dollars, new_balance, None)
             )
             conn.commit()
     return True

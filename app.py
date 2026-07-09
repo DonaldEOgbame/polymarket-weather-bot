@@ -110,7 +110,10 @@ def api_data():
         (f'{today}T00:00:00',)
     )
     daily_pnl = dpnl[0]['p'] if dpnl else 0.0
-    circuit_used = max(0.0, daily_pnl / DAILY_LOSS_LIMIT) if DAILY_LOSS_LIMIT != 0 else 0.0
+    # Clamp to 1.0 — an uncapped ratio would exceed 100% (e.g. a live-mode fill
+    # blowing past the limit in one move) and overflow any progress-bar/gauge
+    # the dashboard renders from this value.
+    circuit_used = min(1.0, max(0.0, daily_pnl / DAILY_LOSS_LIMIT)) if DAILY_LOSS_LIMIT != 0 else 0.0
     circuit_tripped = circuit_used >= 1.0
 
     portfolio = {

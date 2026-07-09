@@ -3,7 +3,7 @@ import logging
 from datetime import datetime, timezone
 from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, MarketOrderArgs, OrderType
-from db import execute_query, fetch_query, update_bankroll, get_open_position, close_position_atomic
+from db import execute_query, fetch_query, get_open_position, close_position_atomic, open_position_atomic
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
 from scanner import get_realtime_price, get_market_resolution, get_gamma_mid_price
 from zoneinfo import ZoneInfo
@@ -286,22 +286,12 @@ class Executor:
             )
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        execute_query(
-            "INSERT INTO positions (market_id, token_id, side, entry_price, size_usdc, "
-            "entry_time, question, is_high, city, target_date) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (opp.market_id, signal_data["token_id"], side, price, size,
-             now_iso, opp.question, 1 if opp.is_high else 0, opp.city, opp.date)
+        open_position_atomic(
+            market_id=opp.market_id, token_id=signal_data["token_id"], side=side,
+            price=price, size=size, now_iso=now_iso, question=opp.question,
+            is_high=opp.is_high, city=opp.city, target_date=opp.date,
+            model_prob=signal_data["model_prob"], edge=signal_data["edge"],
         )
-        trade_id = execute_query(
-            "INSERT INTO trades (market_id, side, size_usdc, fill_price, model_prob, edge, "
-            "status, entry_time, is_high, city, target_date) "
-            "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-            (opp.market_id, side, size, price, signal_data["model_prob"],
-             signal_data["edge"], "OPEN", now_iso,
-             1 if opp.is_high else 0, opp.city, opp.date)
-        )
-        update_bankroll("TRADE_ENTRY", -size, trade_id)
         send_trade_entry(opp.question, price, signal_data["model_prob"], signal_data["edge"], size)
 
     def get_live_prices(self):
