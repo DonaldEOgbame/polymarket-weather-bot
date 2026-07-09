@@ -8,7 +8,7 @@ from db import (
     init_db, fetch_query, get_portfolio_state, get_daily_pnl, execute_query,
     purge_old_signals, purge_old_scan_log, purge_old_notifications,
 )
-from scanner import scan_markets, verify_parser_fixtures
+from scanner import scan_markets, verify_parser_fixtures, prefetch_order_books
 from strategy import evaluate_opportunity
 from executor import Executor
 from alerts import send_daily_summary, send_error_alert, send_circuit_breaker_alert
@@ -141,6 +141,10 @@ def run_scan_cycle():
         opportunities = scan_markets()
 
         weather_cache = prefetch_signal_engines(opportunities)
+        # Warm the live order-book cache in parallel — see prefetch_order_books'
+        # docstring for why this is safe to parallelize while the eval loop below
+        # (which reads/mutates portfolio_state) must stay sequential.
+        prefetch_order_books(opportunities)
 
         traded = 0
         skipped = 0

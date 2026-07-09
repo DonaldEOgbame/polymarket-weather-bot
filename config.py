@@ -187,12 +187,19 @@ MAX_HOURS_TO_RESOLUTION = float(os.getenv("MAX_HOURS_TO_RESOLUTION", "72"))
 # --- Market Discovery ---
 # Markets per API page (Gamma API max is 100)
 MARKET_DISCOVERY_LIMIT = int(os.getenv("MARKET_DISCOVERY_LIMIT", "100"))
-# Maximum pages to fetch per scan cycle before giving up
-MARKET_DISCOVERY_MAX_PAGES = int(os.getenv("MARKET_DISCOVERY_MAX_PAGES", "5"))
+# Maximum pages to fetch per scan cycle before giving up. Measured live 2026-07-09:
+# the real pool of active, within-72h weather events is ~1,400+ bucket markets, which
+# needs ~20 pages at LIMIT=100 to fully enumerate — 5 pages (500 events) was silently
+# truncating discovery to well under half the live universe before Phase 1.5 ever ran.
+MARKET_DISCOVERY_MAX_PAGES = int(os.getenv("MARKET_DISCOVERY_MAX_PAGES", "20"))
 # Kept for backwards-compat but no longer used as primary stop — expiry detection stops pagination
 MARKET_DISCOVERY_STOP_AFTER_WEATHER = int(os.getenv("MARKET_DISCOVERY_STOP_AFTER_WEATHER", "500"))
-# Max markets sent to CLOB orderbook API per scan (scored by liquidity + price uncertainty)
-MAX_CLOB_CANDIDATES = int(os.getenv("MAX_CLOB_CANDIDATES", "150"))
+# Max markets sent to CLOB orderbook API per scan (scored by liquidity + price uncertainty).
+# Raised from 150: measured live 2026-07-09 that the real prefiltered candidate pool is
+# ~1,377 markets/cycle, so 150 (10.9%) was leaving ~89% of live weather markets unseen
+# on every scan. MIN_VOLUME is now enforced in Phase 1.5 (before this cap), so raising
+# this only adds real, sufficiently-liquid candidates — not more low-volume noise.
+MAX_CLOB_CANDIDATES = int(os.getenv("MAX_CLOB_CANDIDATES", "1200"))
 # Max bucket markets evaluated per city/date pair (prevents one city dominating the cap)
 MAX_BUCKETS_PER_CITY_DATE = int(os.getenv("MAX_BUCKETS_PER_CITY_DATE", "5"))
 

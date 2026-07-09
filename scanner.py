@@ -388,6 +388,39 @@ def _batch_fetch_prices(token_ids: list[str], max_workers: int = 20) -> dict[str
     return results
 
 
+def prefetch_order_books(opportunities, max_workers: int = 20) -> None:
+    """Warm the shared price cache (utils._PRICE_CACHE, 30s TTL, thread-safe) for every
+    YES/NO token across all opportunities, in parallel, before the sequential Phase-2
+    evaluation loop runs.
+
+    Why this and not parallelizing the eval loop itself: evaluate_opportunity's sizing
+    reads portfolio_state, and execute_trade mutates it — two markets evaluated out of
+    order against a stale cash balance could both pass the "enough cash?" check and
+    jointly overspend past MAX_TOTAL_EXPOSURE_FRACTION. That loop must stay sequential.
+    The actual cost that scales with candidate count is get_live_spread_fraction's two
+    live CLOB /book calls per market (one per side), made synchronously inside that
+    sequential loop — at ~0.4-0.5s/market this is what turned a 1200-candidate scan
+    into ~400s, eating most of the 600s scan interval. Those calls are independent,
+    side-effect-free network reads (unlike execute_trade), so pre-fetching them
+    concurrently ahead of time and letting the sequential loop read the warm cache
+    is safe: it changes nothing about ordering or portfolio state, only when the
+    HTTP round-trip happens.
+    """
+    token_ids = set()
+    for opp in opportunities:
+        token_ids.add(opp.token_id_yes)
+        token_ids.add(opp.token_id_no)
+    if not token_ids:
+        return
+    with ThreadPoolExecutor(max_workers=max_workers) as pool:
+        futures = [pool.submit(get_realtime_price_status, tid) for tid in token_ids]
+        for future in as_completed(futures):
+            try:
+                future.result()
+            except Exception:
+                pass  # get_realtime_price_status already caches (0,0,False) on failure
+
+
 def _log_skip(market_id, question, reason, hours_to_res=None, volume=None, end_date=None):
     now = datetime.now(timezone.utc).isoformat()
     end_date_str = end_date.isoformat() if isinstance(end_date, datetime) else end_date
@@ -699,10 +732,17 @@ def scan_markets():
         return []
 
     # --- Phase 1.5: cheap pre-filter before hitting CLOB ---
-    # Drop markets with no station mapping or unparseable bucket so CLOB calls
-    # are only made for markets that could actually be traded.
+    # Drop markets with no station mapping, unparseable bucket, or insufficient volume
+    # so CLOB calls (and, more importantly, a scarce MAX_CLOB_CANDIDATES slot) are only
+    # spent on markets that could actually be traded. MIN_VOLUME used to be enforced
+    # only in Phase 2, AFTER the MAX_CLOB_CANDIDATES cap already truncated the pool —
+    # meaning a sub-$500-liquidity market could win a scored slot over a real candidate
+    # only to be dropped downstream anyway, wasting the same scarce capacity the
+    # already-expired-market bug did. Filtering on volume here, before scoring/capping,
+    # means every slot that survives to Phase 2 is one that could actually fill.
     prefiltered = []
     prefilter_skipped = 0
+    volume_skipped = 0
     for m in weather_markets:
         q = m.get("question", "")
         city_key, _ = get_station_coords(q)
@@ -713,10 +753,15 @@ def scan_markets():
         if lb is None and ub is None:
             prefilter_skipped += 1
             continue
+        volume = float(m.get("liquidityNum") or m.get("liquidityClob") or 0)
+        if volume < MIN_VOLUME:
+            volume_skipped += 1
+            continue
         prefiltered.append(m)
-    if prefilter_skipped:
+    if prefilter_skipped or volume_skipped:
         logging.info(
-            f"Pre-filter: {prefilter_skipped} markets dropped (no station or bucket), "
+            f"Pre-filter: {prefilter_skipped} dropped (no station/bucket), "
+            f"{volume_skipped} dropped (volume < {MIN_VOLUME:.0f}), "
             f"{len(prefiltered)} remain for CLOB evaluation"
         )
 
