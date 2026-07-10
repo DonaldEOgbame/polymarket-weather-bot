@@ -18,7 +18,13 @@ STARTING_BANKROLL = float(os.getenv("STARTING_BANKROLL", "40.0"))
 
 # --- Strategy Thresholds ---
 EDGE_THRESHOLD = float(os.getenv("EDGE_THRESHOLD", "0.08"))
-MIN_MODEL_AGREEMENT = float(os.getenv("MIN_MODEL_AGREEMENT", "0.6"))
+# Raised 0.6->0.75 by user preference 2026-07-10: with 3-4 models this only takes
+# discrete values (e.g. 0.50/0.67/0.75/1.00 at n=4), so 0.75 means "at least 3 of 4
+# models agree." Historical note: 9/12 trades so far sat at exactly 0.75 and the
+# one loss was also at 0.75 (spread, not agreement, was the actual gap on that
+# trade — see forecast_direction_agrees), so this isn't validated by outcome data
+# as better than 0.6, it's a deliberate stricter stance pending more resolved trades.
+MIN_MODEL_AGREEMENT = float(os.getenv("MIN_MODEL_AGREEMENT", "0.75"))
 # 2.7°F = 1.5°C — maximum spread between model forecasts before trade is skipped
 MAX_MODEL_SPREAD = float(os.getenv("MAX_MODEL_SPREAD", "2.7"))
 
