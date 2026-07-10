@@ -243,7 +243,7 @@ def get_signal_engine(city_name, target_date, is_high=True, hours_to_resolution=
     if total_weight == 0:
         return None
 
-    weighted_mean = sum(
+    raw_weighted_mean = sum(
         temp * (weights[m] / total_weight)
         for m, temp in model_temps.items()
         if m in weights
@@ -251,7 +251,7 @@ def get_signal_engine(city_name, target_date, is_high=True, hours_to_resolution=
     # Shift toward the METAR resolution source Polymarket settles on (runs warmer
     # than Open-Meteo). Applied to the mean only — it moves where the distribution
     # is centred without touching model spread/agreement.
-    weighted_mean += METAR_WARM_CORRECTION_F
+    weighted_mean = raw_weighted_mean + METAR_WARM_CORRECTION_F
 
     model_spread_std = float(_pstdev(list(model_temps.values())))
 
@@ -281,6 +281,7 @@ def get_signal_engine(city_name, target_date, is_high=True, hours_to_resolution=
         "base_error": base_error,
         "model_agreement": model_agreement,
         "raw_models": model_temps,
+        "raw_weighted_mean": raw_weighted_mean,
         "city_key": city_key,
         "model_spread": model_spread,
         "lead_time_hours": hours_to_resolution,
@@ -419,11 +420,11 @@ def prefetch_signal_engines(opportunities) -> dict:
             engine_cache[key] = None
             continue
 
-        weighted_mean = sum(
+        raw_weighted_mean = sum(
             temp * (weights[m] / total_weight)
             for m, temp in model_temps.items() if m in weights
         )
-        weighted_mean += METAR_WARM_CORRECTION_F  # match METAR resolution source (see get_signal_engine)
+        weighted_mean = raw_weighted_mean + METAR_WARM_CORRECTION_F  # match METAR resolution source (see get_signal_engine)
         model_spread_std = float(_pstdev(list(model_temps.values())))
 
         base_error = _interpolate_base_error(opp.hours_to_resolution)
@@ -446,6 +447,7 @@ def prefetch_signal_engines(opportunities) -> dict:
             "base_error": base_error,
             "model_agreement": model_agreement,
             "raw_models": model_temps,
+            "raw_weighted_mean": raw_weighted_mean,
             "city_key": city_key,
             "model_spread": model_spread,
             "lead_time_hours": opp.hours_to_resolution,

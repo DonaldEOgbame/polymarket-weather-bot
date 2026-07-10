@@ -60,13 +60,14 @@ def forecast_margin_ok(side, ensemble_mean, bucket_low, bucket_high, margin_f):
     return lo + margin_f <= ensemble_mean <= hi - margin_f
 
 
-def forecast_direction_agrees(side, raw_models, bucket_low, bucket_high):
-    """True if the RAW model forecasts (simple average, BEFORE any resolution-
-    source correction like METAR_WARM_CORRECTION_F — that shift is folded into
-    engine_res["ensemble_mean"] upstream in get_signal_engine, not visible here)
-    point the same direction as the bet. Hard rule, independent of edge size:
-    a trade must never bet against what the models themselves predict, only
-    exploit mispricing on the side the models already favor.
+def forecast_direction_agrees(side, raw_weighted_mean, bucket_low, bucket_high):
+    """True if the model-weighted forecast mean (same per-model weighting as
+    engine_res["ensemble_mean"], BEFORE any resolution-source correction like
+    METAR_WARM_CORRECTION_F — that shift is folded into ensemble_mean upstream
+    in get_signal_engine, not applied here) points the same direction as the
+    bet. Hard rule, independent of edge size: a trade must never bet against
+    what the models themselves predict, only exploit mispricing on the side
+    the models already favor.
 
     Originated from a real trade 2026-07-10: Helsinki "above 29C", raw models
     averaging ~81F (predicting NOT crossing it — ~2.7F under the threshold),
@@ -75,13 +76,18 @@ def forecast_direction_agrees(side, raw_models, bucket_low, bucket_high):
     raw forecast justified. That bet against the models' own directional call,
     riding entirely on a global (not city-verified) correction in the
     distribution's thin tail. Extended to bounded buckets too, by request —
-    NO requires the raw mean outside the (padded) bucket, YES requires it
+    NO requires the weighted mean outside the (padded) bucket, YES requires it
     inside, mirroring forecast_margin_ok's direction logic but as a hard
     pass/fail independent of FORECAST_MARGIN_F (so it still applies even if
-    that margin is ever set to 0)."""
-    if not raw_models:
+    that margin is ever set to 0).
+
+    Uses the same per-model weights as the actual trade decision (not a flat
+    average across models) — using an unweighted mean here would let this gate
+    disagree with, and falsely block, the very edge calculation it's meant to
+    police."""
+    if raw_weighted_mean is None:
         return True
-    raw_mean = sum(raw_models.values()) / len(raw_models)
+    raw_mean = raw_weighted_mean
 
     if bucket_low is not None and bucket_high is not None:
         lo = bucket_low - 0.5
@@ -191,7 +197,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             skip_reason = f"YES edge {yes_edge:.3f} but market spread too wide ({yes_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"
         elif not forecast_margin_ok("YES", engine_res["ensemble_mean"], opp.bucket_low, opp.bucket_high, FORECAST_MARGIN_F):
             skip_reason = f"YES edge {yes_edge:.3f} but forecast too close to bucket edge (mean {engine_res['ensemble_mean']:.1f}°F, need ≥{FORECAST_MARGIN_F}°F clear)"
-        elif not forecast_direction_agrees("YES", engine_res.get("raw_models"), opp.bucket_low, opp.bucket_high):
+        elif not forecast_direction_agrees("YES", engine_res.get("raw_weighted_mean"), opp.bucket_low, opp.bucket_high):
             skip_reason = f"YES edge {yes_edge:.3f} but raw model forecast points the other way (bet requires models to predict landing in bucket, before resolution-source correction)"
         else:
             signal = "BUY_YES"
@@ -211,7 +217,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             skip_reason = f"NO edge {no_edge:.3f} but market spread too wide ({no_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"
         elif not forecast_margin_ok("NO", engine_res["ensemble_mean"], opp.bucket_low, opp.bucket_high, FORECAST_MARGIN_F):
             skip_reason = f"NO edge {no_edge:.3f} but forecast too close to bucket edge (mean {engine_res['ensemble_mean']:.1f}°F, need ≥{FORECAST_MARGIN_F}°F clear of bucket)"
-        elif not forecast_direction_agrees("NO", engine_res.get("raw_models"), opp.bucket_low, opp.bucket_high):
+        elif not forecast_direction_agrees("NO", engine_res.get("raw_weighted_mean"), opp.bucket_low, opp.bucket_high):
             skip_reason = f"NO edge {no_edge:.3f} but raw model forecast points the other way (bet requires models to predict missing the bucket, before resolution-source correction)"
         else:
             signal = "BUY_NO"

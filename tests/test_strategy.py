@@ -134,48 +134,41 @@ class TestForecastDirectionAgrees:
 
     def test_helsinki_yes_bet_against_raw_models_is_blocked(self):
         from strategy import forecast_direction_agrees
-        # Real data from the 2026-07-10 Helsinki trade: raw models ~80.5-81.2F,
+        # Real data from the 2026-07-10 Helsinki trade: weighted mean ~81F,
         # threshold 83.8F ("above 29C"). Models predict NOT crossing it.
-        raw_models = {"ecmwf_ifs025": 81.19, "icon_global": 81.23, "gfs_global": 80.9, "gem_global": 80.52}
-        assert forecast_direction_agrees("YES", raw_models, 83.8, None) is False
+        assert forecast_direction_agrees("YES", 81.0, 83.8, None) is False
 
     def test_helsinki_no_bet_agrees_with_raw_models(self):
         from strategy import forecast_direction_agrees
-        raw_models = {"ecmwf_ifs025": 81.19, "icon_global": 81.23, "gfs_global": 80.9, "gem_global": 80.52}
-        assert forecast_direction_agrees("NO", raw_models, 83.8, None) is True
+        assert forecast_direction_agrees("NO", 81.0, 83.8, None) is True
 
     def test_yes_bet_above_bucket_agrees_when_models_predict_crossing(self):
         from strategy import forecast_direction_agrees
-        raw_models = {"ecmwf_ifs025": 90.0, "icon_global": 89.5, "gfs_global": 91.0}
-        assert forecast_direction_agrees("YES", raw_models, 85.0, None) is True
+        assert forecast_direction_agrees("YES", 90.0, 85.0, None) is True
 
     def test_below_bucket_direction(self):
         from strategy import forecast_direction_agrees
-        raw_models = {"ecmwf_ifs025": 40.0, "icon_global": 41.0, "gfs_global": 39.5}
         # "below 45" market: YES means temp lands below X. Models predict ~40, below 45.
-        assert forecast_direction_agrees("YES", raw_models, None, 45.0) is True
-        assert forecast_direction_agrees("NO", raw_models, None, 45.0) is False
+        assert forecast_direction_agrees("YES", 40.0, None, 45.0) is True
+        assert forecast_direction_agrees("NO", 40.0, None, 45.0) is False
 
     def test_bounded_bucket_no_bet_blocked_when_models_predict_landing_inside(self):
         from strategy import forecast_direction_agrees
-        # bucket 80-82 (padded 79.5-82.5), models predict 81 — squarely inside.
+        # bucket 80-82 (padded 79.5-82.5), weighted mean 81 — squarely inside.
         # A NO bet (temp will MISS the bucket) contradicts that — must be blocked.
-        raw_models = {"ecmwf_ifs025": 81.0, "icon_global": 81.2, "gfs_global": 80.8}
-        assert forecast_direction_agrees("NO", raw_models, 80.0, 82.0) is False
-        assert forecast_direction_agrees("YES", raw_models, 80.0, 82.0) is True
+        assert forecast_direction_agrees("NO", 81.0, 80.0, 82.0) is False
+        assert forecast_direction_agrees("YES", 81.0, 80.0, 82.0) is True
 
     def test_bounded_bucket_yes_bet_blocked_when_models_predict_missing(self):
         from strategy import forecast_direction_agrees
-        # bucket 80-82, models predict 90 — well outside. A YES bet contradicts
+        # bucket 80-82, weighted mean 90 — well outside. A YES bet contradicts
         # the models (this mirrors every real historical NO trade's setup, just
         # checking the opposite side is correctly rejected).
-        raw_models = {"ecmwf_ifs025": 90.0}
-        assert forecast_direction_agrees("YES", raw_models, 80.0, 82.0) is False
-        assert forecast_direction_agrees("NO", raw_models, 80.0, 82.0) is True
+        assert forecast_direction_agrees("YES", 90.0, 80.0, 82.0) is False
+        assert forecast_direction_agrees("NO", 90.0, 80.0, 82.0) is True
 
-    def test_missing_raw_models_fails_open(self):
+    def test_missing_raw_weighted_mean_fails_open(self):
         from strategy import forecast_direction_agrees
-        assert forecast_direction_agrees("YES", {}, 85.0, None) is True
         assert forecast_direction_agrees("YES", None, 85.0, None) is True
 
 
