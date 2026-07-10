@@ -172,6 +172,48 @@ class TestForecastDirectionAgrees:
         assert forecast_direction_agrees("YES", None, 85.0, None) is True
 
 
+class TestYesEntriesDisabled:
+    """YES entries are hard-disabled by request: every real winning trade to date
+    has been NO, and both live YES signals the bot ever generated were judged bad
+    bets after the fact. No config flag — YES must never produce a BUY or EXPLORE
+    signal regardless of edge, agreement, or margin."""
+
+    def _run(self, monkeypatch, yes_price, no_price, mean, bucket_low, bucket_high):
+        import strategy
+        from types import SimpleNamespace
+
+        opp = SimpleNamespace(
+            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=48.0,
+            bucket_low=bucket_low, bucket_high=bucket_high, yes_price=yes_price, no_price=no_price,
+            token_id_yes="y", token_id_no="n", market_id="m1",
+        )
+        engine_res = {
+            "ensemble_mean": mean, "ensemble_std": 1.0, "model_agreement": 1.0,
+            "model_spread": 1.0,
+            "raw_models": {"ecmwf_ifs025": mean, "icon_global": mean, "gfs_global": mean, "gem_global": mean},
+            "raw_weighted_mean": mean, "model_count": 4,
+        }
+        portfolio_state = {"available_cash": 100.0, "total_equity": 100.0, "locked_cash": 0.0}
+        monkeypatch.setattr(strategy, "get_realtime_price", lambda tid: (0.0, 0.0))
+        monkeypatch.setattr(strategy, "execute_query", lambda *a, **k: None)
+        return strategy.evaluate_opportunity(opp, portfolio_state, engine_res=engine_res)
+
+    def test_huge_yes_edge_never_trades(self, monkeypatch):
+        # Mean sits dead center in the bucket and YES is priced at 10c — a YES edge
+        # this large (~0.89) would have fired BUY_YES before the gate was added.
+        result = self._run(monkeypatch, yes_price=0.10, no_price=0.90,
+                            mean=90.0, bucket_low=88.0, bucket_high=92.0)
+        assert result is None
+
+    def test_no_side_still_trades_normally(self, monkeypatch):
+        # Sanity check the YES gate didn't collaterally break NO entries.
+        result = self._run(monkeypatch, yes_price=0.90, no_price=0.10,
+                            mean=70.0, bucket_low=88.0, bucket_high=92.0)
+        assert result is not None
+        assert result["signal"] == "BUY_NO"
+        assert result["side"] == "NO"
+
+
 class TestParseTargetDate:
     """Date must come from the market's 'on <DATE>' resolution text, not the endDate
     timestamp whose UTC-close convention drifted and mis-dated far-offset stations."""

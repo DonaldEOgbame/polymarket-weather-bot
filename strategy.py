@@ -187,25 +187,12 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     edge_used = 0.0
     skip_reason = None
 
-    # Evaluate YES side
+    # YES side disabled by request: every real winning trade to date has been NO
+    # (NO is structurally favored on bounded weather buckets), and the two YES
+    # signals the bot has generated live were both judged bad bets after the fact
+    # (Helsinki 2026-07-10, reversed; Shanghai margin-fail cases). Never open YES.
     if yes_edge >= effective_edge_threshold:
-        if agreement < MIN_MODEL_AGREEMENT:
-            skip_reason = f"YES edge {yes_edge:.3f} but agreement too low ({agreement:.2f} < {MIN_MODEL_AGREEMENT})"
-        elif spread > MAX_MODEL_SPREAD:
-            skip_reason = f"YES edge {yes_edge:.3f} but spread too wide ({spread:.1f}°F > {MAX_MODEL_SPREAD}°F)"
-        elif yes_spread_frac is not None and yes_spread_frac > MAX_ENTRY_SPREAD_FRACTION:
-            skip_reason = f"YES edge {yes_edge:.3f} but market spread too wide ({yes_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"
-        elif not forecast_margin_ok("YES", engine_res["ensemble_mean"], opp.bucket_low, opp.bucket_high, FORECAST_MARGIN_F):
-            skip_reason = f"YES edge {yes_edge:.3f} but forecast too close to bucket edge (mean {engine_res['ensemble_mean']:.1f}°F, need ≥{FORECAST_MARGIN_F}°F clear)"
-        elif not forecast_direction_agrees("YES", engine_res.get("raw_weighted_mean"), opp.bucket_low, opp.bucket_high):
-            skip_reason = f"YES edge {yes_edge:.3f} but raw model forecast points the other way (bet requires models to predict landing in bucket, before resolution-source correction)"
-        else:
-            signal = "BUY_YES"
-            side = "YES"
-            kelly = calculate_kelly(yes_edge, opp.yes_price)
-            target_price = opp.yes_price
-            target_token = opp.token_id_yes
-            edge_used = yes_edge
+        skip_reason = f"YES edge {yes_edge:.3f} but YES entries are disabled"
     
     # Evaluate NO side (independent check)
     if signal is None and no_edge >= effective_edge_threshold:
@@ -239,7 +226,6 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     if not signal:
         shadow_signal_created = False
         for s_edge, s_side, s_price, s_token in [
-            (yes_edge, "YES", opp.yes_price, opp.token_id_yes),
             (no_edge, "NO", opp.no_price, opp.token_id_no),
         ]:
             if s_edge < effective_edge_threshold:
