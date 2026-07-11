@@ -132,7 +132,7 @@ function TopBar({ portfolio, scanLog, activeTab, setActiveTab }) {
       <div className="top-nav">
         <div className={`nav-item ${activeTab === 'desk' ? 'active' : ''}`} onClick={() => setActiveTab('desk')}>Desk</div>
         <div className={`nav-item ${activeTab === 'archive' ? 'active' : ''}`} onClick={() => setActiveTab('archive')}>Archive</div>
-        <div className={`nav-item ${activeTab === 'models' ? 'active' : ''}`} onClick={() => setActiveTab('models')}>Models</div>
+        <div className={`nav-item ${activeTab === 'models' ? 'active' : ''}`} onClick={() => setActiveTab('models')}>Signals</div>
       </div>
       <div className="top-right">
         <span className={`mode-pill mode-${portfolio.mode.toLowerCase()}`}>
@@ -664,20 +664,131 @@ const GATE_TONE = {
   'Edge below threshold':     'dim',
   'Other skip':               'dim',
 };
+// Fixed draw order so the breakdown bar and legend read left-to-right by
+// severity/interest rather than shuffling with whatever the data happens to contain.
+const GATE_ORDER = [
+  'Taken', 'Models disagreed', 'Model spread too wide', 'Market spread too wide',
+  'Too close to bucket edge', 'Direction mismatch', 'YES disabled', 'Edge below threshold', 'Other skip',
+];
+
+function OutcomeBreakdown({ rows, activeFilter, setActiveFilter }) {
+  const counts = {};
+  for (const r of rows) counts[r.gate_outcome] = (counts[r.gate_outcome] || 0) + 1;
+  const present = GATE_ORDER.filter(k => counts[k]);
+  const total = rows.length || 1;
+  return (
+    <div className="outcome-panel">
+      <div className="outcome-title">Outcome breakdown — click a segment to filter</div>
+      <div className="outcome-bar">
+        {present.map(k => {
+          const pct = (counts[k] / total) * 100;
+          const tone = GATE_TONE[k] || 'dim';
+          return (
+            <div
+              key={k}
+              className={`outcome-seg tone-${tone} ${activeFilter === k ? 'active' : ''}`}
+              style={{ width: pct + '%' }}
+              title={`${k}: ${counts[k]}`}
+              onClick={() => setActiveFilter(activeFilter === k ? null : k)}
+            >
+              {pct > 6 ? counts[k] : ''}
+            </div>
+          );
+        })}
+      </div>
+      <div className="outcome-legend">
+        {present.map(k => (
+          <span
+            key={k}
+            className={`outcome-legend-item ${activeFilter && activeFilter !== k ? 'disabled' : ''}`}
+            onClick={() => setActiveFilter(activeFilter === k ? null : k)}
+          >
+            <span className={`outcome-swatch tone-${GATE_TONE[k] || 'dim'}`} />
+            {k} <span className="mono dim">{counts[k]}</span>
+          </span>
+        ))}
+      </div>
+    </div>
+  );
+}
+
+function SignalDetail({ s }) {
+  const models = Object.entries(s.raw_models || {});
+  const bucketLabel = s.bucket_low != null && s.bucket_high != null
+    ? `${s.bucket_low.toFixed(1)}–${s.bucket_high.toFixed(1)}°F`
+    : s.bucket_low != null ? `> ${s.bucket_low.toFixed(1)}°F`
+    : s.bucket_high != null ? `< ${s.bucket_high.toFixed(1)}°F`
+    : '—';
+  return (
+    <div className="detail-row">
+      <div className="detail-block">
+        <h4>Model forecasts</h4>
+        <div className="model-grid">
+          {models.length === 0 && <div className="dim small">no data</div>}
+          {models.map(([name, temp]) => (
+            <div className="model-row" key={name}>
+              <span className="dim">{name}</span>
+              <span className="mono">{temp.toFixed(2)}°F</span>
+            </div>
+          ))}
+        </div>
+      </div>
+      <div className="detail-block">
+        <h4>Market snapshot</h4>
+        <div className="kv-grid">
+          <div className="kv-row"><span className="dim">Bucket</span><span className="mono">{bucketLabel}</span></div>
+          <div className="kv-row"><span className="dim">Model probability</span><span className="mono">{s.model_prob != null ? fmtPct(s.model_prob, 0) : '—'}</span></div>
+          <div className="kv-row"><span className="dim">YES price</span><span className="mono">{s.yes_price != null ? '$' + s.yes_price.toFixed(3) : '—'}</span></div>
+          <div className="kv-row"><span className="dim">NO price</span><span className="mono">{s.no_price != null ? '$' + s.no_price.toFixed(3) : '—'}</span></div>
+          <div className="kv-row"><span className="dim">Ensemble σ</span><span className="mono">{s.ensemble_std != null ? s.ensemble_std.toFixed(2) + '°F' : '—'}</span></div>
+          <div className="kv-row"><span className="dim">Market spread</span><span className="mono">{s.market_spread_frac != null ? fmtPct(s.market_spread_frac) : '—'}</span></div>
+        </div>
+      </div>
+      <div className="detail-block">
+        <h4>{s.gate_outcome === 'Taken' ? 'Entry reason' : 'Skip reason'}</h4>
+        <div className="reason-full">{s.reason}</div>
+      </div>
+    </div>
+  );
+}
 
 function RecentSignals({ signals }) {
   const rows = signals || [];
-  const maxEdge = Math.max(...rows.map(s => s.edge || 0), 0.01);
+  const [activeFilter, setActiveFilter] = useState(null);
+  const [search, setSearch] = useState('');
+  const [expanded, setExpanded] = useState(null);
+
+  const filtered = rows.filter(s => {
+    if (activeFilter && s.gate_outcome !== activeFilter) return false;
+    if (search) {
+      const q = search.toLowerCase();
+      if (!(s.city || '').toLowerCase().includes(q) && !(s.market_id || '').toLowerCase().includes(q)) return false;
+    }
+    return true;
+  });
+  const maxEdge = Math.max(...rows.map(s => Math.abs(s.edge || 0)), 0.01);
+
   return (
     <section className="card">
       <header className="card-head">
         <div>
           <h2>Recently scanned signals</h2>
-          <p className="card-sub">{rows.length} most recent evaluations · every candidate the bot has looked at, taken or skipped</p>
+          <p className="card-sub">{rows.length} candidates from the last scan cycle · every market the bot looked at, taken or skipped</p>
         </div>
       </header>
-      {rows.length === 0 ? (
-        <div style={{ padding: '8px 4px' }} />
+      <OutcomeBreakdown rows={rows} activeFilter={activeFilter} setActiveFilter={setActiveFilter} />
+      <div className="signals-controls">
+        <input
+          type="search"
+          className="signals-search"
+          placeholder="Search city or market ID…"
+          value={search}
+          onChange={e => setSearch(e.target.value)}
+        />
+        <span className="result-count mono dim">{filtered.length} of {rows.length} shown</span>
+      </div>
+      {filtered.length === 0 ? (
+        <div style={{ padding: '8px 4px' }} className="dim small">No signals match.</div>
       ) : (
         <div className="table signals-table">
           <div className="thead">
@@ -691,28 +802,33 @@ function RecentSignals({ signals }) {
             <div>Reason</div>
           </div>
           <div className="signals-scroll-wrapper">
-            {rows.map((s, i) => {
+            {filtered.map((s, i) => {
               const tone = GATE_TONE[s.gate_outcome] || 'dim';
               const barPct = maxEdge > 0 ? Math.min(100, (Math.abs(s.edge || 0) / maxEdge) * 100) : 0;
+              const key = s.ts + '_' + s.market_id + '_' + i;
+              const isOpen = expanded === key;
               return (
-                <div className="trow" key={s.ts + i}>
-                  <div className="cell-city">
-                    <div className="city-line">{s.city || '—'}</div>
-                    <div className="city-q dim small">{fmtAgo(new Date(s.ts))} ago</div>
-                  </div>
-                  <div className="dim mono small">{s.target_date || '—'}</div>
-                  <div className="r">
-                    <div className="edge-bar-wrap">
-                      <div className="edge-bar-track"><div className="edge-bar-fill" style={{ width: barPct.toFixed(0) + '%' }} /></div>
-                      <span className="mono">{s.edge != null ? fmtPctSigned(s.edge) : '—'}</span>
+                <React.Fragment key={key}>
+                  <div className={`trow clickable ${isOpen ? 'expanded' : ''}`} onClick={() => setExpanded(isOpen ? null : key)}>
+                    <div className="cell-city">
+                      <div className="city-line">{s.city || '—'}</div>
+                      <div className="city-q dim small">{fmtAgo(new Date(s.ts))} ago</div>
                     </div>
+                    <div className="dim mono small">{s.target_date || '—'}</div>
+                    <div className="r">
+                      <div className="edge-bar-wrap">
+                        <div className="edge-bar-track"><div className="edge-bar-fill" style={{ width: barPct.toFixed(0) + '%' }} /></div>
+                        <span className="mono">{s.edge != null ? fmtPctSigned(s.edge) : '—'}</span>
+                      </div>
+                    </div>
+                    <div className="r mono dim">{s.agreement != null ? fmtPct(s.agreement, 0) : '—'}</div>
+                    <div className="r mono dim">{s.model_spread != null ? s.model_spread.toFixed(1) : '—'}</div>
+                    <div className="r mono dim">{s.mean_gap != null ? s.mean_gap.toFixed(1) : '—'}</div>
+                    <div><span className={`gate-pill gate-${tone}`}>{s.gate_outcome}</span></div>
+                    <div className="reason dim small trunc" title={s.reason}>{s.reason}</div>
                   </div>
-                  <div className="r mono dim">{s.agreement != null ? fmtPct(s.agreement, 0) : '—'}</div>
-                  <div className="r mono dim">{s.model_spread != null ? s.model_spread.toFixed(1) : '—'}</div>
-                  <div className="r mono dim">{s.mean_gap != null ? s.mean_gap.toFixed(1) : '—'}</div>
-                  <div><span className={`gate-pill gate-${tone}`}>{s.gate_outcome}</span></div>
-                  <div className="reason dim small trunc" title={s.reason}>{s.reason}</div>
-                </div>
+                  {isOpen && <SignalDetail s={s} />}
+                </React.Fragment>
               );
             })}
           </div>

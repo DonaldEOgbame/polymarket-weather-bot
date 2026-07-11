@@ -372,30 +372,48 @@ def api_data():
             return 'Edge below threshold'
         return 'Other skip'
 
-    sig_rows = _q(
-        "SELECT timestamp, market_id, city, target_date, bucket_low, bucket_high, "
-        "model_prob, yes_price, no_price, edge, confidence AS agreement, model_spread, "
-        "ensemble_std, raw_models, signal_type, market_spread_frac FROM signals "
-        "ORDER BY id DESC LIMIT 60"
-    )
+    # Show every signal from the latest scan cycle, not an arbitrary row count.
+    # One scan writes hundreds of signals within the same minute (see MAX(timestamp)),
+    # so window on that instead of a fixed LIMIT — otherwise a big scan gets truncated
+    # to whichever markets happened to sort first.
+    latest_sig_ts_row = _q('SELECT MAX(timestamp) AS mx FROM signals')
+    latest_sig_ts = latest_sig_ts_row[0]['mx'] if latest_sig_ts_row else None
+    sig_rows = []
+    if latest_sig_ts:
+        cutoff = (datetime.fromisoformat(latest_sig_ts) - timedelta(minutes=5)).isoformat()
+        sig_rows = _q(
+            "SELECT timestamp, market_id, city, target_date, bucket_low, bucket_high, "
+            "model_prob, yes_price, no_price, edge, confidence AS agreement, model_spread, "
+            "ensemble_std, raw_models, signal_type, market_spread_frac FROM signals "
+            "WHERE timestamp >= ? ORDER BY edge DESC",
+            (cutoff,)
+        )
     recent_signals = []
     for s in sig_rows:
-        ensemble_mean = None
+        raw_models = {}
         if s.get('raw_models'):
             try:
-                temps = list(_json.loads(s['raw_models']).values())
-                if temps:
-                    ensemble_mean = sum(temps) / len(temps)
+                raw_models = _json.loads(s['raw_models'])
             except Exception:
                 pass
+        temps = list(raw_models.values())
+        ensemble_mean = sum(temps) / len(temps) if temps else None
         recent_signals.append({
             'ts': s['timestamp'],
+            'market_id': s['market_id'],
             'city': s['city'],
             'target_date': s['target_date'],
+            'bucket_low': s['bucket_low'],
+            'bucket_high': s['bucket_high'],
+            'model_prob': s['model_prob'],
+            'yes_price': s['yes_price'],
+            'no_price': s['no_price'],
             'edge': s['edge'],
             'agreement': s['agreement'],
             'model_spread': s['model_spread'],
+            'ensemble_std': s['ensemble_std'],
             'market_spread_frac': s['market_spread_frac'],
+            'raw_models': raw_models,
             'mean_gap': _mean_gap(s['bucket_low'], s['bucket_high'], ensemble_mean),
             'gate_outcome': _gate_outcome(s['signal_type']),
             'reason': s['signal_type'],
