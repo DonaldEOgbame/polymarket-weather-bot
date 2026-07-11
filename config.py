@@ -70,6 +70,16 @@ METAR_WARM_CORRECTION_F = float(os.getenv("METAR_WARM_CORRECTION_F", "1.3"))
 # Set to 0 to disable. Applies only to bounded (exact/range) buckets.
 FORECAST_MARGIN_F = float(os.getenv("FORECAST_MARGIN_F", "2.5"))
 
+# YES-side margin cap, as a fraction of the padded bucket's half-width. Every real
+# bucket here (0.8-2.8°F padded-wide) is narrower than 2*FORECAST_MARGIN_F, so an
+# unguarded YES margin check ([lo+margin, hi-margin]) is mathematically empty —
+# capping the margin at exactly half-width "fixes" that but collapses the passing
+# window to the bucket's exact midpoint, a single float value real forecasts will
+# essentially never land on. This fraction (<1.0) keeps a real, non-degenerate
+# window instead. Currently moot — YES entries are hard-disabled — but keeps the
+# gate meaningful rather than silently impossible if YES is ever re-enabled.
+YES_MARGIN_WIDTH_FRACTION = float(os.getenv("YES_MARGIN_WIDTH_FRACTION", "0.6"))
+
 # Narrow-bucket guard: buckets ≤ this width (°F) require higher edge to enter.
 # Exact and 1°F-range buckets are structurally disadvantaged vs above/below markets.
 NARROW_BUCKET_WIDTH_F = float(os.getenv("NARROW_BUCKET_WIDTH_F", "2.0"))

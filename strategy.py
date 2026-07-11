@@ -13,7 +13,7 @@ from config import (
     NARROW_BUCKET_WIDTH_F, NARROW_BUCKET_EDGE_THRESHOLD, NARROW_BUCKET_STD_INFLATION,
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION,
     TAKER_FEE_RATE, SLIPPAGE_FRACTION, MAX_ENTRY_SPREAD_FRACTION,
-    FORECAST_MARGIN_F,
+    FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION,
 )
 
 
@@ -49,7 +49,20 @@ def forecast_margin_ok(side, ensemble_mean, bucket_low, bucket_high, margin_f):
     mean must be at least margin_f OUTSIDE the bucket: below (low-0.5)-margin or above
     (high+0.5)+margin. For a YES bet (temp will LAND in the bucket) the mean must be at
     least margin_f INSIDE — i.e. not within margin_f of either edge. margin_f<=0 or an
-    open-ended bucket always passes (nothing to gate)."""
+    open-ended bucket always passes (nothing to gate).
+
+    YES's [lo+margin_f, hi-margin_f] window is empty whenever the padded bucket is
+    narrower than 2*margin_f — every real bucket here is 1.8-2.8°F padded-wide vs.
+    a 5°F requirement at the default 2.5°F margin, so an unguarded YES check would be
+    structurally unsatisfiable regardless of forecast quality (currently moot since
+    YES entries are hard-disabled elsewhere, but this keeps the function correct on
+    its own). Capping the effective margin at exactly half the padded width fixes the
+    "always fails" bug but trades it for an "almost always fails" one: the passing
+    window collapses to the bucket's exact midpoint, a single float value real means
+    will essentially never land on. Instead cap at YES_MARGIN_WIDTH_FRACTION of the
+    padded half-width, leaving a real, non-degenerate window — still tightest at the
+    center, just not a single point — so "clear of both edges" stays meaningful on
+    narrow buckets instead of silently becoming impossible twice over."""
     if margin_f <= 0 or bucket_low is None or bucket_high is None:
         return True
     lo = bucket_low - 0.5   # same ±0.5 padding get_bucket_probability uses
@@ -57,7 +70,9 @@ def forecast_margin_ok(side, ensemble_mean, bucket_low, bucket_high, margin_f):
     if side == "NO":
         return ensemble_mean <= lo - margin_f or ensemble_mean >= hi + margin_f
     # YES: mean must be comfortably inside the bucket, clear of both edges
-    return lo + margin_f <= ensemble_mean <= hi - margin_f
+    half_width = (hi - lo) / 2.0
+    effective_margin = min(margin_f, half_width * YES_MARGIN_WIDTH_FRACTION)
+    return lo + effective_margin <= ensemble_mean <= hi - effective_margin
 
 
 def forecast_direction_agrees(side, raw_weighted_mean, bucket_low, bucket_high):

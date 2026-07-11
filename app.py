@@ -359,7 +359,16 @@ def api_data():
         key=lambda x: -x['count']
     )[:7]
 
-    last_scan_ts = scan_rows[0]['timestamp'] if scan_rows else now.isoformat()
+    # scan_log only records candidates rejected during discovery (station/bucket/volume/
+    # expiry pre-filters in scanner.scan_markets). Once discovery is passing more markets
+    # through cleanly, scan_log can go quiet for hours while the bot is still actively
+    # scanning and evaluating every cycle — those evaluations land in `signals` instead
+    # (written by strategy.evaluate_opportunity). Take the max of both so "last scan"
+    # reflects real bot activity, not just the discovery-rejection table.
+    latest_signal_row = _q('SELECT MAX(timestamp) AS mx FROM signals')
+    latest_signal_ts = latest_signal_row[0]['mx'] if latest_signal_row else None
+    scan_log_ts = scan_rows[0]['timestamp'] if scan_rows else None
+    last_scan_ts = max(filter(None, [scan_log_ts, latest_signal_ts]), default=now.isoformat())
     markets_seen = len(scan_rows)
     candidates = sum(1 for s in scan_rows if not s.get('skip_reason'))
 

@@ -116,6 +116,28 @@ class TestForecastMarginGate:
         assert forecast_margin_ok("NO", 80.0, None, 85.0, 2.5) is True  # open-ended
         assert forecast_margin_ok("NO", 80.0, 79.9, 80.1, 0.0) is True  # margin disabled
 
+    def test_yes_bet_on_narrow_bucket_is_satisfiable(self):
+        """A real bucket here (bounded, exact/range) is 0.8-2.8°F padded-wide, well
+        under 2*FORECAST_MARGIN_F (5°F at the default 2.5°F margin). An unguarded
+        [lo+margin, hi-margin] window would be empty for every such bucket, making
+        a YES bet structurally impossible to ever pass no matter how centered the
+        forecast is — not a strict gate, a silent lockout.
+
+        Capping the effective margin at exactly half the padded width "fixes" that
+        but collapses the passing window to the bucket's exact midpoint — a single
+        float value real means will essentially never land on, trading an always-
+        fails bug for an almost-always-fails one. Capping at a FRACTION of the half-
+        width (YES_MARGIN_WIDTH_FRACTION, default 0.6) instead leaves a real,
+        non-degenerate window, still tightest at the center."""
+        from strategy import forecast_margin_ok
+        # bucket 80-82 (padded 79.5-82.5, half_width=1.5). At the default 0.6
+        # fraction, effective_margin=0.9, so the passing window is [80.4, 81.6] —
+        # a real 1.2°F-wide range, not a single point.
+        assert forecast_margin_ok("YES", 81.0, 80.0, 82.0, 2.5) is True   # dead center
+        assert forecast_margin_ok("YES", 80.4, 80.0, 82.0, 2.5) is True   # at window edge
+        assert forecast_margin_ok("YES", 80.3, 80.0, 82.0, 2.5) is False  # just outside window
+        assert forecast_margin_ok("YES", 79.6, 80.0, 82.0, 2.5) is False  # near padded edge
+
 
 class TestForecastDirectionAgrees:
     """Hard rule, independent of edge size: a trade must never bet against what
