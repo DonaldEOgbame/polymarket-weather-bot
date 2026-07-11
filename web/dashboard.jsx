@@ -652,46 +652,72 @@ function RecentTrades({ trades }) {
   );
 }
 
-// ---------- ModelConfidence ----------
-function ModelAccuracy({ models }) {
-  const sorted = [...models].sort((a, b) => b.weight - a.weight);
-  const maxWeight = Math.max(...sorted.map(m => m.weight), 0.01);
-  const totalTrades = sorted.reduce((s, m) => s + (m.trades_used || 0), 0);
+// ---------- RecentSignals ----------
+const GATE_TONE = {
+  'Taken':                    'pos',
+  'Models disagreed':         'neutral',
+  'Model spread too wide':    'neutral',
+  'Market spread too wide':   'neutral',
+  'Too close to bucket edge': 'neutral',
+  'Direction mismatch':       'neutral',
+  'YES disabled':             'dim',
+  'Edge below threshold':     'dim',
+  'Other skip':               'dim',
+};
+
+function RecentSignals({ signals }) {
+  const rows = signals || [];
+  const maxEdge = Math.max(...rows.map(s => s.edge || 0), 0.01);
   return (
     <section className="card">
       <header className="card-head">
         <div>
-          <h2>Model confidence</h2>
-          <p className="card-sub">Ensemble weights · ranked by signal contribution</p>
+          <h2>Recently scanned signals</h2>
+          <p className="card-sub">{rows.length} most recent evaluations · every candidate the bot has looked at, taken or skipped</p>
         </div>
       </header>
-      <div className="model-conf-list">
-        {sorted.map((m, i) => {
-          const barPct = (m.weight / maxWeight * 100).toFixed(1);
-          const tradePct = totalTrades > 0 ? ((m.trades_used || 0) / totalTrades * 100).toFixed(0) : null;
-          const isTop = i === 0;
-          return (
-            <div className="model-conf-row" key={m.model}>
-              <div className="mc-left">
-                <span className={`mc-name ${isTop ? 'text-signal' : ''}`}>{m.model}</span>
-                <span className="region-tag">{m.region}</span>
-              </div>
-              <div className="mc-bar-wrap">
-                <div className="mc-bar">
-                  <div className="mc-fill" style={{ width: barPct + '%', opacity: 0.4 + (m.weight / maxWeight) * 0.6 }} />
+      {rows.length === 0 ? (
+        <div style={{ padding: '8px 4px' }} />
+      ) : (
+        <div className="table signals-table">
+          <div className="thead">
+            <div>City</div>
+            <div>Target date</div>
+            <div className="r">Edge</div>
+            <div className="r">Agreement</div>
+            <div className="r">Model spread °F</div>
+            <div className="r">Mean gap °F</div>
+            <div>Gate outcome</div>
+            <div>Reason</div>
+          </div>
+          <div className="signals-scroll-wrapper">
+            {rows.map((s, i) => {
+              const tone = GATE_TONE[s.gate_outcome] || 'dim';
+              const barPct = maxEdge > 0 ? Math.min(100, (Math.abs(s.edge || 0) / maxEdge) * 100) : 0;
+              return (
+                <div className="trow" key={s.ts + i}>
+                  <div className="cell-city">
+                    <div className="city-line">{s.city || '—'}</div>
+                    <div className="city-q dim small">{fmtAgo(new Date(s.ts))} ago</div>
+                  </div>
+                  <div className="dim mono small">{s.target_date || '—'}</div>
+                  <div className="r">
+                    <div className="edge-bar-wrap">
+                      <div className="edge-bar-track"><div className="edge-bar-fill" style={{ width: barPct.toFixed(0) + '%' }} /></div>
+                      <span className="mono">{s.edge != null ? fmtPctSigned(s.edge) : '—'}</span>
+                    </div>
+                  </div>
+                  <div className="r mono dim">{s.agreement != null ? fmtPct(s.agreement, 0) : '—'}</div>
+                  <div className="r mono dim">{s.model_spread != null ? s.model_spread.toFixed(1) : '—'}</div>
+                  <div className="r mono dim">{s.mean_gap != null ? s.mean_gap.toFixed(1) : '—'}</div>
+                  <div><span className={`gate-pill gate-${tone}`}>{s.gate_outcome}</span></div>
+                  <div className="reason dim small trunc" title={s.reason}>{s.reason}</div>
                 </div>
-              </div>
-              <div className="mc-right">
-                <span className={`mono mc-weight ${isTop ? 'text-signal' : ''}`}>{fmtPct(m.weight, 0)}</span>
-                {tradePct !== null && (
-                  <span className="mono dim mc-trades">{tradePct}% of trades</span>
-                )}
-                {isTop && <span className="mc-badge">top</span>}
-              </div>
-            </div>
-          );
-        })}
-      </div>
+              );
+            })}
+          </div>
+        </div>
+      )}
     </section>
   );
 }
@@ -812,7 +838,7 @@ function App() {
       )}
       {activeTab === 'models' && (
         <div>
-          <ModelAccuracy models={M.models} />
+          <RecentSignals signals={M.recentSignals} />
         </div>
       )}
       <footer className="page-foot">

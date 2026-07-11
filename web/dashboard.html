@@ -629,23 +629,37 @@
     background: var(--panel-3);
     color: var(--text-soft);
   }
-  /* model confidence */
-  .model-conf-list { display: flex; flex-direction: column; gap: 10px; padding-top: 4px; }
-  .model-conf-row { display: grid; grid-template-columns: 1fr 2fr auto; gap: 12px; align-items: center; }
-  .mc-left { display: flex; align-items: center; gap: 8px; }
-  .mc-name { font-size: 13px; font-weight: 600; color: var(--text); }
-  .mc-bar-wrap { flex: 1; }
-  .mc-bar { height: 6px; background: var(--panel-3); border-radius: 3px; overflow: hidden; }
-  .mc-fill { height: 100%; background: var(--signal); border-radius: 3px; transition: width .4s ease; }
-  .mc-right { display: flex; align-items: center; gap: 10px; justify-content: flex-end; min-width: 130px; }
-  .mc-weight { font-size: 13px; color: var(--text); }
-  .mc-trades { font-size: 11px; }
-  .mc-badge {
-    font-size: 9px; font-weight: 700; letter-spacing: 0.12em; text-transform: uppercase;
-    padding: 2px 6px; border-radius: 3px;
-    background: rgba(245,177,60,0.15); color: var(--signal); border: 1px solid rgba(245,177,60,0.3);
-  }
   .text-signal { color: var(--signal) !important; }
+
+  /* recently scanned signals */
+  .signals-table .thead,
+  .signals-table .trow {
+    grid-template-columns: 1.6fr 0.9fr 1.1fr 0.8fr 0.9fr 0.8fr 1.2fr 1.6fr;
+  }
+  .signals-scroll-wrapper {
+    max-height: 560px;
+    overflow-y: auto;
+    padding-right: 4px;
+  }
+  .signals-scroll-wrapper::-webkit-scrollbar { width: 6px; }
+  .signals-scroll-wrapper::-webkit-scrollbar-track { background: transparent; }
+  .signals-scroll-wrapper::-webkit-scrollbar-thumb { background: var(--line-2); border-radius: 3px; }
+  .signals-scroll-wrapper::-webkit-scrollbar-thumb:hover { background: var(--line); }
+  .edge-bar-wrap { display: flex; align-items: center; gap: 8px; justify-content: flex-end; }
+  .edge-bar-track { width: 46px; height: 5px; background: var(--panel-3); border-radius: 3px; overflow: hidden; flex-shrink: 0; }
+  .edge-bar-fill { height: 100%; border-radius: 3px; background: var(--signal); }
+  .gate-pill {
+    font-size: 10.5px;
+    font-weight: 600;
+    letter-spacing: 0.02em;
+    padding: 3px 8px;
+    border-radius: 999px;
+    display: inline-block;
+    white-space: nowrap;
+  }
+  .gate-pill.gate-pos     { background: var(--pos-soft); color: var(--positive); }
+  .gate-pill.gate-neutral { background: var(--panel-3);  color: var(--text-soft); }
+  .gate-pill.gate-dim     { background: var(--panel-2);  color: var(--muted); }
 
   /* ============ SCAN FEED ============ */
   .scan-feed .chev {

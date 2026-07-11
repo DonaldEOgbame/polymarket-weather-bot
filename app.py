@@ -332,6 +332,75 @@ def api_data():
     for m in models:
         m['trades_used'] = model_trade_counts.get(m['model'], 0)
 
+    # ---- recently scanned signals (for Models tab) ----
+    # Mirrors the gate order in strategy.evaluate_opportunity: agreement -> model
+    # spread -> market spread -> forecast margin -> taken. "Mean gap" is how far the
+    # ensemble mean forecast sits from the nearest bucket boundary being bet against
+    # (the forecast-margin gate's own distance check), in °F.
+    def _mean_gap(bucket_low, bucket_high, ensemble_mean):
+        if ensemble_mean is None:
+            return None
+        if bucket_low is not None and bucket_high is not None:
+            return min(abs(ensemble_mean - bucket_low), abs(ensemble_mean - bucket_high))
+        if bucket_low is not None:
+            return ensemble_mean - bucket_low
+        if bucket_high is not None:
+            return bucket_high - ensemble_mean
+        return None
+
+    # Classify from the skip-reason text itself (strategy.evaluate_opportunity's exact
+    # message formats) rather than re-deriving from the numeric columns — the gates run
+    # in order and short-circuit, so e.g. a low-agreement column value on an
+    # "Insufficient edge" row never actually reached the agreement check.
+    def _gate_outcome(signal_type):
+        if signal_type and not signal_type.startswith('SKIP'):
+            return 'Taken'
+        text = signal_type or ''
+        if 'YES entries are disabled' in text:
+            return 'YES disabled'
+        if 'agreement too low' in text:
+            return 'Models disagreed'
+        if 'spread too wide' in text and 'market spread' in text:
+            return 'Market spread too wide'
+        if 'spread too wide' in text:
+            return 'Model spread too wide'
+        if 'forecast too close to bucket edge' in text:
+            return 'Too close to bucket edge'
+        if 'raw model forecast points the other way' in text:
+            return 'Direction mismatch'
+        if 'Insufficient edge' in text:
+            return 'Edge below threshold'
+        return 'Other skip'
+
+    sig_rows = _q(
+        "SELECT timestamp, market_id, city, target_date, bucket_low, bucket_high, "
+        "model_prob, yes_price, no_price, edge, confidence AS agreement, model_spread, "
+        "ensemble_std, raw_models, signal_type, market_spread_frac FROM signals "
+        "ORDER BY id DESC LIMIT 60"
+    )
+    recent_signals = []
+    for s in sig_rows:
+        ensemble_mean = None
+        if s.get('raw_models'):
+            try:
+                temps = list(_json.loads(s['raw_models']).values())
+                if temps:
+                    ensemble_mean = sum(temps) / len(temps)
+            except Exception:
+                pass
+        recent_signals.append({
+            'ts': s['timestamp'],
+            'city': s['city'],
+            'target_date': s['target_date'],
+            'edge': s['edge'],
+            'agreement': s['agreement'],
+            'model_spread': s['model_spread'],
+            'market_spread_frac': s['market_spread_frac'],
+            'mean_gap': _mean_gap(s['bucket_low'], s['bucket_high'], ensemble_mean),
+            'gate_outcome': _gate_outcome(s['signal_type']),
+            'reason': s['signal_type'],
+        })
+
     # ---- scan log ----
     scan_rows = _q(
         "SELECT id, timestamp, market_id, question, skip_reason, hours_to_res, volume "
@@ -443,6 +512,7 @@ def api_data():
         'equity': equity,
         'stats': stats,
         'models': models,
+        'recentSignals': recent_signals,
         'scanLog': scan_log,
         'cities': cities,
         'cityActivity': city_activity,
