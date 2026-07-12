@@ -236,58 +236,6 @@ class TestYesEntriesDisabled:
         assert result["side"] == "NO"
 
 
-class TestMaxNoEntryPrice:
-    """A NO trade must never pay more than MAX_NO_ENTRY_PRICE (0.85) per share.
-    Originally set to 0.80 to block a repeat of Seoul (2026-07-12, filled $0.82 on
-    a forecast clearing the miss threshold by 12.6°F) — but Seoul closed a win
-    (take-profit at $0.98, +$0.40), positive evidence a high-confidence entry at
-    that price can be profitable. Raised to 0.85: still blocks Madrid (2026-07-12,
-    $0.89, the thinnest-edge of the three concurrent opens), just not a Seoul
-    repeat. Every real historical entry below $0.82 filled $0.68-$0.73."""
-
-    def _run(self, monkeypatch, no_price, mean, bucket_low, bucket_high):
-        import strategy
-        from types import SimpleNamespace
-
-        opp = SimpleNamespace(
-            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=48.0,
-            bucket_low=bucket_low, bucket_high=bucket_high, yes_price=1.0 - no_price, no_price=no_price,
-            token_id_yes="y", token_id_no="n", market_id="m1",
-        )
-        engine_res = {
-            "ensemble_mean": mean, "ensemble_std": 1.0, "model_agreement": 1.0,
-            "model_spread": 1.0,
-            "raw_models": {"ecmwf_ifs025": mean, "icon_global": mean, "gfs_global": mean, "gem_global": mean},
-            "raw_weighted_mean": mean, "model_count": 4,
-        }
-        portfolio_state = {"available_cash": 100.0, "total_equity": 100.0, "locked_cash": 0.0}
-        monkeypatch.setattr(strategy, "get_realtime_price", lambda tid: (0.0, 0.0))
-        monkeypatch.setattr(strategy, "execute_query", lambda *a, **k: None)
-        return strategy.evaluate_opportunity(opp, portfolio_state, engine_res=engine_res)
-
-    def test_price_above_cap_blocks_trade(self, monkeypatch):
-        # Same shape as Madrid: thin edge, price too rich (0.89 > 0.85).
-        result = self._run(monkeypatch, no_price=0.89, mean=90.0, bucket_low=60.0, bucket_high=66.6)
-        assert result is None
-
-    def test_seoul_shaped_price_now_trades(self, monkeypatch):
-        # Seoul's actual fill (0.82) — closed a real win, so it should clear now.
-        result = self._run(monkeypatch, no_price=0.82, mean=90.0, bucket_low=60.0, bucket_high=66.6)
-        assert result is not None
-        assert result["signal"] == "BUY_NO"
-
-    def test_price_at_cap_still_trades(self, monkeypatch):
-        result = self._run(monkeypatch, no_price=0.85, mean=90.0, bucket_low=60.0, bucket_high=66.6)
-        assert result is not None
-        assert result["signal"] == "BUY_NO"
-
-    def test_price_below_cap_trades_normally(self, monkeypatch):
-        # Matches every real historical entry ($0.68-$0.73).
-        result = self._run(monkeypatch, no_price=0.70, mean=90.0, bucket_low=60.0, bucket_high=66.6)
-        assert result is not None
-        assert result["signal"] == "BUY_NO"
-
-
 class TestParseTargetDate:
     """Date must come from the market's 'on <DATE>' resolution text, not the endDate
     timestamp whose UTC-close convention drifted and mis-dated far-offset stations."""

@@ -70,18 +70,6 @@ METAR_WARM_CORRECTION_F = float(os.getenv("METAR_WARM_CORRECTION_F", "1.3"))
 # Set to 0 to disable. Applies only to bounded (exact/range) buckets.
 FORECAST_MARGIN_F = float(os.getenv("FORECAST_MARGIN_F", "2.5"))
 
-# Maximum price we'll pay for a NO share. Edge alone doesn't protect against a trade
-# that's very likely correct but not worth much: at high prices most of the edge
-# worth capturing is already gone even when the underlying forecast signal is strong.
-# Originally set to 0.80 to block a repeat of Seoul (2026-07-12, filled $0.82 on a
-# forecast clearing the miss threshold by 12.6°F) — but Seoul closed a win (take-profit
-# at $0.98, +$0.40), positive evidence that a high-confidence entry at this price can
-# still be profitable. Raised to 0.85 on the strength of that result: still below
-# Madrid's $0.89 (2026-07-12, thinnest edge of the three concurrent opens — 0.084 vs
-# 0.08 min — and priciest), so that weaker shape stays blocked while a Seoul repeat
-# would not be. Revisit as more high-price trades resolve.
-MAX_NO_ENTRY_PRICE = float(os.getenv("MAX_NO_ENTRY_PRICE", "0.85"))
-
 # YES-side margin cap, as a fraction of the padded bucket's half-width. Every real
 # bucket here (0.8-2.8°F padded-wide) is narrower than 2*FORECAST_MARGIN_F, so an
 # unguarded YES margin check ([lo+margin, hi-margin]) is mathematically empty —
