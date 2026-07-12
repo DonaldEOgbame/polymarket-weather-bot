@@ -70,6 +70,18 @@ METAR_WARM_CORRECTION_F = float(os.getenv("METAR_WARM_CORRECTION_F", "1.3"))
 # Set to 0 to disable. Applies only to bounded (exact/range) buckets.
 FORECAST_MARGIN_F = float(os.getenv("FORECAST_MARGIN_F", "2.5"))
 
+# Maximum price we'll pay for a NO share. Edge alone doesn't protect against a trade
+# that's very likely correct but not worth much: at high prices most of the edge
+# worth capturing is already gone even when the underlying forecast signal is strong.
+# Originally set to 0.80 to block a repeat of Seoul (2026-07-12, filled $0.82 on a
+# forecast clearing the miss threshold by 12.6°F) — but Seoul closed a win (take-profit
+# at $0.98, +$0.40), positive evidence that a high-confidence entry at this price can
+# still be profitable. Raised to 0.85 on the strength of that result: still below
+# Madrid's $0.89 (2026-07-12, thinnest edge of the three concurrent opens — 0.084 vs
+# 0.08 min — and priciest), so that weaker shape stays blocked while a Seoul repeat
+# would not be. Revisit as more high-price trades resolve.
+MAX_NO_ENTRY_PRICE = float(os.getenv("MAX_NO_ENTRY_PRICE", "0.85"))
+
 # YES-side margin cap, as a fraction of the padded bucket's half-width. Every real
 # bucket here (0.8-2.8°F padded-wide) is narrower than 2*FORECAST_MARGIN_F, so an
 # unguarded YES margin check ([lo+margin, hi-margin]) is mathematically empty —
@@ -133,8 +145,19 @@ BASE_FORECAST_ERROR = {
 # Goal of this profile: maximise the NUMBER of small resolved trades per week so
 # execution-cost and calibration estimates converge fast — NOT to deploy more
 # capital per bet. Keep positions small; widen concurrency/exposure instead.
-DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "-8.00"))
-HARD_MAX_POSITION_SIZE = float(os.getenv("HARD_MAX_POSITION_SIZE", "2.0"))
+#
+# HARD_MAX_POSITION_SIZE was a flat $2 while the bankroll was ~$20-30 (i.e. it WAS
+# the binding constraint, not Kelly/fraction — every real trade sized exactly $2).
+# Scaled 5x to $10 to match a $100 bankroll (user explicitly funded to $100 and
+# wants the same relative risk/reward per trade the $20-bankroll track record
+# was built on, not the same flat dollar cap silently shrinking it to ~2% of
+# equity instead of the ~8-10% Kelly/MAX_POSITION_FRACTION would otherwise use).
+# Re-derive as ~10% of live bankroll if the bankroll changes again.
+# DAILY_LOSS_LIMIT scaled 5x alongside HARD_MAX_POSITION_SIZE — it only drives the
+# dashboard's circuit-breaker gauge (app.py), not an actual trading block, but at
+# -$8 with $8-10 positions a single loss would misleadingly read as 100% used.
+DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "-40.00"))
+HARD_MAX_POSITION_SIZE = float(os.getenv("HARD_MAX_POSITION_SIZE", "10.0"))
 MAX_POSITION_FRACTION = float(os.getenv("MAX_POSITION_FRACTION", "0.10"))
 MAX_TOTAL_EXPOSURE_FRACTION = float(os.getenv("MAX_TOTAL_EXPOSURE_FRACTION", "0.70"))
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "10"))

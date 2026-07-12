@@ -13,7 +13,7 @@ from config import (
     NARROW_BUCKET_WIDTH_F, NARROW_BUCKET_EDGE_THRESHOLD, NARROW_BUCKET_STD_INFLATION,
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION,
     TAKER_FEE_RATE, SLIPPAGE_FRACTION, MAX_ENTRY_SPREAD_FRACTION,
-    FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION,
+    FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION, MAX_NO_ENTRY_PRICE,
 )
 
 
@@ -211,7 +211,9 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     
     # Evaluate NO side (independent check)
     if signal is None and no_edge >= effective_edge_threshold:
-        if agreement < MIN_MODEL_AGREEMENT:
+        if opp.no_price > MAX_NO_ENTRY_PRICE:
+            skip_reason = f"NO edge {no_edge:.3f} but price too high (${opp.no_price:.2f} > ${MAX_NO_ENTRY_PRICE:.2f} max — not enough upside left)"
+        elif agreement < MIN_MODEL_AGREEMENT:
             skip_reason = f"NO edge {no_edge:.3f} but agreement too low ({agreement:.2f} < {MIN_MODEL_AGREEMENT})"
         elif spread > MAX_MODEL_SPREAD:
             skip_reason = f"NO edge {no_edge:.3f} but spread too wide ({spread:.1f}°F > {MAX_MODEL_SPREAD}°F)"
