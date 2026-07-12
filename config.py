@@ -146,18 +146,14 @@ BASE_FORECAST_ERROR = {
 # execution-cost and calibration estimates converge fast — NOT to deploy more
 # capital per bet. Keep positions small; widen concurrency/exposure instead.
 #
-# HARD_MAX_POSITION_SIZE was a flat $2 while the bankroll was ~$20-30 (i.e. it WAS
-# the binding constraint, not Kelly/fraction — every real trade sized exactly $2).
-# Scaled 5x to $10 to match a $100 bankroll (user explicitly funded to $100 and
-# wants the same relative risk/reward per trade the $20-bankroll track record
-# was built on, not the same flat dollar cap silently shrinking it to ~2% of
-# equity instead of the ~8-10% Kelly/MAX_POSITION_FRACTION would otherwise use).
-# Re-derive as ~10% of live bankroll if the bankroll changes again.
-# DAILY_LOSS_LIMIT scaled 5x alongside HARD_MAX_POSITION_SIZE — it only drives the
-# dashboard's circuit-breaker gauge (app.py), not an actual trading block, but at
-# -$8 with $8-10 positions a single loss would misleadingly read as 100% used.
-DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "-40.00"))
-HARD_MAX_POSITION_SIZE = float(os.getenv("HARD_MAX_POSITION_SIZE", "10.0"))
+# HARD_MAX_POSITION_SIZE is a flat $2 while paper-testing on the current ~$20-30
+# bankroll — this IS the binding constraint, not Kelly/fraction (every real trade
+# has sized exactly $2). ONLY raise this (to ~$10, with DAILY_LOSS_LIMIT to ~-$40)
+# once actually going LIVE with a $100-funded bankroll — do not scale it up while
+# still in PAPER_MODE on the smaller balance, or paper positions size as if $100
+# were already deployed when it isn't.
+DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "-8.00"))
+HARD_MAX_POSITION_SIZE = float(os.getenv("HARD_MAX_POSITION_SIZE", "2.0"))
 MAX_POSITION_FRACTION = float(os.getenv("MAX_POSITION_FRACTION", "0.10"))
 MAX_TOTAL_EXPOSURE_FRACTION = float(os.getenv("MAX_TOTAL_EXPOSURE_FRACTION", "0.70"))
 MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "10"))
