@@ -74,15 +74,32 @@ def get_cached_price(token_id: str):
             return cached["ask"], cached["bid"], cached["reachable"]
     return None
 
-def set_cached_price(token_id: str, ask: float, bid: float, reachable: bool):
-    """Update cache with latest price details."""
+def get_cached_depth(token_id: str):
+    """Retrieve cached ask/bid $ depth for a token_id if not expired (TTL=30s).
+    Returns None if not cached or expired — separate from get_cached_price so
+    callers that only need price aren't forced to also fetch/store depth."""
+    now = time.time()
     with _PRICE_CACHE_LOCK:
-        _PRICE_CACHE[token_id] = {
+        cached = _PRICE_CACHE.get(token_id)
+        if cached and (now - cached["timestamp"] < 30) and "ask_depth" in cached:
+            return cached["ask_depth"], cached["bid_depth"]
+    return None
+
+def set_cached_price(token_id: str, ask: float, bid: float, reachable: bool, ask_depth: float = None, bid_depth: float = None):
+    """Update cache with latest price details. ask_depth/bid_depth (total $ resting
+    on each side) are optional — only set when the caller already parsed the full
+    book, so the common price-only path doesn't pay for data it won't use."""
+    with _PRICE_CACHE_LOCK:
+        entry = {
             "ask": ask,
             "bid": bid,
             "reachable": reachable,
             "timestamp": time.time()
         }
+        if ask_depth is not None:
+            entry["ask_depth"] = ask_depth
+            entry["bid_depth"] = bid_depth
+        _PRICE_CACHE[token_id] = entry
 
 def ensure_utc(dt: datetime) -> datetime:
     """Ensure a datetime is timezone-aware and set to UTC."""

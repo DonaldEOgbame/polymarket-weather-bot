@@ -1,7 +1,7 @@
 import json
 import logging
 from weather import get_signal_engine, get_bucket_probability
-from scanner import get_realtime_price, PARSER_VERSION
+from scanner import get_realtime_price, get_orderbook_depth_usd, PARSER_VERSION
 from db import execute_query
 from datetime import datetime, timezone
 from config import (
@@ -340,16 +340,28 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         (yes_spread_frac if side == "YES" else no_spread_frac) if side
         else (yes_spread_frac if yes_edge >= no_edge else no_spread_frac)
     )
+    # Order-book $ depth on the traded side, ONLY fetched when a trade actually
+    # fires (not on every skip — that's thousands of extra CLOB calls per scan
+    # for data that's never used). Answers "how big a position could this book
+    # have actually absorbed at entry" after the fact — the live book moves on
+    # or the market resolves within days, so this can't be reconstructed later
+    # from Polymarket's API, only captured at the moment it happened.
+    ask_depth_usd = bid_depth_usd = None
+    if signal:
+        ask_depth_usd, bid_depth_usd = get_orderbook_depth_usd(target_token)
+
     execute_query('''
         INSERT INTO signals (timestamp, market_id, city, target_date, bucket_low, bucket_high,
             model_prob, yes_price, no_price, edge, confidence, model_spread, ensemble_std,
-            raw_models, signal_type, market_spread_frac, parser_version)
-        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            raw_models, signal_type, market_spread_frac, parser_version,
+            ask_depth_usd, bid_depth_usd)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
     ''', (
         timestamp, opp.market_id, opp.city, opp.date, opp.bucket_low, opp.bucket_high,
         prob, opp.yes_price, opp.no_price, edge_used or max(yes_edge, no_edge),
         agreement, spread, engine_res["ensemble_std"], raw_models_json,
-        signal or f"SKIP: {skip_reason}", logged_spread_frac, PARSER_VERSION
+        signal or f"SKIP: {skip_reason}", logged_spread_frac, PARSER_VERSION,
+        ask_depth_usd, bid_depth_usd
     ))
 
     if not signal:

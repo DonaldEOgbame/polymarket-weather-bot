@@ -217,6 +217,7 @@ class TestYesEntriesDisabled:
         }
         portfolio_state = {"available_cash": 100.0, "total_equity": 100.0, "locked_cash": 0.0}
         monkeypatch.setattr(strategy, "get_realtime_price", lambda tid: (0.0, 0.0))
+        monkeypatch.setattr(strategy, "get_orderbook_depth_usd", lambda tid: (None, None))
         monkeypatch.setattr(strategy, "execute_query", lambda *a, **k: None)
         return strategy.evaluate_opportunity(opp, portfolio_state, engine_res=engine_res)
 
@@ -234,6 +235,68 @@ class TestYesEntriesDisabled:
         assert result is not None
         assert result["signal"] == "BUY_NO"
         assert result["side"] == "NO"
+
+
+class TestOrderbookDepthLogging:
+    """Order-book $ depth (ask_depth_usd/bid_depth_usd) is only fetched and logged
+    when a trade actually fires, not on every skip — the live book can't be
+    reconstructed after the fact once a market moves on or resolves, so this is
+    the only chance to capture "how big a position could this have absorbed"."""
+
+    def _run(self, monkeypatch, no_price, mean, bucket_low, bucket_high, depth_return=(150.0, 300.0)):
+        import strategy
+        from types import SimpleNamespace
+
+        opp = SimpleNamespace(
+            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=48.0,
+            bucket_low=bucket_low, bucket_high=bucket_high, yes_price=1.0 - no_price, no_price=no_price,
+            token_id_yes="y", token_id_no="n", market_id="m1",
+        )
+        engine_res = {
+            "ensemble_mean": mean, "ensemble_std": 1.0, "model_agreement": 1.0,
+            "model_spread": 1.0,
+            "raw_models": {"ecmwf_ifs025": mean, "icon_global": mean, "gfs_global": mean, "gem_global": mean},
+            "raw_weighted_mean": mean, "model_count": 4,
+        }
+        portfolio_state = {"available_cash": 100.0, "total_equity": 100.0, "locked_cash": 0.0}
+        depth_calls = []
+        logged_rows = []
+
+        def fake_depth(tid):
+            depth_calls.append(tid)
+            return depth_return
+
+        def fake_execute_query(sql, params=()):
+            if "INSERT INTO signals" in sql:
+                logged_rows.append(params)
+
+        monkeypatch.setattr(strategy, "get_realtime_price", lambda tid: (0.0, 0.0))
+        monkeypatch.setattr(strategy, "get_orderbook_depth_usd", fake_depth)
+        monkeypatch.setattr(strategy, "execute_query", fake_execute_query)
+        result = strategy.evaluate_opportunity(opp, portfolio_state, engine_res=engine_res)
+        return result, depth_calls, logged_rows
+
+    def test_depth_fetched_and_logged_when_trade_fires(self, monkeypatch):
+        # mean=70 sits well outside the [88,92] bucket — a valid NO bet (miss).
+        result, depth_calls, logged_rows = self._run(
+            monkeypatch, no_price=0.70, mean=70.0, bucket_low=88.0, bucket_high=92.0,
+            depth_return=(150.0, 300.0),
+        )
+        assert result is not None
+        assert result["signal"] == "BUY_NO"
+        assert depth_calls == ["n"]  # token_id_no — the side actually traded
+        # ask_depth_usd, bid_depth_usd are the last two bound params of the INSERT
+        assert logged_rows[0][-2:] == (150.0, 300.0)
+
+    def test_depth_not_fetched_on_skip(self, monkeypatch):
+        # Edge too small to trade at all — no signal fires, so no depth call
+        # should be made (would be a wasted CLOB request on every skip otherwise).
+        result, depth_calls, logged_rows = self._run(
+            monkeypatch, no_price=0.99, mean=70.0, bucket_low=88.0, bucket_high=92.0,
+        )
+        assert result is None
+        assert depth_calls == []
+        assert logged_rows[0][-2:] == (None, None)
 
 
 class TestParseTargetDate:

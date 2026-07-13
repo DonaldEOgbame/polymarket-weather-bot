@@ -104,6 +104,19 @@ def init_db():
             conn.execute("ALTER TABLE signals ADD COLUMN parser_version INTEGER")
         except sqlite3.OperationalError:
             pass
+        # Order-book $ depth on the traded side at entry — only populated when a
+        # trade actually fires (see strategy.py). Lets post-hoc analysis answer
+        # "how big a position could this market have absorbed at entry" from what
+        # was really resting in the book, instead of the current (unrelated) live
+        # book of a market that's since moved on or resolved.
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN ask_depth_usd REAL")
+        except sqlite3.OperationalError:
+            pass
+        try:
+            conn.execute("ALTER TABLE signals ADD COLUMN bid_depth_usd REAL")
+        except sqlite3.OperationalError:
+            pass
 
         # Immutable per-market bucket metadata. Written once, on first discovery
         # of a market_id, and never overwritten. scan_markets() looks this up

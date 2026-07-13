@@ -15,7 +15,7 @@ from config import (
     MARKET_DISCOVERY_STOP_AFTER_WEATHER, MAX_CLOB_CANDIDATES,
     MAX_BUCKETS_PER_CITY_DATE,
 )
-from utils import get_session, parse_utc_datetime, safe_get, get_cached_price, set_cached_price
+from utils import get_session, parse_utc_datetime, safe_get, get_cached_price, set_cached_price, get_cached_depth
 
 @dataclass
 class MarketOpportunity:
@@ -259,6 +259,25 @@ def _best_ask_bid_from_book(data):
     return best_ask, best_bid
 
 
+def _book_depth_usd(data):
+    """Total resting $ depth on each side of a CLOB /book response — how many
+    dollars could actually be bought (asks) or sold into (bids) right now, not
+    just the best price. Recorded at entry time so post-hoc "could a $50/$100
+    position have filled without walking the book" questions can be answered
+    from what was really there, instead of guessed from the current (unrelated)
+    live book of a market that's since moved on or resolved."""
+    def _depth(levels):
+        total = 0.0
+        for lvl in levels or []:
+            try:
+                total += float(lvl["price"]) * float(lvl["size"])
+            except (TypeError, ValueError, KeyError):
+                continue
+        return total
+
+    return _depth(data.get("asks", [])), _depth(data.get("bids", []))
+
+
 def get_realtime_price_status(token_id):
     """Fetch best ask/bid for a token. Returns (ask, bid, reachable)."""
     cached = get_cached_price(token_id)
@@ -270,14 +289,30 @@ def get_realtime_price_status(token_id):
         if resp.status_code == 200:
             data = resp.json()
             best_ask, best_bid = _best_ask_bid_from_book(data)
-            set_cached_price(token_id, best_ask, best_bid, True)
+            ask_depth, bid_depth = _book_depth_usd(data)
+            set_cached_price(token_id, best_ask, best_bid, True, ask_depth, bid_depth)
             return best_ask, best_bid, True
         logging.warning(f"Orderbook for {token_id}: HTTP {resp.status_code}")
     except Exception as e:
         logging.error(f"Error fetching orderbook for {token_id}: {e}")
-    
+
     set_cached_price(token_id, 0.0, 0.0, False)
     return 0.0, 0.0, False
+
+
+def get_orderbook_depth_usd(token_id):
+    """Total $ resting on each side of the book for `token_id`: (ask_depth, bid_depth).
+    Piggybacks on the same 30s price cache get_realtime_price_status populates — call
+    that first (or let this trigger the fetch) so depth isn't a second network round
+    trip. Returns (None, None) if depth wasn't captured (e.g. book unreachable)."""
+    cached = get_cached_depth(token_id)
+    if cached is not None:
+        return cached
+    # Not cached yet (or price-only path was used) — force a real fetch so depth
+    # gets populated, then re-check the cache.
+    get_realtime_price_status(token_id)
+    cached = get_cached_depth(token_id)
+    return cached if cached is not None else (None, None)
 
 
 def get_realtime_price(token_id):
