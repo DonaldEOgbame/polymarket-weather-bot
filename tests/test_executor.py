@@ -136,6 +136,7 @@ class TestLiveExitFeeDeduction:
                             lambda token_id, side, amount: {"shares": 10.0, "price": 0.70, "fee_bps": 500})
         monkeypatch.setattr(ex, "close_position_atomic", lambda **kwargs: kwargs)
         monkeypatch.setattr(ex, "send_trade_exit", lambda *a, **k: None)
+        monkeypatch.setattr(ex, "get_orderbook_depth_usd", lambda tid: (None, None))
 
         pos = {
             "id": 1, "market_id": "0x1", "token_id": "tok_1", "side": "NO",
@@ -160,6 +161,62 @@ class TestLiveExitFeeDeduction:
         # Sanity: the naive no-fee calc would have been strictly larger (fee > 0).
         naive_pnl = (0.70 - 0.55) * shares
         assert captured["pnl_dollars"] < naive_pnl
+
+
+class TestExitDepthLogging:
+    """Order-book $ depth is captured at EXIT too (not just entry) — the
+    counterpart to ask_depth_usd/bid_depth_usd logged on entry in signals.
+    Entry-time depth alone can't tell you whether the market was still liquid
+    enough to actually get out; a book that looked deep going in can (and has,
+    live: Seoul and Madrid both went to zero asks after entry) thin out by the
+    time a position closes. Best-effort — an exit must still proceed even if
+    depth can't be read."""
+
+    def test_close_position_captures_and_forwards_depth(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+
+        monkeypatch.setattr(ex, "PAPER_MODE", True)
+        monkeypatch.setattr(ex, "get_orderbook_depth_usd", lambda tid: (123.45, 678.90))
+        monkeypatch.setattr(ex, "send_trade_exit", lambda *a, **k: None)
+
+        captured = {}
+        monkeypatch.setattr(ex, "close_position_atomic", lambda **kwargs: captured.update(kwargs) or True)
+
+        pos = {
+            "id": 1, "market_id": "0x1", "token_id": "tok_1", "side": "NO",
+            "entry_price": 0.55, "size_usdc": 2.0,
+            "entry_time": "2026-06-30T10:00:00+00:00", "question": "q",
+        }
+        e._close_position(pos, pnl_dollars=0.80, exit_reason="Take Profit (0.99 >= 0.98)")
+
+        assert captured["exit_ask_depth_usd"] == 123.45
+        assert captured["exit_bid_depth_usd"] == 678.90
+
+    def test_close_position_survives_depth_fetch_failure(self, monkeypatch):
+        # If the CLOB book can't be read, the exit must still go through — the
+        # position closing is far more important than the depth analytics.
+        import executor as ex
+        e = Executor.__new__(Executor)
+
+        monkeypatch.setattr(ex, "PAPER_MODE", True)
+        def boom(tid):
+            raise ConnectionError("network down")
+        monkeypatch.setattr(ex, "get_orderbook_depth_usd", boom)
+        monkeypatch.setattr(ex, "send_trade_exit", lambda *a, **k: None)
+
+        captured = {}
+        monkeypatch.setattr(ex, "close_position_atomic", lambda **kwargs: captured.update(kwargs) or True)
+
+        pos = {
+            "id": 1, "market_id": "0x1", "token_id": "tok_1", "side": "NO",
+            "entry_price": 0.55, "size_usdc": 2.0,
+            "entry_time": "2026-06-30T10:00:00+00:00", "question": "q",
+        }
+        e._close_position(pos, pnl_dollars=0.80, exit_reason="Take Profit (0.99 >= 0.98)")
+
+        assert captured["exit_ask_depth_usd"] is None
+        assert captured["exit_bid_depth_usd"] is None
 
 
 class TestIntradayMetarExit:

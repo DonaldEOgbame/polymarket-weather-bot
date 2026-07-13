@@ -5,7 +5,7 @@ from py_clob_client.client import ClobClient
 from py_clob_client.clob_types import OrderArgs, MarketOrderArgs, OrderType
 from db import execute_query, fetch_query, get_open_position, close_position_atomic, open_position_atomic
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
-from scanner import get_realtime_price, get_market_resolution, get_gamma_mid_price
+from scanner import get_realtime_price, get_market_resolution, get_gamma_mid_price, get_orderbook_depth_usd
 from zoneinfo import ZoneInfo
 from weather import get_signal_engine, get_bucket_probability, _norm_cdf
 from metar import get_station, fetch_day_extremes
@@ -574,6 +574,19 @@ class Executor:
             f"{exit_reason} | PnL: ${pnl_dollars:.2f}"
         )
 
+        # Order-book depth at exit — the BID side specifically, since closing a
+        # position means selling into it (not the ask side logged at entry, which
+        # only matters for a fresh buy). Captures whether the market that looked
+        # liquid going in was still liquid coming out; a single entry-time depth
+        # reading can't tell you that (Seoul/Madrid both went to zero asks after
+        # entry this session — the bid side is what actually would have mattered
+        # for exiting, and this is the same gap that motivated logging depth at
+        # all). Best-effort: exit still proceeds even if depth can't be read.
+        try:
+            exit_ask_depth, exit_bid_depth = get_orderbook_depth_usd(pos["token_id"])
+        except Exception:
+            exit_ask_depth, exit_bid_depth = None, None
+
         skip_clob_exit = exit_reason == "EXPIRED_ON_RESTART" or exit_reason.startswith("RESOLVED_")
         if not PAPER_MODE and not skip_clob_exit:
             shares = round(pos["size_usdc"] / pos["entry_price"], 2)
@@ -602,6 +615,8 @@ class Executor:
             pnl_dollars=pnl_dollars,
             size_usdc=pos["size_usdc"],
             exit_reason=exit_reason,
+            exit_ask_depth_usd=exit_ask_depth,
+            exit_bid_depth_usd=exit_bid_depth,
         )
         if not closed:
             logging.warning(f"Position {pos['id']} already closed by another thread — skipping duplicate close")

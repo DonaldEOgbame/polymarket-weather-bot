@@ -41,6 +41,10 @@ def init_db():
             "ALTER TABLE trades ADD COLUMN is_high BOOLEAN",
             "ALTER TABLE trades ADD COLUMN city TEXT",
             "ALTER TABLE trades ADD COLUMN target_date TEXT",
+            # Order-book $ depth at EXIT — the counterpart to ask_depth_usd/
+            # bid_depth_usd logged at entry in signals. See close_position_atomic.
+            "ALTER TABLE trades ADD COLUMN exit_ask_depth_usd REAL",
+            "ALTER TABLE trades ADD COLUMN exit_bid_depth_usd REAL",
         ]:
             try:
                 conn.execute(ddl)
@@ -314,7 +318,8 @@ def open_position_atomic(market_id, token_id, side, price, size, now_iso, questi
     return trade_id
 
 
-def close_position_atomic(pos_id, market_id, side, pnl_dollars, size_usdc, exit_reason):
+def close_position_atomic(pos_id, market_id, side, pnl_dollars, size_usdc, exit_reason,
+                           exit_ask_depth_usd=None, exit_bid_depth_usd=None):
     """Delete position row, update trade record, and credit the bankroll all in a
     single transaction. Previously the bankroll credit was a separate connection/
     commit after the position delete + trade update — a process kill between the
@@ -323,6 +328,14 @@ def close_position_atomic(pos_id, market_id, side, pnl_dollars, size_usdc, exit_
     bankroll ledger never receiving the size_usdc + pnl_dollars credit, silently
     and permanently shrinking available cash. Folding the balance read + all three
     writes into one transaction closes that window.
+
+    exit_ask_depth_usd/exit_bid_depth_usd (optional): order-book $ depth captured
+    at the moment of exit — the counterpart to ask_depth_usd/bid_depth_usd logged
+    on entry in signals. Entry depth alone can't answer "was this market still
+    liquid enough to actually get out" — book depth can (and has, live: Seoul and
+    Madrid both went to zero asks after entry) look completely different by the
+    time a position closes.
+
     Returns True on success, False if the position was already gone (idempotent)."""
     now = datetime.now(timezone.utc).isoformat()
     with _write_lock:
@@ -332,9 +345,11 @@ def close_position_atomic(pos_id, market_id, side, pnl_dollars, size_usdc, exit_
             if cur.rowcount == 0:
                 return False  # already closed by another thread
             cur.execute(
-                "UPDATE trades SET status=?, exit_time=?, exit_reason=?, pnl=? "
+                "UPDATE trades SET status=?, exit_time=?, exit_reason=?, pnl=?, "
+                "exit_ask_depth_usd=?, exit_bid_depth_usd=? "
                 "WHERE market_id=? AND status='OPEN' AND side=?",
-                ("CLOSED", now, exit_reason, pnl_dollars, market_id, side)
+                ("CLOSED", now, exit_reason, pnl_dollars,
+                 exit_ask_depth_usd, exit_bid_depth_usd, market_id, side)
             )
             row = cur.execute("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1").fetchone()
             current = row[0] if row else STARTING_BANKROLL
