@@ -8,7 +8,7 @@ from config import (
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION, CONVECTIVE_CITIES,
     GFS_BIAS_CORRECTIONS, MODEL_BIAS_CORRECTIONS,
     ENABLE_PROB_CALIBRATION, PROB_CALIBRATION_INTERCEPT, PROB_CALIBRATION_SLOPE,
-    METAR_WARM_CORRECTION_F,
+    METAR_WARM_CORRECTION_F, MIN_BUCKET_PROB,
 )
 
 def _pstdev(data):
@@ -267,9 +267,13 @@ def get_signal_engine(city_name, target_date, is_high=True, hours_to_resolution=
         convective_inflated = True
         logging.debug(f"Convective std inflation x{CONVECTIVE_STD_INFLATION} applied for {city_key}")
 
+    # Agreement is measured against the RAW consensus, not the bias-shifted mean:
+    # no model temp contains METAR_WARM_CORRECTION_F, so comparing to the shifted
+    # mean made the band asymmetric (only 2.0-correction °F of warm-side tolerance)
+    # and could fail a perfectly agreeing ensemble.
     within_threshold = sum(
         1 for t in model_temps.values()
-        if abs(t - weighted_mean) < 2.0
+        if abs(t - raw_weighted_mean) < 2.0
     )
     model_agreement = within_threshold / len(model_temps)
     model_spread = max(model_temps.values()) - min(model_temps.values())
@@ -351,6 +355,16 @@ def get_bucket_probability(engine_result, bucket_lower, bucket_upper):
     is_bounded = bucket_lower is not None and bucket_upper is not None
     if is_bounded:
         prob = _calibrate_prob(prob)
+    # Tail floor on BOTH bounded and open-ended buckets. The overconfidence busts
+    # (Guangzhou #31: P(YES)=0.00008 on a "34°C or higher" open-ended bucket) were
+    # open-ended, so a bounded-only floor missed exactly the trades it was meant to
+    # catch. Whole-°C resolution + forecast noise means no bucket is truly < ~5%
+    # likely; flooring P(YES) up to MIN_BUCKET_PROB cuts the NO edge on the extreme
+    # tail below the entry gate. The entry decision uses only the traded side's
+    # probability, so flooring that side is sufficient; open-ended complementarity
+    # isn't relied on downstream (each side is fetched independently).
+    if MIN_BUCKET_PROB > 0.0 and prob < MIN_BUCKET_PROB:
+        prob = MIN_BUCKET_PROB
     return max(0.0, min(1.0, float(prob)))
 
 def prefetch_signal_engines(opportunities) -> dict:
@@ -436,7 +450,8 @@ def prefetch_signal_engines(opportunities) -> dict:
             combined_std *= CONVECTIVE_STD_INFLATION
             convective_inflated = True
 
-        within_threshold = sum(1 for t in model_temps.values() if abs(t - weighted_mean) < 2.0)
+        # vs raw consensus, not the bias-shifted mean — see get_signal_engine
+        within_threshold = sum(1 for t in model_temps.values() if abs(t - raw_weighted_mean) < 2.0)
         model_agreement = within_threshold / len(model_temps)
         model_spread = max(model_temps.values()) - min(model_temps.values())
 

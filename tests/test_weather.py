@@ -48,11 +48,23 @@ class TestGetBucketProbability:
         # 77-83 is ±3°F around mean=80 → roughly ±1 std → ~68% with boundary adjustment
         assert 0.5 < prob < 0.9
 
-    def test_far_bucket_low_prob(self):
-        """A bucket far from the mean should have low probability."""
+    def test_far_bucket_floored(self):
+        """A BOUNDED bucket far from the mean floors at MIN_BUCKET_PROB (0.05) —
+        the tail floor that stops the model betting real money on ~0% claims
+        (the Guangzhou-#31 overconfidence bust). Raw prob here is ~0."""
+        from config import MIN_BUCKET_PROB
         result = self._make_engine_result(mean=80.0, std=3.0)
         prob = get_bucket_probability(result, 90.0, 95.0)
-        assert prob < 0.05
+        assert prob == pytest.approx(MIN_BUCKET_PROB)
+
+    def test_open_ended_tail_floored(self):
+        """Open-ended buckets ARE floored too — the overconfidence busts
+        (Guangzhou #31, 'X or higher') were open-ended, so a bounded-only floor
+        missed exactly the trades it targeted."""
+        from config import MIN_BUCKET_PROB
+        result = self._make_engine_result(mean=70.0, std=2.0)
+        prob = get_bucket_probability(result, 95.0, None)  # raw P(>=95) with mean 70 ~ 0
+        assert prob == pytest.approx(MIN_BUCKET_PROB)
 
     def test_open_ended_above(self):
         """'Above X' bucket with lower bound only."""
@@ -82,11 +94,13 @@ class TestGetBucketProbability:
             assert 0.0 <= prob <= 1.0
 
     def test_wider_std_gives_more_tail_probability(self):
-        """With wider uncertainty, tail buckets should get more probability."""
-        tight = self._make_engine_result(mean=80.0, std=1.5)
-        wide = self._make_engine_result(mean=80.0, std=4.0)
-        prob_tight = get_bucket_probability(tight, 88.0, None)
-        prob_wide = get_bucket_probability(wide, 88.0, None)
+        """With wider uncertainty, tail buckets should get more probability.
+        Bound chosen so both probs sit ABOVE MIN_BUCKET_PROB (else the floor
+        flattens the comparison — which is itself the intended tail behaviour)."""
+        tight = self._make_engine_result(mean=80.0, std=3.0)
+        wide = self._make_engine_result(mean=80.0, std=6.0)
+        prob_tight = get_bucket_probability(tight, 84.0, None)
+        prob_wide = get_bucket_probability(wide, 84.0, None)
         assert prob_wide > prob_tight
 
     def test_minimum_std_floor(self):

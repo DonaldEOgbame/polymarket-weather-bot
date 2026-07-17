@@ -216,7 +216,9 @@ class TestYesEntriesDisabled:
             "raw_weighted_mean": mean, "model_count": 4,
         }
         portfolio_state = {"available_cash": 100.0, "total_equity": 100.0, "locked_cash": 0.0}
-        monkeypatch.setattr(strategy, "get_realtime_price", lambda tid: (0.0, 0.0))
+        # Readable book with a tight spread: the spread gate now fails CLOSED when
+        # the book is unreadable, so tests must present a real book to trade.
+        monkeypatch.setattr(strategy, "get_realtime_price", lambda tid: (0.51, 0.49))
         monkeypatch.setattr(strategy, "get_orderbook_depth_usd", lambda tid: (None, None))
         monkeypatch.setattr(strategy, "execute_query", lambda *a, **k: None)
         return strategy.evaluate_opportunity(opp, portfolio_state, engine_res=engine_res)
@@ -270,7 +272,9 @@ class TestOrderbookDepthLogging:
             if "INSERT INTO signals" in sql:
                 logged_rows.append(params)
 
-        monkeypatch.setattr(strategy, "get_realtime_price", lambda tid: (0.0, 0.0))
+        # Readable book with a tight spread: the spread gate now fails CLOSED when
+        # the book is unreadable, so tests must present a real book to trade.
+        monkeypatch.setattr(strategy, "get_realtime_price", lambda tid: (0.51, 0.49))
         monkeypatch.setattr(strategy, "get_orderbook_depth_usd", fake_depth)
         monkeypatch.setattr(strategy, "execute_query", fake_execute_query)
         result = strategy.evaluate_opportunity(opp, portfolio_state, engine_res=engine_res)

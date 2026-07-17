@@ -120,6 +120,19 @@ ENABLE_PROB_CALIBRATION = os.getenv("ENABLE_PROB_CALIBRATION", "true").lower() =
 PROB_CALIBRATION_INTERCEPT = float(os.getenv("PROB_CALIBRATION_INTERCEPT", "-0.1715"))
 PROB_CALIBRATION_SLOPE = float(os.getenv("PROB_CALIBRATION_SLOPE", "0.4457"))
 
+# Floor on the calibrated bucket probability (bounded AND open-ended). The
+# residual overconfidence after Platt lives in the extreme-low tail: on resolved
+# trades the model said ~2% where reality was ~7%, and it bet real money on
+# 0.01%/0.02% claims. The busts were all OPEN-ENDED buckets (Guangzhou #31, −$2,
+# "34°C or higher", P(YES)=0.00008), so the floor must cover open-ended too — a
+# bounded-only floor missed every bust. Whole-°C resolution + forecast noise
+# means no bucket is truly < ~5% likely; clamping P(YES) up to this floor cuts
+# the NO edge on the tail below the entry gate. Set 0 to disable. Verified by
+# replaying the 31 closed trades: floor 0.05 drops #28/#31/#32/#35/#38 — true
+# settled −$0.78 (a net-losing basket dominated by the −$2 bust), keeps all 26
+# others incl the honest ~9% Chicago loss (not overconfidence).
+MIN_BUCKET_PROB = float(os.getenv("MIN_BUCKET_PROB", "0.05"))
+
 # Base forecast uncertainty in °F, keyed by hours to resolution.
 # Interpolated at runtime; values reflect NWS skill decay with lead time.
 BASE_FORECAST_ERROR = {
@@ -249,6 +262,12 @@ POLYMARKET_PK = os.getenv("POLYMARKET_PK", "")
 CLOB_API_KEY = os.getenv("CLOB_API_KEY", "")
 CLOB_SECRET = os.getenv("CLOB_SECRET", "")
 CLOB_PASS_PHRASE = os.getenv("CLOB_PASS_PHRASE", "")
+# Wallet type wiring for the CLOB client. If the Polymarket account was created
+# through the website, USDC lives in a PROXY wallet and orders must carry
+# signature_type 1 (email/Magic login) or 2 (browser wallet) plus the proxy
+# address as funder. Leave unset only for a raw EOA that trades for itself.
+POLYMARKET_FUNDER = os.getenv("POLYMARKET_FUNDER", "")           # proxy wallet address
+POLYMARKET_SIG_TYPE = int(os.getenv("POLYMARKET_SIG_TYPE", "0"))  # 0=EOA, 1=Magic, 2=browser
 
 # --- GFS warm-bias corrections (°F) per city ---
 # GFS consistently runs warm in humid/coastal cities. Values derived from
@@ -279,7 +298,10 @@ MODEL_BIAS_CORRECTIONS = {
 }
 
 # --- Data retention (days) ---
-SIGNAL_RETENTION_DAYS = int(os.getenv("SIGNAL_RETENTION_DAYS", "60"))
+# 14d default (was 60): at ~2,100 signal rows/day × ~2.5KB the 60-day steady
+# state is ~320MB and filled the original 1GB volume; 14d is plenty because
+# calibration scores resolved rows within days.
+SIGNAL_RETENTION_DAYS = int(os.getenv("SIGNAL_RETENTION_DAYS", "14"))
 SCAN_LOG_RETENTION_DAYS = int(os.getenv("SCAN_LOG_RETENTION_DAYS", "14"))
 NOTIFICATION_RETENTION_DAYS = int(os.getenv("NOTIFICATION_RETENTION_DAYS", "30"))
 

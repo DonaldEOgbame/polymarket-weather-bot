@@ -18,8 +18,9 @@ for mod in ("py_clob_client", "py_clob_client.client", "py_clob_client.clob_type
     sys.modules.setdefault(mod, types.ModuleType(mod))
 sys.modules["py_clob_client.client"].ClobClient = object
 ct = sys.modules["py_clob_client.clob_types"]
-for n in ("OrderArgs", "MarketOrderArgs", "OrderType"):
-    setattr(ct, n, object)
+for n in ("OrderArgs", "MarketOrderArgs", "OrderType", "ApiCreds"):
+    if not hasattr(ct, n):
+        setattr(ct, n, object)
 
 from executor import Executor
 
@@ -108,18 +109,90 @@ class TestTakeProfitExit:
             "entry_price": 0.55,
             "size_usdc": 2.0,
             "entry_time": "2026-06-30T10:00:00+00:00",
-            "target_date": "2026-07-10"  # Target date in future relative to today
+            "target_date": "2100-01-01"  # Target date in future relative to today
         }
         
+        # Confirmed bid at 0.99 >= TAKE_PROFIT_PRICE (0.98): the fast take-profit
+        # must fire immediately, even inside the 30-min hold window.
         monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.99, 0.99))
-        
+
         exits_called = []
-        monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits_called.append(reason))
-        
+        monkeypatch.setattr(e, "_close_position",
+                            lambda pos, pnl_dollars, exit_reason: exits_called.append(exit_reason))
+
         e._check_exit_for_position(pos)
 
         assert len(exits_called) == 1
         assert "Take Profit" in exits_called[0]
+
+    def test_take_profit_needs_real_bid(self, monkeypatch):
+        # Ask is high but the BID is 0 (unreadable/thin book) — must NOT fire the
+        # fast take-profit off a non-fillable price (the phantom-exit guard).
+        import executor as ex
+        e = Executor.__new__(Executor)
+        e._loss_streak = {}
+        pos = {
+            "id": 1, "market_id": "0x1", "token_id": "tok_1", "side": "NO",
+            "entry_price": 0.55, "size_usdc": 2.0,
+            "entry_time": "2026-06-30T10:00:00+00:00", "target_date": "2100-01-01",
+            "city": "Tokyo", "is_high": 0,
+        }
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.99, 0.0))
+        monkeypatch.setattr(ex, "get_gamma_mid_price", lambda *a: None)
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
+        exits_called = []
+        monkeypatch.setattr(e, "_close_position",
+                            lambda pos, pnl_dollars, exit_reason: exits_called.append(exit_reason))
+        e._check_exit_for_position(pos)
+        assert exits_called == []
+
+
+class TestSettleClosedTrade:
+    """Early-exit (take-profit/stop) trades must still get a resolutions row so
+    calibration sees their TRUE outcome, settled against the METAR actual — not
+    the early-exit scalp price."""
+
+    def _trade(self):
+        return {
+            "id": 1, "market_id": "0x1", "side": "NO", "city": "Tokyo",
+            "target_date": "2026-07-13", "is_high": 0,
+            "model_prob": 0.05, "size_usdc": 2.0, "fill_price": 0.68,
+        }
+
+    def test_writes_resolution_for_no_win(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+        # Actual 77°F, bucket [69.4,70.2] → misses bucket → NO wins.
+        monkeypatch.setattr(ex, "resolved_extreme_f", lambda *a: 77.0)
+        monkeypatch.setattr(ex, "fetch_query", lambda sql, params=(): (
+            [] if "FROM resolutions" in sql else [{"bucket_low": 69.4, "bucket_high": 70.2}]))
+        inserted = {}
+        monkeypatch.setattr(ex, "execute_query",
+                            lambda sql, params=(): inserted.update({"sql": sql, "params": params}))
+        assert e.settle_closed_trade(self._trade()) is True
+        p = inserted["params"]
+        # outcome NO, won=1, settled pnl positive (shares - size).
+        assert "NO" in p and 1 in p
+        assert inserted["params"][5] > 0  # pnl slot
+
+    def test_idempotent_when_row_exists(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+        monkeypatch.setattr(ex, "fetch_query", lambda sql, params=(): [{"1": 1}])
+        wrote = []
+        monkeypatch.setattr(ex, "execute_query", lambda *a, **k: wrote.append(1))
+        assert e.settle_closed_trade(self._trade()) is False
+        assert wrote == []
+
+    def test_skips_when_metar_unpublished(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+        monkeypatch.setattr(ex, "fetch_query", lambda sql, params=(): [])
+        monkeypatch.setattr(ex, "resolved_extreme_f", lambda *a: None)
+        wrote = []
+        monkeypatch.setattr(ex, "execute_query", lambda *a, **k: wrote.append(1))
+        assert e.settle_closed_trade(self._trade()) is False
+        assert wrote == []
 
 
 class TestLiveExitFeeDeduction:
@@ -133,10 +206,11 @@ class TestLiveExitFeeDeduction:
 
         monkeypatch.setattr(ex, "PAPER_MODE", False)
         monkeypatch.setattr(e, "_submit_taker",
-                            lambda token_id, side, amount: {"shares": 10.0, "price": 0.70, "fee_bps": 500})
+                            lambda token_id, side, amount, fallback_price=None: {"shares": 10.0, "price": 0.70, "fee_bps": 500})
         monkeypatch.setattr(ex, "close_position_atomic", lambda **kwargs: kwargs)
         monkeypatch.setattr(ex, "send_trade_exit", lambda *a, **k: None)
         monkeypatch.setattr(ex, "get_orderbook_depth_usd", lambda tid: (None, None))
+        monkeypatch.setattr(ex, "get_realtime_price", lambda tid: (0.71, 0.69))
 
         pos = {
             "id": 1, "market_id": "0x1", "token_id": "tok_1", "side": "NO",
@@ -161,6 +235,71 @@ class TestLiveExitFeeDeduction:
         # Sanity: the naive no-fee calc would have been strictly larger (fee > 0).
         naive_pnl = (0.70 - 0.55) * shares
         assert captured["pnl_dollars"] < naive_pnl
+
+
+class TestPartialExitFill:
+    """A live FAK SELL that fills less than the full position must NOT book a
+    full close (that stranded on-chain shares while the DB went flat and the
+    bankroll was credited cash never received). It shrinks the position via
+    reduce_position_atomic and leaves it open for the next cycle."""
+
+    def test_partial_fill_reduces_not_closes(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+
+        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        # Hold 10 shares; the bid only absorbs 4.
+        monkeypatch.setattr(e, "_submit_taker",
+                            lambda token_id, side, amount, fallback_price=None: {"shares": 4.0, "price": 0.70, "fee_bps": 500})
+        monkeypatch.setattr(ex, "send_trade_exit", lambda *a, **k: None)
+        monkeypatch.setattr(ex, "get_orderbook_depth_usd", lambda tid: (None, None))
+        monkeypatch.setattr(ex, "get_realtime_price", lambda tid: (0.71, 0.69))
+
+        reduce_calls = {}
+        close_calls = {}
+        monkeypatch.setattr(ex, "reduce_position_atomic",
+                            lambda **kw: reduce_calls.update(kw))
+        monkeypatch.setattr(ex, "close_position_atomic",
+                            lambda **kw: close_calls.update(kw))
+
+        pos = {
+            "id": 1, "market_id": "0x1", "token_id": "tok_1", "side": "NO",
+            "entry_price": 0.55, "size_usdc": 5.5, "shares": 10.0,
+            "entry_time": "2026-06-30T10:00:00+00:00", "question": "q",
+        }
+
+        e._close_position(pos, pnl_dollars=999.0, exit_reason="Stop Loss (-10.0%)")
+
+        # Position was REDUCED, never fully closed.
+        assert reduce_calls, "expected a partial-exit reduction"
+        assert not close_calls, "must not fully close on a partial fill"
+        assert reduce_calls["sold_shares"] == 4.0
+        # Money conservation: entry cost freed = sold * entry_price.
+        assert reduce_calls["entry_cost_freed"] == pytest.approx(4.0 * 0.55)
+        # Proceeds = sold*price minus the taker fee on the sold shares only.
+        sold_fee = (500 / 10000.0) * 0.70 * 0.30 * 4.0
+        assert reduce_calls["proceeds"] == pytest.approx(4.0 * 0.70 - sold_fee)
+
+    def test_full_fill_closes(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(e, "_submit_taker",
+                            lambda token_id, side, amount, fallback_price=None: {"shares": 10.0, "price": 0.70, "fee_bps": 500})
+        monkeypatch.setattr(ex, "send_trade_exit", lambda *a, **k: None)
+        monkeypatch.setattr(ex, "get_orderbook_depth_usd", lambda tid: (None, None))
+        monkeypatch.setattr(ex, "get_realtime_price", lambda tid: (0.71, 0.69))
+        reduce_calls, close_calls = {}, {}
+        monkeypatch.setattr(ex, "reduce_position_atomic", lambda **kw: reduce_calls.update(kw))
+        monkeypatch.setattr(ex, "close_position_atomic", lambda **kw: close_calls.update(kw))
+        pos = {
+            "id": 1, "market_id": "0x1", "token_id": "tok_1", "side": "NO",
+            "entry_price": 0.55, "size_usdc": 5.5, "shares": 10.0,
+            "entry_time": "2026-06-30T10:00:00+00:00", "question": "q",
+        }
+        e._close_position(pos, pnl_dollars=999.0, exit_reason="Stop Loss (-10.0%)")
+        assert close_calls, "full fill should close the position"
+        assert not reduce_calls
 
 
 class TestExitDepthLogging:
@@ -256,7 +395,7 @@ class TestIntradayMetarExit:
         }])
         
         # Mock get_signal_engine to return forecast
-        monkeypatch.setattr(ex, "get_signal_engine", lambda *a: {
+        monkeypatch.setattr(ex, "get_signal_engine", lambda *a, **k: {
             "ensemble_mean": 65.2,
             "ensemble_std": 1.5
         })
@@ -310,7 +449,7 @@ class TestIntradayMetarExit:
             }]
         monkeypatch.setattr(ex, "fetch_query", mock_fetch_query)
         
-        monkeypatch.setattr(ex, "get_signal_engine", lambda *a: {
+        monkeypatch.setattr(ex, "get_signal_engine", lambda *a, **k: {
             "ensemble_mean": 65.2,
             "ensemble_std": 1.5
         })

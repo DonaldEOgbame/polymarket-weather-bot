@@ -16,7 +16,9 @@ learning the per-station Open-Meteo→METAR bias.
 import csv
 import io
 import logging
-from datetime import date as _date, timedelta
+import math
+from datetime import date as _date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 from utils import safe_get
 
@@ -129,7 +131,25 @@ def fetch_day_extremes(icao, tz, date_str):
                 result = (max(temps), min(temps))
     except Exception as e:
         logging.error(f"METAR fetch failed for {icao} {date_str}: {e}")
-    _METAR_CACHE[key] = result
+    # Only cache days that are COMPLETE in station-local time, and only real data.
+    # The monitor loop re-fetches the target day every cycle precisely to watch the
+    # intraday max evolve — a permanent cache here froze the "observed max" at the
+    # first fetch of the day, blinding the bucket-bust check to the afternoon high.
+    # Failed fetches ((None, None)) are never cached so transient errors can heal.
+    if result != (None, None):
+        try:
+            now_local = datetime.now(ZoneInfo(tz))
+        except Exception:
+            now_local = datetime.utcnow()
+        # 2h grace after local midnight: IEM's archive can lag, so a day fetched
+        # at 00:05 local may still be missing its final observations.
+        local_today = now_local.date().isoformat()
+        day_complete = date_str < local_today and not (
+            (now_local.date() - timedelta(days=1)).isoformat() == date_str
+            and now_local.hour < 2
+        )
+        if day_complete:
+            _METAR_CACHE[key] = result
     return result
 
 
@@ -146,5 +166,12 @@ def resolved_extreme_f(city_key, date_str, is_high):
     val_c = mx_c if is_high else mn_c
     if val_c is None:
         return None
-    rounded_c = round(val_c)  # whole-°C resolution precision
+    rounded_c = round_half_away(val_c)  # whole-°C resolution precision
     return rounded_c * 9.0 / 5.0 + 32.0
+
+
+def round_half_away(v):
+    """Round half AWAY from zero (30.5 → 31, -0.5 → -1), matching Wunderground's
+    whole-degree rollup. Python's round() is banker's rounding (30.5 → 30), which
+    mis-scores exactly the boundary readings the markets settle on."""
+    return int(math.copysign(math.floor(abs(v) + 0.5), v))

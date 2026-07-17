@@ -215,7 +215,13 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             skip_reason = f"NO edge {no_edge:.3f} but agreement too low ({agreement:.2f} < {MIN_MODEL_AGREEMENT})"
         elif spread > MAX_MODEL_SPREAD:
             skip_reason = f"NO edge {no_edge:.3f} but spread too wide ({spread:.1f}°F > {MAX_MODEL_SPREAD}°F)"
-        elif no_spread_frac is not None and no_spread_frac > MAX_ENTRY_SPREAD_FRACTION:
+        elif no_spread_frac is None:
+            # Fail CLOSED: an unreadable book (empty/one-sided/error) is most
+            # likely exactly the thin market this gate exists to block — skipping
+            # the check here let trades fire on Gamma-mid "edge" no real fill
+            # could capture.
+            skip_reason = f"NO edge {no_edge:.3f} but order-book spread unreadable — cannot verify entry cost"
+        elif no_spread_frac > MAX_ENTRY_SPREAD_FRACTION:
             skip_reason = f"NO edge {no_edge:.3f} but market spread too wide ({no_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"
         elif not forecast_margin_ok("NO", engine_res["ensemble_mean"], opp.bucket_low, opp.bucket_high, FORECAST_MARGIN_F):
             skip_reason = f"NO edge {no_edge:.3f} but forecast too close to bucket edge (mean {engine_res['ensemble_mean']:.1f}°F, need ≥{FORECAST_MARGIN_F}°F clear of bucket)"

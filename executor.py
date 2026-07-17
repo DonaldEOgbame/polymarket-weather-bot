@@ -2,13 +2,15 @@ import json
 import logging
 from datetime import datetime, timezone
 from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, MarketOrderArgs, OrderType
-from db import execute_query, fetch_query, get_open_position, close_position_atomic, open_position_atomic
+from py_clob_client.clob_types import OrderArgs, MarketOrderArgs, OrderType, ApiCreds
+from db import (execute_query, fetch_query, get_open_position, close_position_atomic,
+                open_position_atomic, reduce_position_atomic)
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
 from scanner import get_realtime_price, get_market_resolution, get_gamma_mid_price, get_orderbook_depth_usd
 from zoneinfo import ZoneInfo
+from utils import parse_utc_datetime
 from weather import get_signal_engine, get_bucket_probability, _norm_cdf
-from metar import get_station, fetch_day_extremes
+from metar import get_station, fetch_day_extremes, round_half_away, resolved_extreme_f
 from config import (
     PAPER_MODE, POLYMARKET_PK, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE,
     MAX_CONCURRENT_POSITIONS, STOP_LOSS_PCT, ENABLE_STOP_LOSS, EXIT_EDGE_FLOOR, CLOB_BASE_URL,
@@ -16,6 +18,7 @@ from config import (
     HOLD_WINNERS_TO_RESOLUTION, THESIS_BREAK_PROB_DELTA, TAKE_PROFIT_PRICE, SUSTAINED_LOSS_POLLS,
     SUSTAINED_LOSS_MIN_DROP, REENTRY_COOLDOWN_HOURS,
     ENABLE_SUSTAINED_LOSS_GUARD, ENABLE_THESIS_BREAK_EXIT,
+    POLYMARKET_FUNDER, POLYMARKET_SIG_TYPE,
 )
 
 
@@ -23,10 +26,22 @@ class Executor:
     def __init__(self):
         self.client = None
         if not PAPER_MODE:
-            self.client = ClobClient(CLOB_BASE_URL, key=POLYMARKET_PK, chain_id=137)
-            self.client.set_api_creds(self.client.create_api_credential(
-                CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE
-            ))
+            # signature_type/funder are REQUIRED for accounts created through the
+            # Polymarket website (USDC lives in a proxy wallet, not the raw EOA of
+            # POLYMARKET_PK) — without them every order is rejected for balance.
+            client_kwargs = {"key": POLYMARKET_PK, "chain_id": 137}
+            if POLYMARKET_SIG_TYPE:
+                client_kwargs["signature_type"] = POLYMARKET_SIG_TYPE
+                client_kwargs["funder"] = POLYMARKET_FUNDER
+            self.client = ClobClient(CLOB_BASE_URL, **client_kwargs)
+            if CLOB_API_KEY and CLOB_SECRET and CLOB_PASS_PHRASE:
+                self.client.set_api_creds(ApiCreds(
+                    api_key=CLOB_API_KEY, api_secret=CLOB_SECRET,
+                    api_passphrase=CLOB_PASS_PHRASE,
+                ))
+            else:
+                # Derive L2 creds from the private key when none are supplied.
+                self.client.set_api_creds(self.client.create_or_derive_api_creds())
         self.reconcile_positions()
         # Tracks consecutive below-entry mid-price polls per position id.
         # Reset on price recovery. Used by the sustained-loss guard in _check_exit_for_position.
@@ -121,6 +136,16 @@ class Executor:
         """Record settlement + Brier score in resolutions table. The Brier component
         is per-side: brier = (won - model_prob_for_chosen_side)^2."""
         try:
+            # Dedup: settle_closed_trade may have already written a METAR-based
+            # resolution row for this (market_id, side) before Polymarket reported
+            # the market resolved. Without this guard the two writers produce a
+            # duplicate row that inflates the Brier/win-rate denominators.
+            already = fetch_query(
+                "SELECT 1 FROM resolutions WHERE market_id=? AND side=? LIMIT 1",
+                (pos["market_id"], pos["side"]),
+            )
+            if already:
+                return
             trade = fetch_query(
                 "SELECT model_prob FROM trades WHERE market_id=? AND side=? AND status='OPEN' "
                 "ORDER BY id DESC LIMIT 1",
@@ -161,6 +186,73 @@ class Executor:
         except Exception as e:
             logging.error(f"Failed to write resolution row for {pos['market_id']}: {e}", exc_info=True)
 
+    def settle_closed_trade(self, trade):
+        """Write a resolutions row for a trade whose position was ALREADY closed
+        early (e.g. take-profit / stop) and therefore never went through
+        _try_settle_position. Uses the METAR-resolved daily extreme — the same
+        ruler Polymarket settles on — to determine the true win/loss, so an early
+        exit no longer hides the real outcome (this is why all 18 take-profit
+        trades had no resolution row and the Brier stats were blind to them).
+
+        Idempotent: skips if a resolution row already exists for this trade's
+        (market_id, side). Returns True if a row was written."""
+        market_id, side = trade["market_id"], trade["side"]
+        city, target_date = trade.get("city"), trade.get("target_date")
+        is_high = bool(trade["is_high"]) if trade.get("is_high") is not None else True
+        try:
+            existing = fetch_query(
+                "SELECT 1 FROM resolutions WHERE market_id=? AND side=? LIMIT 1",
+                (market_id, side),
+            )
+            if existing:
+                return False
+            actual_f = resolved_extreme_f(city, target_date, is_high)
+            if actual_f is None:
+                return False  # METAR not published yet — retry next cycle
+
+            m = fetch_query(
+                "SELECT bucket_low, bucket_high FROM markets WHERE market_id=?",
+                (market_id,),
+            )
+            if not m:
+                return False
+            lb, ub = m[0]["bucket_low"], m[0]["bucket_high"]
+            lo = (lb - 0.5) if lb is not None else -1e9
+            hi = (ub + 0.5) if ub is not None else 1e9
+            landed_in_bucket = lo <= actual_f <= hi
+            outcome = "YES" if landed_in_bucket else "NO"
+            won = (outcome == side)
+
+            model_prob_entry = trade.get("model_prob")
+            if model_prob_entry is None:
+                prob_for_side, brier = None, None
+            else:
+                prob_for_side = model_prob_entry if side == "YES" else (1.0 - model_prob_entry)
+                brier = (float(won) - prob_for_side) ** 2
+
+            # True settled PnL from the entry price and actual outcome — NOT the
+            # early-exit pnl already on the trade row (that measures the scalp,
+            # this measures the bet). Recorded separately in resolutions.
+            shares = trade["size_usdc"] / trade["fill_price"] if trade["fill_price"] else 0
+            settled_pnl = (shares - trade["size_usdc"]) if won else -trade["size_usdc"]
+
+            execute_query(
+                "INSERT INTO resolutions (market_id, resolved_at, outcome, actual_value, "
+                "model_prob_at_entry, pnl, side, won, brier, city, target_date) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                (market_id, datetime.now(timezone.utc).isoformat(), outcome, actual_f,
+                 model_prob_entry, settled_pnl, side, 1 if won else 0, brier, city, target_date),
+            )
+            logging.info(
+                f"Closed-trade settlement: {market_id} ({side}) actual={actual_f:.1f}°F "
+                f"outcome={outcome} won={won} settled_pnl=${settled_pnl:+.2f}"
+                + (f" brier={brier:.4f}" if brier is not None else "")
+            )
+            return True
+        except Exception as e:
+            logging.error(f"settle_closed_trade failed for {market_id}: {e}", exc_info=True)
+            return False
+
     def get_open_positions_count(self):
         res = fetch_query("SELECT COUNT(*) as count FROM positions")
         return res[0]["count"] if res else 0
@@ -174,20 +266,42 @@ class Executor:
         NOTE: verify these field names against the raw response logged below on the
         FIRST real fill — adjust if Polymarket's schema differs in this client version.
         """
+        import time as _time
         shares, price = 0.0, None
-        if order_id:
+        if not order_id:
+            return shares, price
+        # The order record can lag matching by a moment; retry briefly before
+        # concluding "nothing filled" — a premature zero here books a real fill
+        # as nothing and leaves an untracked live position.
+        for attempt in range(3):
             try:
                 o = self.client.get_order(order_id)
                 if isinstance(o, dict):
                     sm = float(o.get("size_matched") or 0)
                     if sm > 0:
                         shares = sm
-                        price = float(o.get("price") or 0) or fallback_price
+                        # Prefer the volume-weighted price of the order's actual
+                        # trades: o["price"] is the marketable LIMIT price (the
+                        # worst-case book walk), not what actually filled.
+                        trades = o.get("associate_trades") or o.get("trades") or []
+                        try:
+                            tot_sz = sum(float(t.get("size") or 0) for t in trades)
+                            tot_val = sum(float(t.get("size") or 0) * float(t.get("price") or 0)
+                                          for t in trades)
+                            if tot_sz > 0 and tot_val > 0:
+                                price = tot_val / tot_sz
+                        except Exception:
+                            pass
+                        if not price:
+                            price = float(o.get("price") or 0) or fallback_price
+                        break
             except Exception as e:
                 logging.error(f"get_order({order_id}) failed during fill confirmation: {e}")
+            if attempt < 2:
+                _time.sleep(1.0)
         return shares, price
 
-    def _submit_taker(self, token_id, side, amount):
+    def _submit_taker(self, token_id, side, amount, fallback_price=None):
         """Place a Fill-And-Kill MARKET order (taker). For BUY, `amount` is USDC to
         spend (Polymarket market-order min $1); for SELL, `amount` is shares. The
         client walks the book to price it, so it either takes immediately or is
@@ -209,8 +323,19 @@ class Executor:
         # Log the raw response verbatim — this is how we confirm the schema on the first real fill.
         logging.info(f"RAW order response [{side} {token_id}]: {resp}")
         order_id = resp.get("orderID") or resp.get("orderId") if isinstance(resp, dict) else None
-        filled, avg = self._read_fill(resp, order_id, None)
-        if filled <= 0 or not avg:
+        filled, avg = self._read_fill(resp, order_id, fallback_price)
+        if filled > 0 and not avg:
+            # A REAL fill with an unreadable price must never be discarded — that
+            # books "nothing filled" while USDC/shares actually moved, leaving an
+            # untracked live position that the next scan doubles into. Book it at
+            # the caller's target price and flag loudly for manual reconciliation.
+            logging.critical(
+                f"{side} order {order_id} matched {filled} shares but no price could be read "
+                f"and no fallback was provided — booking at 0.5 placeholder. RECONCILE MANUALLY. "
+                f"resp={resp}"
+            )
+            avg = 0.5
+        if filled <= 0:
             logging.warning(f"{side} market order did not fill; booking nothing. resp={resp}")
             return None
         return {"shares": filled, "price": avg, "fee_bps": fee_bps}
@@ -262,18 +387,22 @@ class Executor:
         # measured cost reflect real execution, not an assumption.
         price = round(min(signal_data["price"] + 0.01, 0.99), 2)
         shares = round(size / price, 2)
+        entry_fee = 0.0  # paper mode: fee is modeled inside transaction_cost, not the ledger
 
         if not PAPER_MODE:
             logging.info(
                 f"Executing LIVE trade: BUY ${size:.2f} of {opp.market_id} {side} "
                 f"(target=${signal_data['price']:.2f}, edge={signal_data['edge']:.3f})"
             )
-            fill = self._submit_taker(signal_data["token_id"], "BUY", size)  # amount = USDC
+            fill = self._submit_taker(signal_data["token_id"], "BUY", size,
+                                      fallback_price=price)  # amount = USDC
             if not fill:
                 return  # nothing filled → no phantom position
             price = round(fill["price"], 4)
             shares = fill["shares"]
             size = round(shares * price, 2)                  # actual USDC deployed
+            fee_rate = (fill["fee_bps"] / 10000.0) if fill.get("fee_bps") else TAKER_FEE_RATE
+            entry_fee = fee_rate * price * (1.0 - price) * shares
             slip = price - signal_data["price"]
             logging.info(
                 f"FILLED {opp.market_id} {side}: {shares} sh @ ${price:.4f} "
@@ -291,6 +420,7 @@ class Executor:
             price=price, size=size, now_iso=now_iso, question=opp.question,
             is_high=opp.is_high, city=opp.city, target_date=opp.date,
             model_prob=signal_data["model_prob"], edge=signal_data["edge"],
+            shares=shares, entry_fee=entry_fee,
         )
         send_trade_entry(opp.question, price, signal_data["model_prob"], signal_data["edge"], size)
 
@@ -325,6 +455,21 @@ class Executor:
         entry_time = datetime.fromisoformat(pos["entry_time"])
         now = datetime.now(timezone.utc)
         hold_minutes = (now - entry_time).total_seconds() / 60.0
+
+        # --- Fast take-profit: fire the INSTANT a real fillable bid reaches the
+        # target, ahead of the 30-min hold and the target-date hold-to-resolution
+        # gate. Requires a CONFIRMED bid (real order-book depth), never a stale or
+        # Gamma-fallback price — that guard is what keeps this from re-becoming the
+        # phantom-$0.999 exit. At 0.98 there is almost nothing left to gain by
+        # holding to $1, so securing it immediately is the intended behaviour.
+        tp_ask, tp_bid = get_realtime_price(pos["token_id"])
+        if tp_bid >= TAKE_PROFIT_PRICE:
+            self._close_position(
+                pos, pnl_dollars=None,
+                exit_reason=f"Take Profit (bid {tp_bid:.3f} >= {TAKE_PROFIT_PRICE:.2f})",
+            )
+            return
+
         if hold_minutes < 30:
             return
 
@@ -409,7 +554,10 @@ class Executor:
             )
         elif ENABLE_STOP_LOSS and pnl_pct <= -STOP_LOSS_PCT:
             exit_reason = f"Stop Loss ({pnl_pct:.1%})"
-        elif exit_fill >= TAKE_PROFIT_PRICE:
+        elif bid_price > 0 and exit_fill >= TAKE_PROFIT_PRICE:
+            # bid_price > 0 guard: on the Gamma fallback exit_fill is a stale
+            # estimate with NO real book behind it — firing take-profit there books
+            # a paper fill nobody would pay (the phantom-$0.999 failure class).
             exit_reason = f"Take Profit (Price {exit_fill:.2f} >= {TAKE_PROFIT_PRICE:.2f})"
         else:
             signals = fetch_query(
@@ -425,8 +573,18 @@ class Executor:
                 # the market (and the weather) has genuinely moved against the position,
                 # so the edge-decay exit silently stops firing exactly when it matters most.
                 latest_prob = signals[0]["model_prob"]  # fallback if live refresh fails
+                # Pass the REAL time to resolution — omitting it defaulted to 48h,
+                # so exit-side probabilities were computed against a forecast error
+                # band ~2x too wide in the final hours before settlement.
+                hours_left = 48.0
+                try:
+                    target_dt = parse_utc_datetime(pos["target_date"] + "T23:59:00+00:00")
+                    hours_left = max(0.0, (target_dt - now).total_seconds() / 3600.0)
+                except Exception:
+                    pass
                 engine_res = get_signal_engine(
-                    pos["city"], pos["target_date"], bool(pos["is_high"])
+                    pos["city"], pos["target_date"], bool(pos["is_high"]),
+                    hours_to_resolution=hours_left,
                 )
                 if engine_res:
                     fresh_prob = get_bucket_probability(
@@ -443,7 +601,7 @@ class Executor:
                             is_high = bool(pos["is_high"])
                             obs_val_c = obs_max_c if is_high else obs_min_c
                             if obs_val_c is not None:
-                                obs_val_f = round(obs_val_c) * 9.0 / 5.0 + 32.0
+                                obs_val_f = round_half_away(obs_val_c) * 9.0 / 5.0 + 32.0
                                 lb = signals[0]["bucket_low"]
                                 ub = signals[0]["bucket_high"]
                                 lb_pad = (lb - 0.5) if lb is not None else -1000.0
@@ -569,6 +727,20 @@ class Executor:
         return EXIT_EDGE_FLOOR
 
     def _close_position(self, pos, pnl_dollars, exit_reason):
+        # pnl_dollars=None means "compute it here from the confirmed exit bid"
+        # (used by the fast take-profit path). Live mode overrides it from the
+        # actual fill below; paper mode books this estimate. Book the sell into
+        # the real bid minus the taker fee — never an optimistic mid.
+        if pnl_dollars is None:
+            try:
+                _, close_bid = get_realtime_price(pos["token_id"])
+            except Exception:
+                close_bid = 0.0
+            exit_px = close_bid if close_bid > 0 else pos["entry_price"]
+            shares = pos["shares"] if pos.get("shares") else (
+                pos["size_usdc"] / pos["entry_price"] if pos["entry_price"] > 0 else 0)
+            fee = TAKER_FEE_RATE * exit_px * (1.0 - exit_px) * shares
+            pnl_dollars = (exit_px - pos["entry_price"]) * shares - fee
         logging.info(
             f"{'PAPER ' if PAPER_MODE else ''}EXIT: {pos['market_id']} ({pos['side']}) — "
             f"{exit_reason} | PnL: ${pnl_dollars:.2f}"
@@ -589,8 +761,20 @@ class Executor:
 
         skip_clob_exit = exit_reason == "EXPIRED_ON_RESTART" or exit_reason.startswith("RESOLVED_")
         if not PAPER_MODE and not skip_clob_exit:
-            shares = round(pos["size_usdc"] / pos["entry_price"], 2)
-            fill = self._submit_taker(pos["token_id"], "SELL", shares)   # amount = shares
+            # Prefer the share count actually filled at entry (positions.shares);
+            # the historical fallback re-derives it from doubly-rounded values and
+            # can exceed real holdings, making the CLOB reject the sell forever.
+            held_shares = pos["shares"] if pos.get("shares") else round(pos["size_usdc"] / pos["entry_price"], 2)
+            # Fallback price for an unreadable fill: the live bid (what a taker
+            # SELL actually crosses into), else entry price — never the 0.5
+            # placeholder, which would fabricate the exit PnL and bankroll credit.
+            try:
+                _, live_bid = get_realtime_price(pos["token_id"])
+            except Exception:
+                live_bid = 0.0
+            sell_fallback = live_bid if live_bid > 0 else pos["entry_price"]
+            fill = self._submit_taker(pos["token_id"], "SELL", held_shares,
+                                      fallback_price=sell_fallback)   # amount = shares
             if not fill:
                 logging.warning(f"Exit SELL did not fill for {pos['market_id']}; leaving open for retry.")
                 return
@@ -599,14 +783,33 @@ class Executor:
             # (exit_fee), but this live path previously dropped it entirely even though
             # fee_bps was already fetched, silently overstating every live exit's PnL.
             exit_price = fill["price"]
-            exit_shares = pos["size_usdc"] / pos["entry_price"]
+            sold = min(fill["shares"], held_shares)
             fee_rate = (fill["fee_bps"] / 10000.0) if fill.get("fee_bps") else TAKER_FEE_RATE
-            exit_fee = fee_rate * exit_price * (1.0 - exit_price) * exit_shares
-            pnl_dollars = (exit_price - pos["entry_price"]) * exit_shares - exit_fee
+            sold_fee = fee_rate * exit_price * (1.0 - exit_price) * sold
+            sold_pnl = (exit_price - pos["entry_price"]) * sold - sold_fee
             logging.info(
-                f"EXIT FILLED {pos['market_id']} ({pos['side']}): {fill['shares']} sh @ ${exit_price:.4f} "
-                f"| realized PnL ${pnl_dollars:.2f} | fee_bps={fill['fee_bps']}"
+                f"EXIT FILLED {pos['market_id']} ({pos['side']}): {sold} sh of {held_shares} "
+                f"@ ${exit_price:.4f} | realized PnL ${sold_pnl:.2f} | fee_bps={fill['fee_bps']}"
             )
+            if sold < held_shares - 0.01:
+                # PARTIAL fill: an FAK order takes what the bid holds and kills the
+                # rest. Booking a full close here stranded the unsold shares
+                # on-chain while the DB went flat and the bankroll was credited
+                # cash never received. Shrink the position to the remainder and
+                # leave it open — the next monitor cycle retries the rest.
+                entry_cost_freed = sold * pos["entry_price"]
+                proceeds = sold * exit_price - sold_fee
+                reduce_position_atomic(
+                    pos_id=pos["id"], market_id=pos["market_id"], side=pos["side"],
+                    sold_shares=sold, entry_cost_freed=entry_cost_freed,
+                    proceeds=proceeds, pnl_delta=sold_pnl,
+                )
+                logging.warning(
+                    f"PARTIAL EXIT {pos['market_id']}: sold {sold}/{held_shares} sh — "
+                    f"position reduced to {held_shares - sold:.2f} sh, retrying remainder next cycle."
+                )
+                return
+            pnl_dollars = sold_pnl
 
         closed = close_position_atomic(
             pos_id=pos["id"],

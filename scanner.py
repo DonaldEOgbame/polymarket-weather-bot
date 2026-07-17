@@ -44,7 +44,7 @@ def _c_to_f(c: float) -> float:
 # zero-width (91.4, 91.4) bucket instead of the correct rounding-tolerant
 # (91.0, 91.8)) is instantly detectable from the DB, instead of requiring a
 # multi-hour forensic timestamp-correlation audit to even notice it happened.
-PARSER_VERSION = 2
+PARSER_VERSION = 3  # v3: strict vs inclusive threshold phrasing split (±1 whole degree)
 
 
 def parse_bucket(question: str):
@@ -77,6 +77,12 @@ def parse_bucket(question: str):
         # Also handle "70 to 75°F"
         range_pattern2 = r'(-?\d+(?:\.\d+)?)\s+to\s+(-?\d+(?:\.\d+)?)\s*°\s*[cfCF]'
         range_match = re.search(range_pattern2, question, re.IGNORECASE)
+    if not range_match:
+        # Also handle "between 12°C and 14°C" — without this, such questions fell
+        # through to the exact-bucket branch and silently parsed as a bucket at 12.
+        range_pattern3 = (r'between\s+(-?\d+(?:\.\d+)?)\s*(?:°\s*[cfCF])?\s+and\s+'
+                          r'(-?\d+(?:\.\d+)?)\s*°\s*[cfCF]')
+        range_match = re.search(range_pattern3, question, re.IGNORECASE)
 
     if is_celsius:
         # For Celsius weather markets:
@@ -84,15 +90,28 @@ def parse_bucket(question: str):
         # range is extended by +/- 0.5°C in Celsius. To correct for the fact that
         # get_bucket_probability() adds/subtracts 0.5 in Fahrenheit, we convert the
         # bounds with a correction factor of +/- 0.5 in the Fahrenheit input.
-        if "below" in q_original or "under" in q_original or "or below" in q_original:
+        # Inclusive vs strict phrasing resolve one whole degree apart:
+        # "X or below" pays YES when the rounded reading ≤ X (raw < X+0.5), while
+        # strict "below X" needs rounded < X (raw < X-0.5) — and symmetrically on the
+        # high side. Check the inclusive phrases first ("or below" contains "below").
+        if ("or below" in q_original or "or under" in q_original
+                or "or lower" in q_original or "or less" in q_original):
+            if temp_matches:
+                val = float(temp_matches[-1])
+                return (None, _c_to_f(val + 0.5) - 0.5)
+        elif "below" in q_original or "under" in q_original:
             if temp_matches:
                 val = float(temp_matches[-1])
                 return (None, _c_to_f(val - 0.5) - 0.5)
-        elif ("above" in q_original or "or more" in q_original or "exceed" in q_original
-              or "at least" in q_original or "or higher" in q_original):
+        elif ("or more" in q_original or "at least" in q_original
+              or "or higher" in q_original or "or above" in q_original):
             if temp_matches:
                 val = float(temp_matches[0])
                 return (_c_to_f(val - 0.5) + 0.5, None)
+        elif "above" in q_original or "exceed" in q_original:
+            if temp_matches:
+                val = float(temp_matches[0])
+                return (_c_to_f(val + 0.5) + 0.5, None)
         elif range_match:
             low, high = float(range_match.group(1)), float(range_match.group(2))
             if low < high:
@@ -103,13 +122,23 @@ def parse_bucket(question: str):
                 return (_c_to_f(val - 0.5) + 0.5, _c_to_f(val + 0.5) - 0.5)
     else:
         # Standard Fahrenheit logic
-        if "below" in q_original or "under" in q_original or "or below" in q_original:
+        # Same inclusive/strict split as the Celsius branch, in whole °F: the
+        # downstream ±0.5°F pad makes a bound at X inclusive of X, so strict
+        # phrasing must move the bound one whole degree.
+        if ("or below" in q_original or "or under" in q_original
+                or "or lower" in q_original or "or less" in q_original):
             if temp_matches:
                 return (None, float(temp_matches[-1]))
-        elif ("above" in q_original or "or more" in q_original or "exceed" in q_original
-              or "at least" in q_original or "or higher" in q_original):
+        elif "below" in q_original or "under" in q_original:
+            if temp_matches:
+                return (None, float(temp_matches[-1]) - 1.0)
+        elif ("or more" in q_original or "at least" in q_original
+              or "or higher" in q_original or "or above" in q_original):
             if temp_matches:
                 return (float(temp_matches[0]), None)
+        elif "above" in q_original or "exceed" in q_original:
+            if temp_matches:
+                return (float(temp_matches[0]) + 1.0, None)
         elif range_match:
             low, high = float(range_match.group(1)), float(range_match.group(2))
             if low < high:
@@ -654,12 +683,14 @@ def _discover_weather_markets(now: datetime) -> tuple[list, dict]:
             f"bucket_markets_so_far={len(weather_markets)}"
         )
 
-        # Stop when a full page has no in-window events — we've gone back far enough.
+        # A quiet page is NOT a stopping signal: pages are createdAt-ordered, not
+        # endDate-ordered (see comment above), so a burst of far-out or just-closed
+        # events can produce a fully out-of-window page with live markets behind it.
+        # Keep going; the empty-page check and MARKET_DISCOVERY_MAX_PAGES bound cost.
         if not page_had_active:
             logging.info(
-                f"Discovery: page at offset={offset} had no in-window events, stopping pagination."
+                f"Discovery: page at offset={offset} had no in-window events, continuing."
             )
-            break
 
     discovery_stats = {
         "pages_fetched": pages_fetched,
@@ -1030,15 +1061,20 @@ def scan_markets():
                 continue
 
             q_lower = question.lower()
+            # Whole-word matching only: bare substring matching flagged "40°F or
+            # below" (and even "Glasgow") as daily-LOW markets via the "low" inside
+            # "below"/"glasgow".
             low_keywords  = ("low", "min", "lowest", "minimum", "cold", "coolest")
             high_keywords = ("high", "max", "highest", "maximum", "warm", "hottest")
-            is_low  = any(w in q_lower for w in low_keywords)
-            is_high = any(w in q_lower for w in high_keywords)
+            def _word_pos(w):
+                m = re.search(r'\b' + re.escape(w) + r'\b', q_lower)
+                return m.start() if m else None
+            low_hits  = [p for p in (_word_pos(w) for w in low_keywords) if p is not None]
+            high_hits = [p for p in (_word_pos(w) for w in high_keywords) if p is not None]
+            is_low, is_high = bool(low_hits), bool(high_hits)
             if is_high and is_low:
                 # Both present (e.g. "high of 70 low of 55") — pick by which comes first
-                first_high = min((q_lower.find(w) for w in high_keywords if w in q_lower), default=9999)
-                first_low  = min((q_lower.find(w) for w in low_keywords  if w in q_lower), default=9999)
-                is_high = first_high <= first_low
+                is_high = min(high_hits) <= min(low_hits)
             elif not is_high and not is_low:
                 # Ambiguous — default to high (daily max is the most common market type)
                 is_high = True

@@ -6,7 +6,7 @@ import json
 from datetime import datetime, timezone
 from db import (
     init_db, fetch_query, get_portfolio_state, get_daily_pnl, execute_query,
-    purge_old_signals, purge_old_scan_log, purge_old_notifications,
+    purge_old_signals, purge_old_scan_log, purge_old_notifications, vacuum_db,
 )
 from scanner import scan_markets, verify_parser_fixtures, prefetch_order_books
 from strategy import evaluate_opportunity
@@ -70,7 +70,8 @@ def check_resolutions():
     try:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         unlogged = fetch_query(
-            "SELECT DISTINCT t.id, t.market_id, t.is_high, t.city, t.target_date "
+            "SELECT DISTINCT t.id, t.market_id, t.side, t.is_high, t.city, t.target_date, "
+            "t.model_prob, t.size_usdc, t.fill_price "
             "FROM trades t WHERE t.resolution_logged=0 AND t.target_date IS NOT NULL "
             "AND t.target_date <= ?",
             (today,)
@@ -83,6 +84,16 @@ def check_resolutions():
             city = t.get("city")
             target_date = t.get("target_date")
             is_high_val = t.get("is_high")
+
+            # Settle the trade into the resolutions table (Brier + true settled
+            # PnL) if it isn't there yet. This closes the gap where early-exit
+            # (take-profit/stop) trades never got a resolution row, leaving the
+            # calibration stats blind to their real outcome. Best-effort — a
+            # missing METAR day just retries next cycle.
+            try:
+                executor.settle_closed_trade(t)
+            except Exception as e:
+                logging.error(f"Closed-trade settlement error for {market_id}: {e}")
 
             # Get the latest raw_models snapshot for this market
             sig = fetch_query(
@@ -129,14 +140,27 @@ def check_resolutions():
     except Exception as e:
         logging.error(f"Error in check_resolutions: {e}", exc_info=True)
 
+# Heartbeat for /healthz: UTC timestamp of the last completed scan or monitor
+# cycle. If this goes stale while the process lives, the bot thread is a zombie.
+last_cycle_at = None
+
+
+def _beat():
+    global last_cycle_at
+    from datetime import datetime as _dt, timezone as _tz
+    last_cycle_at = _dt.now(_tz.utc)
+
+
 def run_scan_cycle():
     if not running:
         return
 
-    if check_circuit_breaker():
-        return
-
     try:
+        # Inside the try: check_circuit_breaker hits sqlite, and an OperationalError
+        # here (disk full, locked DB) previously propagated out of the scheduled
+        # job and killed the whole bot loop while Flask kept serving — a zombie.
+        if check_circuit_breaker():
+            return
         portfolio_state = get_portfolio_state()
         opportunities = scan_markets()
 
@@ -168,6 +192,7 @@ def run_scan_cycle():
         logging.error(f"Error in scan cycle: {e}", exc_info=True)
         send_error_alert(e)
     finally:
+        _beat()
         gc.collect()
 
 def run_monitor_cycle():
@@ -185,15 +210,23 @@ def run_monitor_cycle():
         logging.error(f"Error in monitor cycle: {e}", exc_info=True)
         send_error_alert(e)
     finally:
+        _beat()
         gc.collect()
 
 def _daily_purge():
     try:
-        purge_old_signals()
-        purge_old_scan_log()
-        from config import NOTIFICATION_RETENTION_DAYS
+        from config import (NOTIFICATION_RETENTION_DAYS, SIGNAL_RETENTION_DAYS,
+                            SCAN_LOG_RETENTION_DAYS)
+        # Pass the configured retentions — the no-arg calls silently ignored the
+        # SIGNAL_RETENTION_DAYS / SCAN_LOG_RETENTION_DAYS env overrides.
+        purge_old_signals(SIGNAL_RETENTION_DAYS)
+        purge_old_scan_log(SCAN_LOG_RETENTION_DAYS)
         purge_old_notifications(NOTIFICATION_RETENTION_DAYS)
-        logging.info("Daily DB purge complete.")
+        # DELETE alone never shrinks the file — sqlite just marks pages free, so
+        # the DB only ratchets upward (it filled the 1GB volume once already).
+        # VACUUM after the purge returns the space to the filesystem.
+        vacuum_db()
+        logging.info("Daily DB purge + vacuum complete.")
     except Exception as e:
         logging.error(f"Error in daily purge: {e}", exc_info=True)
 
@@ -309,8 +342,18 @@ def run_bot(in_thread=False):
     while True:
         schedule.run_pending()
         time.sleep(1)
-        if not running and executor.get_open_positions_count() == 0:
-            logging.info("Graceful shutdown complete.")
+        if not running:
+            # Don't wait for open positions to close: under hold-to-settlement
+            # they stay open for days, so the old "wait until flat" condition
+            # meant every deploy hung here until the supervisor SIGKILLed the
+            # process — the graceful path never actually ran. Positions live in
+            # the DB and are reconciled on startup, so exiting with them open
+            # is safe by design.
+            open_count = executor.get_open_positions_count()
+            logging.info(
+                f"Graceful shutdown with {open_count} open position(s) — "
+                f"they persist in the DB and will be reconciled on restart."
+            )
             break
 
 

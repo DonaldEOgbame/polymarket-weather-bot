@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from db import fetch_query
 from weather import WEIGHTS, get_station_coords
 from utils import get_session
-from metar import fetch_day_extremes, get_station
+from metar import fetch_day_extremes, get_station, round_half_away
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
@@ -65,7 +65,7 @@ def _fetch_actuals_metar(city_key, date_str, cache):
     if icao:
         mx_c, mn_c = fetch_day_extremes(icao, tz, date_str)
         def to_f(c):
-            return round(c) * 9.0 / 5.0 + 32.0 if c is not None else None
+            return round_half_away(c) * 9.0 / 5.0 + 32.0 if c is not None else None
         result = (to_f(mx_c), to_f(mn_c))
     cache[key] = result
     return result
@@ -131,7 +131,7 @@ def main():
         params = (cutoff, f"-{args.days} days")
 
     signals = fetch_query(
-        f"SELECT market_id, city, target_date, bucket_low, bucket_high, model_prob, "
+        f"SELECT id, market_id, city, target_date, bucket_low, bucket_high, model_prob, "
         f"ensemble_std, raw_models FROM signals WHERE {where} ORDER BY target_date",
         params,
     )
@@ -149,27 +149,55 @@ def main():
     # relative in the DB this was found against). Rows are already ORDER BY
     # target_date, not by id, so re-derive the canonical bucket explicitly
     # rather than assume row order reflects recency.
-    canonical_bucket = {}
+    # "Most recent" must be derived from the signal id (insertion order), not from
+    # iteration order of a target_date-sorted result — within one market all rows
+    # share a target_date, so the old "last row wins" was an arbitrary tie-break
+    # that could just as easily crown the PRE-fix bucket as canonical.
+    canonical_bucket, canonical_id = {}, {}
     for s in signals:
         mid = s["market_id"]
-        if mid:
+        if mid and s["id"] >= canonical_id.get(mid, -1):
+            canonical_id[mid] = s["id"]
             canonical_bucket[mid] = (s["bucket_low"], s["bucket_high"])
+    # Stale-bucket rows are EXCLUDED from reliability/Brier, not rescored: their
+    # stored model_prob was computed for the old bucket definition, so scoring it
+    # against the canonical bucket's outcome compares a prediction and an outcome
+    # of two different events.
     stale_bucket_rows = 0
     for s in signals:
         mid = s["market_id"]
+        s["stale_bucket"] = False
         if mid and mid in canonical_bucket:
-            canon_lb, canon_ub = canonical_bucket[mid]
-            if (s["bucket_low"], s["bucket_high"]) != (canon_lb, canon_ub):
+            if (s["bucket_low"], s["bucket_high"]) != canonical_bucket[mid]:
                 stale_bucket_rows += 1
-            s["bucket_low"], s["bucket_high"] = canon_lb, canon_ub
+                s["stale_bucket"] = True
 
     session = get_session()
     archive_cache = {}
+
+    # Which daily field (high vs low) each market targets, from ground truth where
+    # we have it. The closest-to-mean fallback below mislabels outcomes exactly on
+    # big forecast busts (a badly-missed high can sit closer to the actual LOW),
+    # scoring the worst misses against the wrong field.
+    import re as _re
+    is_high_map = {}
+    for r in fetch_query("SELECT market_id, question FROM markets WHERE question IS NOT NULL"):
+        ql = (r["question"] or "").lower()
+        # First-occurrence tie-break, matching scanner.py's classification.
+        low_m = _re.search(r"\b(lowest|minimum|low|cold|coolest)\b", ql)
+        high_m = _re.search(r"\b(highest|maximum|high|warm|hottest)\b", ql)
+        if low_m and high_m:
+            is_high_map[r["market_id"]] = high_m.start() <= low_m.start()
+        elif low_m or high_m:
+            is_high_map[r["market_id"]] = bool(high_m)
+    for r in fetch_query("SELECT market_id, is_high FROM trades WHERE is_high IS NOT NULL"):
+        is_high_map[r["market_id"]] = bool(r["is_high"])
 
     z_scores = []                       # sigma calibration (one per unique city/date forecast)
     seen_forecast = set()
     reliability = defaultdict(lambda: [0, 0.0, 0])   # bin -> [hits, sum_pred, n]
     brier_terms = []
+    market_brier = {}                   # market_id -> brier of its last resolved row
     per_model = defaultdict(lambda: [0.0, 0.0, 0])   # model -> [sum_abs_err, sum_signed_err, n]
 
     resolved = pending = unmapped = 0
@@ -203,10 +231,16 @@ def main():
             pending += 1
             continue
 
-        # Recover which field this forecast targeted: pick the actual closest to
-        # the reconstructed ensemble mean (forecasts cluster around their own field).
-        cands = [v for v in (actual_hi, actual_lo) if v is not None]
-        actual = min(cands, key=lambda v: abs(v - mean))
+        # Recover which field this forecast targeted: prefer the market's known
+        # high/low orientation; fall back to closest-to-mean only when unknown.
+        known_high = is_high_map.get(s["market_id"])
+        if known_high is True and actual_hi is not None:
+            actual = actual_hi
+        elif known_high is False and actual_lo is not None:
+            actual = actual_lo
+        else:
+            cands = [v for v in (actual_hi, actual_lo) if v is not None]
+            actual = min(cands, key=lambda v: abs(v - mean))
         resolved += 1
 
         std = s["ensemble_std"] or 0.5
@@ -221,11 +255,16 @@ def main():
                 pm[1] += (t - actual)
                 pm[2] += 1
 
-        # reliability uses the stored model_prob against realized bucket outcome
+        # reliability uses the stored model_prob against realized bucket outcome.
+        # Stale-bucket rows are excluded — their prob refers to a different bucket.
         outcome = 1.0 if _in_bucket(actual, s["bucket_low"], s["bucket_high"]) else 0.0
         p = s["model_prob"]
-        if p is not None:
+        if p is not None and not s["stale_bucket"]:
             brier_terms.append((p - outcome) ** 2)
+            # Per-market Brier (last resolved row wins): the per-row Brier weights a
+            # market by how often it was scanned, so churned markets dominate it.
+            if s["market_id"]:
+                market_brier[s["market_id"]] = (p - outcome) ** 2
             b = reliability[min(int(p * 10), 9)]
             b[0] += outcome
             b[1] += p
@@ -240,10 +279,10 @@ def main():
     print(f"pending (archive lag / future): {pending}")
     print(f"unmapped city    : {unmapped}")
     if stale_bucket_rows:
-        print(f"stale-bucket rows normalized to canonical: {stale_bucket_rows} "
-              f"({stale_bucket_rows / len(signals):.1%} of all rows) — these had a "
-              f"bucket_low/high that differs from this market_id's most recent value; "
-              f"scored against the canonical bucket instead of what was logged")
+        print(f"stale-bucket rows excluded from Brier/reliability: {stale_bucket_rows} "
+              f"({stale_bucket_rows / len(signals):.1%} of all rows) — their bucket_low/high "
+              f"differs from this market_id's most recent (canonical) value, so their "
+              f"model_prob refers to a different bucket than the outcome being scored")
 
     if resolved == 0:
         print("\nNothing resolved yet — ERA5 archive lags ~5 days. Re-run once your")
@@ -274,7 +313,12 @@ def main():
     print("\n--- 2. PROBABILITY RELIABILITY ---")
     if brier_terms:
         brier = sum(brier_terms) / len(brier_terms)
-        print(f"  Brier score      : {brier:.4f}  (lower is better; 0.25 = coin flip)")
+        print(f"  Brier (per-row)  : {brier:.4f}  (lower is better; 0.25 = coin flip; "
+              f"weighted by scan frequency)")
+    if market_brier:
+        mb = sum(market_brier.values()) / len(market_brier)
+        print(f"  Brier (per-mkt)  : {mb:.4f}  over {len(market_brier)} markets "
+              f"(last signal per market — immune to scan-frequency weighting)")
     print("  pred-bin   n   predicted   observed")
     for b in range(10):
         hits, spred, cnt = reliability[b]

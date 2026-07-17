@@ -44,7 +44,11 @@ def _q(sql, params=()):
     try:
         with _db() as conn:
             return [dict(r) for r in conn.execute(sql, params).fetchall()]
-    except Exception:
+    except Exception as e:
+        # Never swallow silently: a locked/corrupt/full-disk DB previously rendered
+        # the dashboard as a healthy-looking empty state with zero indication of
+        # failure (during the /data 100%-full incident it showed "no trades").
+        logging.error(f"Dashboard query failed: {e} | sql={sql[:120]}")
         return []
 
 
@@ -663,8 +667,31 @@ def _start_bot():
     try:
         import main as _main
         _main.run_bot(in_thread=True)
+        logging.error("Bot loop exited unexpectedly — terminating process for supervisor restart.")
     except Exception as e:
         logging.error(f"Bot thread fatal error: {e}", exc_info=True)
+    # A dead bot thread behind a live Flask server is a zombie: the machine looks
+    # healthy (port answers) while nothing trades or monitors positions holding
+    # real money. Kill the whole process so Fly restarts the machine.
+    os._exit(1)
+
+
+@app.route('/healthz')
+def healthz():
+    """Unauthenticated liveness probe for the fly.io health check: bot thread
+    heartbeat must be fresh (scan/monitor cycles run every few minutes)."""
+    try:
+        import main as _main
+        beat = _main.last_cycle_at
+        if beat is None:
+            # Startup grace: thread may still be booting.
+            return jsonify({"status": "starting"}), 200
+        age = (datetime.now(timezone.utc) - beat).total_seconds()
+        if age > 3 * 60 * 15:  # 3 missed 15-min windows worth of silence
+            return jsonify({"status": "stale", "last_cycle_age_s": int(age)}), 503
+        return jsonify({"status": "ok", "last_cycle_age_s": int(age)}), 200
+    except Exception as e:
+        return jsonify({"status": "error", "detail": str(e)}), 503
 
 
 if __name__ == '__main__':

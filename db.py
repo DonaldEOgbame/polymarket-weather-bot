@@ -73,6 +73,10 @@ def init_db():
             "ALTER TABLE positions ADD COLUMN city TEXT",
             "ALTER TABLE positions ADD COLUMN target_date TEXT",
             "ALTER TABLE positions ADD COLUMN end_date_iso TEXT",
+            # Actual filled share count. Before this column, exits re-derived shares
+            # from round(size_usdc/entry_price) — double rounding that could exceed
+            # real holdings (CLOB rejects the sell) or book PnL on shares never held.
+            "ALTER TABLE positions ADD COLUMN shares REAL",
         ]:
             try:
                 conn.execute(ddl)
@@ -282,7 +286,8 @@ def update_bankroll(event, amount, trade_id=None):
 
 
 def open_position_atomic(market_id, token_id, side, price, size, now_iso, question,
-                          is_high, city, target_date, model_prob, edge):
+                          is_high, city, target_date, model_prob, edge, shares=None,
+                          entry_fee=0.0):
     """Insert the position row, the trade row, and debit the bankroll all in a
     single transaction — see close_position_atomic for why the entry and exit
     sides both need this: a process kill between separate connect()/commit()
@@ -294,10 +299,11 @@ def open_position_atomic(market_id, token_id, side, price, size, now_iso, questi
             cur = conn.cursor()
             cur.execute(
                 "INSERT INTO positions (market_id, token_id, side, entry_price, size_usdc, "
-                "entry_time, question, is_high, city, target_date) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "entry_time, question, is_high, city, target_date, shares) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (market_id, token_id, side, price, size, now_iso, question,
-                 1 if is_high else 0, city, target_date)
+                 1 if is_high else 0, city, target_date,
+                 shares if shares is not None else (size / price if price > 0 else None))
             )
             cur.execute(
                 "INSERT INTO trades (market_id, side, size_usdc, fill_price, model_prob, edge, "
@@ -309,10 +315,13 @@ def open_position_atomic(market_id, token_id, side, price, size, now_iso, questi
             trade_id = cur.lastrowid
             row = cur.execute("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1").fetchone()
             current = row[0] if row else STARTING_BANKROLL
-            new_balance = current - size
+            # entry_fee: taker fee the exchange charges ON TOP of the notional in
+            # live mode — without debiting it the ledger drifts above the real
+            # wallet by ~0.5-1% per round trip.
+            new_balance = current - size - entry_fee
             cur.execute(
                 "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id) VALUES (?, ?, ?, ?, ?)",
-                (now_iso, "TRADE_ENTRY", -size, new_balance, trade_id)
+                (now_iso, "TRADE_ENTRY", -(size + entry_fee), new_balance, trade_id)
             )
             conn.commit()
     return trade_id
@@ -344,19 +353,76 @@ def close_position_atomic(pos_id, market_id, side, pnl_dollars, size_usdc, exit_
             cur.execute("DELETE FROM positions WHERE id=?", (pos_id,))
             if cur.rowcount == 0:
                 return False  # already closed by another thread
-            cur.execute(
-                "UPDATE trades SET status=?, exit_time=?, exit_reason=?, pnl=?, "
-                "exit_ask_depth_usd=?, exit_bid_depth_usd=? "
-                "WHERE market_id=? AND status='OPEN' AND side=?",
-                ("CLOSED", now, exit_reason, pnl_dollars,
-                 exit_ask_depth_usd, exit_bid_depth_usd, market_id, side)
-            )
+            # Target exactly ONE trade row — the newest OPEN one for this market/
+            # side. An unqualified market_id+side match stamped identical pnl onto
+            # every duplicate OPEN row, double-counting closed P&L and feeding the
+            # circuit breaker the same loss N times. COALESCE accumulates any
+            # partial-exit pnl already booked on the row (see reduce_position_atomic).
+            trow = cur.execute(
+                "SELECT id FROM trades WHERE market_id=? AND status='OPEN' AND side=? "
+                "ORDER BY id DESC LIMIT 1",
+                (market_id, side)
+            ).fetchone()
+            trade_id = trow[0] if trow else None
+            if trade_id is not None:
+                cur.execute(
+                    "UPDATE trades SET status=?, exit_time=?, exit_reason=?, "
+                    "pnl=COALESCE(pnl, 0)+?, exit_ask_depth_usd=?, exit_bid_depth_usd=? "
+                    "WHERE id=?",
+                    ("CLOSED", now, exit_reason, pnl_dollars,
+                     exit_ask_depth_usd, exit_bid_depth_usd, trade_id)
+                )
+            else:
+                logging.error(
+                    f"close_position_atomic: no OPEN trade row for {market_id} ({side}) — "
+                    f"position deleted and bankroll credited, but trade ledger has no row to close."
+                )
             row = cur.execute("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1").fetchone()
             current = row[0] if row else STARTING_BANKROLL
             new_balance = current + size_usdc + pnl_dollars
             cur.execute(
                 "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id) VALUES (?, ?, ?, ?, ?)",
-                (now, "TRADE_EXIT", size_usdc + pnl_dollars, new_balance, None)
+                (now, "TRADE_EXIT", size_usdc + pnl_dollars, new_balance, trade_id)
+            )
+            conn.commit()
+    return True
+
+
+def reduce_position_atomic(pos_id, market_id, side, sold_shares, entry_cost_freed,
+                            proceeds, pnl_delta):
+    """Book a PARTIAL exit: shrink the position by the shares actually sold, credit
+    the bankroll with the real proceeds, and accumulate the realized pnl chunk on
+    the open trade row — all in one transaction. Used when a live FAK SELL fills
+    less than the full position (before this, a partial fill was booked as a FULL
+    close: DB flat, bankroll credited cash never received, unsold shares stranded
+    on-chain untracked). Returns True if the position row was updated."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _write_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.cursor()
+            cur.execute(
+                "UPDATE positions SET shares=COALESCE(shares, size_usdc/entry_price)-?, "
+                "size_usdc=size_usdc-? WHERE id=?",
+                (sold_shares, entry_cost_freed, pos_id)
+            )
+            if cur.rowcount == 0:
+                return False
+            cur.execute(
+                "UPDATE trades SET pnl=COALESCE(pnl, 0)+? WHERE id="
+                "(SELECT id FROM trades WHERE market_id=? AND status='OPEN' AND side=? "
+                " ORDER BY id DESC LIMIT 1)",
+                (pnl_delta, market_id, side)
+            )
+            if cur.rowcount == 0:
+                logging.error(
+                    f"reduce_position_atomic: no OPEN trade row for {market_id} ({side}) — "
+                    f"partial-exit pnl ${pnl_delta:.2f} not booked to any trade."
+                )
+            row = cur.execute("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1").fetchone()
+            current = row[0] if row else STARTING_BANKROLL
+            cur.execute(
+                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id) VALUES (?, ?, ?, ?, ?)",
+                (now, "TRADE_PARTIAL_EXIT", proceeds, current + proceeds, None)
             )
             conn.commit()
     return True
@@ -390,20 +456,35 @@ def get_open_position(market_id):
     return rows[0] if rows else None
 
 
+def _iso_cutoff(keep_days):
+    """UTC cutoff in the same isoformat() shape the tables store. SQLite's
+    datetime('now') renders 'YYYY-MM-DD HH:MM:SS' (space separator) while stored
+    rows use isoformat()'s 'T' — string comparison across the two shapes keeps
+    same-day rows ~1 extra day, on a disk that has already hit 100% full."""
+    from datetime import timedelta
+    return (datetime.now(timezone.utc) - timedelta(days=keep_days)).isoformat()
+
+
+def vacuum_db():
+    """Return freed pages to the filesystem. Runs outside _write_lock transactions'
+    hot path (daily, after the purges). VACUUM needs free disk up to the DB's
+    size — the volume was extended to 3GB to guarantee that headroom."""
+    with _write_lock:
+        conn = sqlite3.connect(DB_PATH)
+        try:
+            conn.execute("VACUUM")
+        finally:
+            conn.close()
+
+
 def purge_old_signals(keep_days=60):
     """Delete signal rows older than keep_days. Called once per day to prevent table bloat."""
-    execute_query(
-        "DELETE FROM signals WHERE timestamp < datetime('now', ?)",
-        (f"-{keep_days} days",)
-    )
+    execute_query("DELETE FROM signals WHERE timestamp < ?", (_iso_cutoff(keep_days),))
 
 
 def purge_old_scan_log(keep_days=14):
     """Delete scan_log rows older than keep_days."""
-    execute_query(
-        "DELETE FROM scan_log WHERE timestamp < datetime('now', ?)",
-        (f"-{keep_days} days",)
-    )
+    execute_query("DELETE FROM scan_log WHERE timestamp < ?", (_iso_cutoff(keep_days),))
 
 
 def add_notification(kind, message, severity="info"):
@@ -434,7 +515,4 @@ def get_recent_notifications(limit=100):
 
 def purge_old_notifications(keep_days=30):
     """Delete notification rows older than keep_days."""
-    execute_query(
-        "DELETE FROM notifications WHERE timestamp < datetime('now', ?)",
-        (f"-{keep_days} days",)
-    )
+    execute_query("DELETE FROM notifications WHERE timestamp < ?", (_iso_cutoff(keep_days),))

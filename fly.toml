@@ -24,3 +24,16 @@ primary_region = "lhr"
   auto_start_machines = true
   min_machines_running = 1
   processes = ["app"]
+
+  # Real liveness: /healthz checks the BOT THREAD heartbeat, not just the port.
+  # Without this, a dead bot thread behind a live Flask server looks healthy
+  # to Fly forever (no restart, no alert) while positions go unmonitored.
+  [[http_service.checks]]
+    interval = "30s"
+    timeout = "5s"
+    grace_period = "2m"
+    method = "GET"
+    path = "/healthz"
+
+[[vm]]
+  memory = "512mb"

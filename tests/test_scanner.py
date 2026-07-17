@@ -12,12 +12,14 @@ class TestParseBucketAbove:
 
     def test_above_basic(self):
         lb, ub = parse_bucket("Will NYC high be above 85°F?")
-        assert lb == 85.0
+        # strict "above 85" resolves YES only at >=86; the downstream -0.5 pad
+        # makes a bound at 86 inclusive of 86 and exclusive of 85.
+        assert lb == 86.0
         assert ub is None
 
     def test_exceed_basic(self):
         lb, ub = parse_bucket("Will the high in Chicago exceed 90°F on June 5?")
-        assert lb == 90.0
+        assert lb == 91.0  # strict: YES only at >=91
         assert ub is None
 
     def test_or_more(self):
@@ -38,7 +40,7 @@ class TestParseBucketAbove:
     def test_above_does_not_capture_date(self):
         """The parser must NOT pick up '15' from 'May 15'."""
         lb, ub = parse_bucket("Will NYC high on May 15 be above 85°F?")
-        assert lb == 85.0
+        assert lb == 86.0  # strict "above"; must not pick up '15' from 'May 15' 
         assert ub is None
 
 
@@ -48,12 +50,12 @@ class TestParseBucketBelow:
     def test_below_basic(self):
         lb, ub = parse_bucket("Will London low be below 40°F?")
         assert lb is None
-        assert ub == 40.0
+        assert ub == 39.0  # strict: YES only at <=39
 
     def test_under(self):
         lb, ub = parse_bucket("Will the temperature be under 32°F?")
         assert lb is None
-        assert ub == 32.0
+        assert ub == 31.0  # strict: YES only at <=31
 
 
 class TestParseBucketRange:
@@ -96,15 +98,15 @@ class TestParseBucketEdgeCases:
         """Negative temperatures (e.g. Chicago winter)."""
         lb, ub = parse_bucket("Will Chicago low be below -5°F?")
         assert lb is None
-        assert ub == -5.0
+        assert ub == -6.0  # strict: YES only at <=-6
 
     def test_celsius_converted_to_fahrenheit(self):
         """°C markets (international cities) are converted to °F for the strategy engine."""
         lb, ub = parse_bucket("Will London high be above 30°C?")
-        # 30°C with Celsius rounding resolves to >= 29.5°C (85.1°F).
-        # We adjust the input to get_bucket_probability by adding 0.5 to balance the 0.5 subtraction.
-        # So lb = 85.1 + 0.5 = 85.6
-        assert lb == pytest.approx(85.6)
+        # STRICT "above 30°C" resolves YES only when the rounded reading is >=31,
+        # i.e. raw >= 30.5°C = 86.9°F. Pre-compensating get_bucket_probability's
+        # -0.5°F pad gives lb = 86.9 + 0.5 = 87.4.
+        assert lb == pytest.approx(87.4)
         assert ub is None
 
 
@@ -220,3 +222,40 @@ class TestExactBucketResolutionWidth:
             f"{q!r}: effective window {effective_width:.2f}°F under-covers "
             f"resolution granularity (need ≥ {min_effective_width}°F)"
         )
+
+
+class TestParseBucketInclusiveVsStrict:
+    """Inclusive ('or below'/'or higher') and strict ('below'/'above') phrasings
+    resolve one whole degree apart — the parser must not conflate them."""
+
+    def test_f_or_below_inclusive(self):
+        lb, ub = parse_bucket("Will the high in NYC be 77°F or below?")
+        assert lb is None
+        assert ub == 77.0  # inclusive of 77
+
+    def test_c_or_below_inclusive(self):
+        # "32°C or below" pays YES when rounded <= 32, i.e. raw < 32.5°C = 90.5°F.
+        # Pre-compensating the +0.5°F pad: ub = 90.5 - 0.5 = 90.0.
+        lb, ub = parse_bucket("Will the highest temperature in Madrid be 32°C or below?")
+        assert lb is None
+        assert ub == pytest.approx(90.0)
+
+    def test_c_or_higher_inclusive(self):
+        # "34°C or higher" pays YES when rounded >= 34, i.e. raw >= 33.5°C = 92.3°F.
+        # Pre-compensating the -0.5°F pad: lb = 92.3 + 0.5 = 92.8.
+        lb, ub = parse_bucket("Will the highest temperature in Guangzhou be 34°C or higher?")
+        assert lb == pytest.approx(92.8)
+        assert ub is None
+
+    def test_c_strict_below(self):
+        # strict "below 32°C": rounded < 32, raw < 31.5°C = 88.7°F → ub = 88.2
+        lb, ub = parse_bucket("Will the high in Madrid be below 32°C?")
+        assert lb is None
+        assert ub == pytest.approx(88.2)
+
+    def test_between_and_range(self):
+        # "between X°C and Y°C" must parse as a RANGE, not an exact bucket at X.
+        lb, ub = parse_bucket("Will the high be between 12°C and 14°C?")
+        # 11.5°C..14.5°C → 52.7..58.1°F, pre-compensated: (53.2, 57.6)
+        assert lb == pytest.approx(53.2)
+        assert ub == pytest.approx(57.6)
