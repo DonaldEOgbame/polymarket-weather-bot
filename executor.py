@@ -297,7 +297,12 @@ class Executor:
                         # Prefer the volume-weighted price of the order's actual
                         # trades: o["price"] is the marketable LIMIT price (the
                         # worst-case book walk), not what actually filled.
-                        trades = o.get("associate_trades") or o.get("trades") or []
+                        # NOTE (verified live 2026-07-18): associate_trades is a
+                        # list of trade-ID STRINGS in the current API, so this
+                        # branch only fires if the schema ever returns objects;
+                        # the isinstance guard keeps it from crashing on IDs.
+                        trades = [t for t in (o.get("associate_trades") or o.get("trades") or [])
+                                  if isinstance(t, dict)]
                         try:
                             tot_sz = sum(float(t.get("size") or 0) for t in trades)
                             tot_val = sum(float(t.get("size") or 0) * float(t.get("price") or 0)
@@ -337,7 +342,21 @@ class Executor:
         # Log the raw response verbatim — this is how we confirm the schema on the first real fill.
         logging.info(f"RAW order response [{side} {token_id}]: {resp}")
         order_id = resp.get("orderID") or resp.get("orderId") if isinstance(resp, dict) else None
-        filled, avg = self._read_fill(resp, order_id, fallback_price)
+        # Primary fill source: the POST response's matched amounts. Verified on the
+        # 2026-07-18 live $1 round-trip — makingAmount/takingAmount are the exact
+        # matched totals (BUY: making=USDC, taking=shares; SELL: reversed), so their
+        # ratio IS the volume-weighted fill price, with no order-record lag.
+        filled, avg = 0.0, None
+        if isinstance(resp, dict) and resp.get("status") == "matched":
+            try:
+                mk = float(resp.get("makingAmount") or 0)
+                tk = float(resp.get("takingAmount") or 0)
+                if mk > 0 and tk > 0:
+                    filled, avg = (tk, mk / tk) if side == "BUY" else (mk, tk / mk)
+            except (TypeError, ValueError):
+                pass
+        if filled <= 0:
+            filled, avg = self._read_fill(resp, order_id, fallback_price)
         if filled > 0 and not avg:
             # A REAL fill with an unreadable price must never be discarded — that
             # books "nothing filled" while USDC/shares actually moved, leaving an

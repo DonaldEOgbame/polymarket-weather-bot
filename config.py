@@ -30,11 +30,14 @@ MAX_MODEL_SPREAD = float(os.getenv("MAX_MODEL_SPREAD", "2.7"))
 
 # --- Transaction costs (subtracted from raw edge before the threshold check) ---
 # Polymarket taker fee per share = TAKER_FEE_RATE * p * (1 - p), a bell curve that
-# peaks at p=0.50 and ~vanishes near 0.01/0.99. Makers pay $0; Geopolitics/World
-# markets are fee-free. Weather is the "Economics/Culture/Weather/Other" category
-# at 0.05. As a fraction of notional this is feeRate*(1-p) — cheap on the high-priced
-# NO tails the bot favours (~0.5-1%), expensive on cheap YES longshots (up to ~4%).
-TAKER_FEE_RATE = float(os.getenv("TAKER_FEE_RATE", "0.05"))
+# peaks at p=0.50 and ~vanishes near 0.01/0.99. Makers pay $0.
+# MEASURED LIVE 2026-07-18 ($1 round-trip + get_fee_rate_bps on weather tokens):
+# the base rate is 1000 bps = 0.10 — weather markets included — double the 0.05
+# this previously assumed, so all paper-era P&L understated fees. Empirically the
+# BUY leg settled with NO fee and the SELL leg paid the full formula; settlement
+# redemption pays none. So hold-to-settlement entries are ~free, TP exits at 0.98
+# cost ~0.2c/share, and mid-price stop-losses are where the 10% rate actually bites.
+TAKER_FEE_RATE = float(os.getenv("TAKER_FEE_RATE", "0.10"))
 # Separate allowance for crossing the bid/ask spread on thin books, as a fraction
 # of the entry price. Used as a fallback when the live order book can't be fetched.
 SLIPPAGE_FRACTION = float(os.getenv("SLIPPAGE_FRACTION", "0.015"))
