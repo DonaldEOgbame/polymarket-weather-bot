@@ -270,11 +270,16 @@ CLOB_API_KEY = os.getenv("CLOB_API_KEY", "")
 CLOB_SECRET = os.getenv("CLOB_SECRET", "")
 CLOB_PASS_PHRASE = os.getenv("CLOB_PASS_PHRASE", "")
 # Wallet type wiring for the CLOB client. If the Polymarket account was created
-# through the website, USDC lives in a PROXY wallet and orders must carry
-# signature_type 1 (email/Magic login) or 2 (browser wallet) plus the proxy
-# address as funder. Leave unset only for a raw EOA that trades for itself.
-POLYMARKET_FUNDER = os.getenv("POLYMARKET_FUNDER", "")           # proxy wallet address
-POLYMARKET_SIG_TYPE = int(os.getenv("POLYMARKET_SIG_TYPE", "0"))  # 0=EOA, 1=Magic, 2=browser
+# through the website, funds live in a smart-contract wallet (NOT the raw EOA of
+# POLYMARKET_PK) and orders must carry the matching signature_type plus that
+# wallet's address as funder. Accounts created since ~2026 use the DEPOSIT-WALLET
+# architecture: funds are held as pUSD in a deposit-wallet contract and orders
+# need signature_type 3 (POLY_1271, ERC-1271 contract signatures — requires the
+# V2 client). The funder is the address shown on the Polymarket profile page
+# ("Your Polymarket Wallet Address"). Older accounts: 1=Magic/email proxy,
+# 2=browser-wallet proxy. Leave unset only for a raw EOA trading for itself.
+POLYMARKET_FUNDER = os.getenv("POLYMARKET_FUNDER", "")           # proxy/deposit wallet address
+POLYMARKET_SIG_TYPE = int(os.getenv("POLYMARKET_SIG_TYPE", "0"))  # 0=EOA, 1=Magic, 2=browser, 3=deposit wallet
 
 # --- GFS warm-bias corrections (°F) per city ---
 # GFS consistently runs warm in humid/coastal cities. Values derived from

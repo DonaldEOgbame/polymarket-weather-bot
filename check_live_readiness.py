@@ -9,8 +9,8 @@ allowances, which is as far as verification can go without actually trading.
 import os
 import sys
 
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import BalanceAllowanceParams, AssetType
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import BalanceAllowanceParams, AssetType
 
 
 def main():
@@ -24,7 +24,9 @@ def main():
     print("CONFIG")
     print("=" * 62)
     print(f"  PAPER_MODE : {paper}")
-    print(f"  SIG_TYPE   : {sig}  ({'proxy wallet' if sig else 'raw EOA'})")
+    sig_names = {0: "raw EOA", 1: "Magic/email proxy", 2: "browser-wallet proxy",
+                 3: "deposit wallet (POLY_1271)"}
+    print(f"  SIG_TYPE   : {sig}  ({sig_names.get(sig, 'unknown')})")
     print(f"  FUNDER     : {funder or '(unset)'}")
 
     if not pk:
@@ -44,7 +46,7 @@ def main():
     print("=" * 62)
     try:
         client = ClobClient("https://clob.polymarket.com", **kwargs)
-        client.set_api_creds(client.create_or_derive_api_creds())
+        client.set_api_creds(client.create_or_derive_api_key())
         signer = client.get_address()
         print(f"  signer     : {signer}")
         print("  auth       : OK (API creds derived against live CLOB)")

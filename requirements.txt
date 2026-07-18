@@ -1,5 +1,7 @@
 flask>=3.0
-py-clob-client==0.34.6
+# V2 client: required for POLY_1271 (signature_type 3) deposit-wallet orders —
+# the old py-clob-client is archived and cannot sign for deposit-wallet accounts.
+py_clob_client_v2==1.1.0
 python-dotenv==1.0.1
 requests==2.31.0
 schedule==1.2.1

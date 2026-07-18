@@ -1,8 +1,10 @@
 import json
 import logging
 from datetime import datetime, timezone
-from py_clob_client.client import ClobClient
-from py_clob_client.clob_types import OrderArgs, MarketOrderArgs, OrderType, ApiCreds
+from py_clob_client_v2.client import ClobClient
+from py_clob_client_v2.clob_types import (
+    MarketOrderArgsV2, OrderType, ApiCreds, BalanceAllowanceParams, AssetType,
+)
 from db import (execute_query, fetch_query, get_open_position, close_position_atomic,
                 open_position_atomic, reduce_position_atomic)
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
@@ -27,8 +29,10 @@ class Executor:
         self.client = None
         if not PAPER_MODE:
             # signature_type/funder are REQUIRED for accounts created through the
-            # Polymarket website (USDC lives in a proxy wallet, not the raw EOA of
-            # POLYMARKET_PK) — without them every order is rejected for balance.
+            # Polymarket website (funds live in a proxy/deposit wallet, not the raw
+            # EOA of POLYMARKET_PK) — without them every order is rejected for
+            # balance. Type 3 (POLY_1271 deposit wallet) is the current default for
+            # website-created accounts and needs the V2 client's order signing.
             client_kwargs = {"key": POLYMARKET_PK, "chain_id": 137}
             if POLYMARKET_SIG_TYPE:
                 client_kwargs["signature_type"] = POLYMARKET_SIG_TYPE
@@ -41,7 +45,17 @@ class Executor:
                 ))
             else:
                 # Derive L2 creds from the private key when none are supplied.
-                self.client.set_api_creds(self.client.create_or_derive_api_creds())
+                self.client.set_api_creds(self.client.create_or_derive_api_key())
+            # The CLOB's balance view is a CACHE that does not track on-chain
+            # deposits by itself — refresh it at boot so the first scan cycle
+            # sees the real collateral instead of a stale zero.
+            try:
+                self.client.update_balance_allowance(BalanceAllowanceParams(
+                    asset_type=AssetType.COLLATERAL,
+                    signature_type=POLYMARKET_SIG_TYPE,
+                ))
+            except Exception as e:
+                logging.warning(f"Balance-cache refresh failed at boot (non-fatal): {e}")
         self.reconcile_positions()
         # Tracks consecutive below-entry mid-price polls per position id.
         # Reset on price recovery. Used by the sustained-loss guard in _check_exit_for_position.
@@ -313,8 +327,8 @@ class Executor:
             fee_bps = None
         try:
             signed = self.client.create_market_order(
-                MarketOrderArgs(token_id=token_id, amount=amount, side=side,
-                                order_type=OrderType.FAK)
+                MarketOrderArgsV2(token_id=token_id, amount=amount, side=side,
+                                  order_type=OrderType.FAK)
             )
             resp = self.client.post_order(signed, OrderType.FAK)
         except Exception as e:

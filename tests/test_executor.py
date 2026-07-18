@@ -12,13 +12,13 @@ import pytest
 from datetime import datetime, timezone
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
-# executor imports py_clob_client at module load; guard so tests run headless.
+# executor imports py_clob_client_v2 at module load; guard so tests run headless.
 import types
-for mod in ("py_clob_client", "py_clob_client.client", "py_clob_client.clob_types"):
+for mod in ("py_clob_client_v2", "py_clob_client_v2.client", "py_clob_client_v2.clob_types"):
     sys.modules.setdefault(mod, types.ModuleType(mod))
-sys.modules["py_clob_client.client"].ClobClient = object
-ct = sys.modules["py_clob_client.clob_types"]
-for n in ("OrderArgs", "MarketOrderArgs", "OrderType", "ApiCreds"):
+sys.modules["py_clob_client_v2.client"].ClobClient = object
+ct = sys.modules["py_clob_client_v2.clob_types"]
+for n in ("MarketOrderArgsV2", "OrderType", "ApiCreds", "BalanceAllowanceParams", "AssetType"):
     if not hasattr(ct, n):
         setattr(ct, n, object)
 

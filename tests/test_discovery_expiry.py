@@ -10,11 +10,11 @@ from datetime import datetime, timezone, timedelta
 sys.path.insert(0, os.path.join(os.path.dirname(__file__), '..'))
 
 import types
-for mod in ("py_clob_client", "py_clob_client.client", "py_clob_client.clob_types"):
+for mod in ("py_clob_client_v2", "py_clob_client_v2.client", "py_clob_client_v2.clob_types"):
     sys.modules.setdefault(mod, types.ModuleType(mod))
-sys.modules["py_clob_client.client"].ClobClient = object
-ct = sys.modules["py_clob_client.clob_types"]
-for n in ("OrderArgs", "MarketOrderArgs", "OrderType"):
+sys.modules["py_clob_client_v2.client"].ClobClient = object
+ct = sys.modules["py_clob_client_v2.clob_types"]
+for n in ("MarketOrderArgsV2", "OrderType", "ApiCreds", "BalanceAllowanceParams", "AssetType"):
     setattr(ct, n, object)
 
 import scanner
