@@ -32,7 +32,9 @@
     --no:           #e07866;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Manrope', ui-sans-serif, sans-serif; -webkit-font-smoothing: antialiased; }
+  html, body { margin: 0; background: var(--bg); color: var(--text); font-family: 'Manrope', ui-sans-serif, sans-serif; -webkit-font-smoothing: antialiased; -webkit-text-size-adjust: 100%; }
+  /* The page itself never scrolls sideways — wide content pans inside its card */
+  body { overflow-x: hidden; }
   body {
     background:
       radial-gradient(ellipse 80% 50% at 12% -10%, rgba(245,177,60,0.05), transparent 60%),
@@ -885,18 +887,115 @@
   .page-foot .mono { font-family: 'JetBrains Mono', monospace; }
 
   /* ============ Responsive ============ */
+  /* Wide content scrolls inside its own container — the PAGE never scrolls
+     sideways. Tables keep a readable min-width and pan within their card. */
   @media (max-width: 1280px) {
     .row-main { grid-template-columns: 1fr; }
     .row-bottom { grid-template-columns: 1fr; }
     .perf-grid { grid-template-columns: repeat(3, 1fr); }
     .scan-grid { grid-template-columns: 1fr; }
-    .globe-body { grid-template-columns: 1fr; }
     .header-strip { grid-template-columns: 1fr 1fr; }
+    /* Stacked globe: without an explicit row height the canvas div (which has
+       no intrinsic content) collapses to ~0 inside the fixed-height card. */
+    .globe-card { height: auto; }
+    .globe-body { grid-template-columns: 1fr; grid-template-rows: minmax(300px, 42vh) auto; }
+    .globe-side { max-height: 300px; }
+    .positions-card { height: auto; }
+    .positions-scroll-wrapper { max-height: 420px; }
   }
+
+  @media (max-width: 900px) {
+    .app { padding: 14px 12px 28px; gap: 12px; }
+    /* Topbar: brand + controls up top, nav on its own row (pans if cramped) */
+    .topbar {
+      grid-template-columns: 1fr auto;
+      grid-template-areas: "brand right" "nav nav";
+      gap: 10px;
+    }
+    .brand { grid-area: brand; }
+    .top-right { grid-area: right; gap: 10px; }
+    .top-nav {
+      grid-area: nav;
+      margin-left: 0;
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+      scrollbar-width: none;
+    }
+    .top-nav::-webkit-scrollbar { display: none; }
+    .nav-item { white-space: nowrap; }
+
+    /* Tables: pan sideways inside the card, columns stay readable */
+    .positions-table, .trades-table, .signals-table {
+      overflow-x: auto;
+      -webkit-overflow-scrolling: touch;
+    }
+    .positions-table .thead, .positions-table .trow { min-width: 620px; }
+    .trades-table .thead, .trades-table .trow { min-width: 680px; }
+    .signals-table .thead, .signals-table .trow,
+    .signals-table .detail-row { min-width: 760px; }
+    .trades-table .detail-row { min-width: 680px; }
+    /* Inner vertical scrollers must not clip the panned width */
+    .positions-scroll-wrapper, .signals-scroll-wrapper { overflow-x: visible; }
+
+    .card-head { flex-wrap: wrap; }
+    .globe-legend { flex-wrap: wrap; gap: 8px 14px; }
+    .scan-grid { gap: 12px; }
+    .detail-row { grid-template-columns: 1fr; gap: 14px; padding: 14px 14px 16px; }
+    .signals-controls { flex-wrap: wrap; }
+    .signals-search { width: 100%; }
+    .signals-controls .result-count { margin-left: 0; }
+  }
+
   @media (max-width: 720px) {
-    .perf-grid { grid-template-columns: repeat(2, 1fr); }
-    .header-strip { grid-template-columns: 1fr; }
+    .perf-grid { grid-template-columns: repeat(2, 1fr); gap: 8px; }
+    .header-strip { grid-template-columns: 1fr 1fr; gap: 8px; }
     .scan-funnel { grid-template-columns: 1fr 1fr; }
+    .funnel-step { border-bottom: 1px solid var(--line-2); }
+    .recent-skips li {
+      grid-template-columns: 50px 1fr auto;
+      grid-template-areas: "ts city bucket" "reason reason reason";
+      row-gap: 2px;
+    }
+    .recent-skips li .ts-dim { grid-area: ts; }
+    .recent-skips li .rs-city { grid-area: city; }
+    .recent-skips li .rs-bucket { grid-area: bucket; }
+    .recent-skips li .rs-reason { grid-area: reason; font-size: 11.5px; }
+  }
+
+  @media (max-width: 560px) {
+    .header-strip { grid-template-columns: 1fr; }
+    .kpi { min-height: 0; padding: 13px 14px; }
+    .kpi-value { font-size: 21px; }
+    .card { padding: 13px 12px 12px; }
+    .brand-tag { display: none; }
+    .last-scan .dim { display: none; }   /* keep "12m ago" + pulse, drop label */
+    .archive-banner { margin: 8px 0 0; font-size: 11px; letter-spacing: 0.04em; }
+    .globe-body { grid-template-rows: minmax(260px, 38vh) auto; }
+    .perf-val { font-size: 17px; }
+    .perf-tile { padding: 11px 12px; }
+    .funnel-step { padding: 11px 12px; }
+    .funnel-val { font-size: 17px; }
+    .equity-stat { text-align: left; }
+    .page-foot { flex-wrap: wrap; gap: 6px; }
+    /* Notification popup becomes a full-width sheet under the topbar */
+    .notif-popup {
+      position: fixed;
+      left: 10px; right: 10px; top: 64px;
+      width: auto;
+      max-height: 62vh;
+    }
+  }
+
+  /* Touch devices: comfortable hit targets regardless of screen width */
+  @media (pointer: coarse) {
+    .nav-item { padding: 10px 14px; }
+    .mode-pill { padding: 8px 12px; }
+    .pg-btn { width: 34px; height: 34px; font-size: 16px; }
+    .notif-bell, .user-avatar { width: 36px; height: 36px; }
+    .period-tab { padding: 7px 12px; }
+    .city-row { padding: 10px 8px; }
+    .seg button { padding: 8px 12px; }
+    .outcome-legend-item { padding: 4px 0; }
   }
 
   /* ---- Notification bell + popup ---- */
