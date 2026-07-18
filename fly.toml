@@ -9,10 +9,13 @@ primary_region = "arn"
   dockerfile = "Dockerfile"
 
 [env]
-  PAPER_MODE = "true"
+  # LIVE since 2026-07-18: real money, deposit-wallet sig type 3, flat $2 stakes,
+  # hold-to-settlement exits. Paper era archived at /data/paper_archive.db
+  # (dashboard mode-pill toggle). Cutover: cutover_to_live.py.
+  PAPER_MODE = "false"
   DB_PATH = "/data/bot.db"
   PORT = "8080"
-  STARTING_BANKROLL = "20.0"
+  STARTING_BANKROLL = "18.86"
 
 [[mounts]]
   source = "bot_data"
