@@ -6,7 +6,7 @@ from db import execute_query
 from datetime import datetime, timezone
 from config import (
     EDGE_THRESHOLD, MIN_MODEL_AGREEMENT, MAX_MODEL_SPREAD,
-    KELLY_CAP, HARD_MAX_POSITION_SIZE, MIN_POSITION_SIZE,
+    KELLY_CAP, HARD_MAX_POSITION_SIZE, MIN_POSITION_SIZE, FIXED_POSITION_SIZE,
     MAX_POSITION_FRACTION, MAX_TOTAL_EXPOSURE_FRACTION, BASE_POSITION_FRACTION,
     SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD, SHADOW_MAX_SIZE_USDC,
     ENABLE_SHADOW_EXPLORATION, PAPER_MODE,
@@ -300,19 +300,42 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             total_equity = portfolio_state["total_equity"]
             locked_cash = portfolio_state["locked_cash"]
 
-            # Base size from edge/kelly (with a floor of BASE_POSITION_FRACTION if Kelly is small)
-            fraction_to_use = max(kelly, BASE_POSITION_FRACTION)
-            suggested_size = total_equity * fraction_to_use
+            if FIXED_POSITION_SIZE > 0:
+                # Flat-stake mode: every trade is the same size or it does not happen.
+                # HARD_MAX_POSITION_SIZE still applies as a ceiling so the dollar cap
+                # remains the single place that bounds per-trade risk.
+                final_size = min(FIXED_POSITION_SIZE, HARD_MAX_POSITION_SIZE)
+                # Strict: no partial fills of the stake. Shrinking to fit available
+                # cash would reintroduce uneven sizes, which is what flat staking
+                # exists to avoid — so an underfunded signal is skipped instead.
+                if available_cash < final_size:
+                    signal = None
+                    skip_reason = (
+                        f"Flat stake ${final_size:.2f} exceeds available cash "
+                        f"${available_cash:.2f} — skipping (no partial stakes)"
+                    )
+            else:
+                # Base size from edge/kelly (with a floor of BASE_POSITION_FRACTION if Kelly is small)
+                fraction_to_use = max(kelly, BASE_POSITION_FRACTION)
+                suggested_size = total_equity * fraction_to_use
 
-            # Apply limits: fraction of bankroll and hard dollar cap
-            final_size = min(
-                suggested_size,
-                total_equity * MAX_POSITION_FRACTION,
-                HARD_MAX_POSITION_SIZE
-            )
+                # Apply limits: fraction of bankroll and hard dollar cap
+                final_size = min(
+                    suggested_size,
+                    total_equity * MAX_POSITION_FRACTION,
+                    HARD_MAX_POSITION_SIZE
+                )
 
-            # Enforce minimum position size
-            if final_size < MIN_POSITION_SIZE:
+            # Enforce minimum position size. The micro-account rescue below is a
+            # Kelly-path concession (it would silently override a flat stake set
+            # below MIN_POSITION_SIZE), so in flat-stake mode just skip instead.
+            if signal and final_size < MIN_POSITION_SIZE and FIXED_POSITION_SIZE > 0:
+                signal = None
+                skip_reason = (
+                    f"Flat stake ${final_size:.2f} is below the ${MIN_POSITION_SIZE:.2f} "
+                    f"CLOB minimum — raise FIXED_POSITION_SIZE"
+                )
+            elif signal and final_size < MIN_POSITION_SIZE:
                 # Micro-account rescue: if calculated size is below minimum, floor to MIN_POSITION_SIZE
                 # if we have the cash and it fits within our total exposure limit, preventing sizing deadlock.
                 if (MIN_POSITION_SIZE <= available_cash and

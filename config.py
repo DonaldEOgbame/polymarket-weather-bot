@@ -147,12 +147,19 @@ BASE_FORECAST_ERROR = {
 # execution-cost and calibration estimates converge fast — NOT to deploy more
 # capital per bet. Keep positions small; widen concurrency/exposure instead.
 #
-# HARD_MAX_POSITION_SIZE is a flat $2 while paper-testing on the current ~$20-30
-# bankroll — this IS the binding constraint, not Kelly/fraction (every real trade
-# has sized exactly $2). ONLY raise this (to ~$10, with DAILY_LOSS_LIMIT to ~-$40)
-# once actually going LIVE with a $100-funded bankroll — do not scale it up while
-# still in PAPER_MODE on the smaller balance, or paper positions size as if $100
-# were already deployed when it isn't.
+# FIXED_POSITION_SIZE: every non-shadow trade stakes exactly this much, or is
+# skipped. Kelly/fraction sizing is bypassed entirely — deliberately, because the
+# traded slice is overconfident on its own tail (see calibration notes), so sizing
+# UP on model conviction sizes up precisely where the model is least trustworthy.
+# Flat stakes also make the trade log directly comparable: win rate needs no size
+# weighting, so calibrate.py measures the model rather than the sizing rule.
+# Set FIXED_POSITION_SIZE=0 to fall back to the old Kelly path.
+#
+# This codifies what was already happening — HARD_MAX_POSITION_SIZE was the
+# binding constraint on this bankroll and every real trade had sized exactly $2.
+# HARD_MAX_POSITION_SIZE is still enforced as a ceiling, so raising the flat size
+# above it does nothing until that is raised too.
+FIXED_POSITION_SIZE = float(os.getenv("FIXED_POSITION_SIZE", "2.0"))
 DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "-8.00"))
 HARD_MAX_POSITION_SIZE = float(os.getenv("HARD_MAX_POSITION_SIZE", "2.0"))
 MAX_POSITION_FRACTION = float(os.getenv("MAX_POSITION_FRACTION", "0.10"))
