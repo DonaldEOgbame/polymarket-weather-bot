@@ -1,5 +1,9 @@
 app = "stormedge"
-primary_region = "lhr"
+# arn (Stockholm): Polymarket GEOBLOCKS order placement from the UK (and US, DE,
+# FR, SG, AU, BR, most of CA) — reads work anywhere, so paper mode never noticed.
+# Sweden is fully unrestricted. Do not move this app to a region without checking
+# https://docs.polymarket.com/developers/CLOB/geoblock first.
+primary_region = "arn"
 
 [build]
   dockerfile = "Dockerfile"
