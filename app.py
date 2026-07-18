@@ -20,6 +20,11 @@ DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', 'stormedge')
 DASHBOARD_EMAIL    = os.getenv('DASHBOARD_EMAIL', 'donaldemmaogbame@gmail.com')
 from config import DB_PATH, PAPER_MODE, DAILY_LOSS_LIMIT, STARTING_BANKROLL, MAX_CONCURRENT_POSITIONS
 DB_PATH = os.path.abspath(DB_PATH)
+# Frozen snapshot of the paper-trading era, written once at live cutover.
+# When the dashboard session toggles into archive view, every query reads this
+# file (read-only) instead of the live DB — a museum exhibit, not a running bot.
+ARCHIVE_DB_PATH = os.path.abspath(os.getenv(
+    'ARCHIVE_DB_PATH', os.path.join(os.path.dirname(DB_PATH), 'paper_archive.db')))
 
 from weather import STATIONS
 
@@ -34,8 +39,26 @@ MODEL_META = {
 
 # ---- DB helpers ----
 
+def _archive_available():
+    return os.path.exists(ARCHIVE_DB_PATH)
+
+
+def _viewing_archive():
+    # Session flag set by /api/archive-view; only honoured while the archive
+    # file actually exists so a stale session can never point at nothing.
+    try:
+        return bool(session.get('view_archive')) and _archive_available()
+    except RuntimeError:  # outside request context (bot thread)
+        return False
+
+
 def _db():
-    conn = sqlite3.connect(DB_PATH)
+    if _viewing_archive():
+        # Read-only URI open: the archive is a frozen exhibit — nothing the
+        # dashboard does may ever write to it.
+        conn = sqlite3.connect(f'file:{ARCHIVE_DB_PATH}?mode=ro', uri=True)
+    else:
+        conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -92,6 +115,18 @@ def api_logout():
     return redirect('/')
 
 
+@app.post('/api/archive-view')
+@require_auth
+def api_archive_view():
+    """Toggle this session between the live DB and the frozen paper-era archive."""
+    if not _archive_available():
+        return jsonify(error='no archive snapshot exists yet', archive_view=False), 404
+    d = request.get_json(silent=True) or {}
+    want = d.get('on')
+    session['view_archive'] = (not session.get('view_archive')) if want is None else bool(want)
+    return jsonify(ok=True, archive_view=bool(session.get('view_archive')))
+
+
 @app.get('/api/data')
 @require_auth
 def api_data():
@@ -122,6 +157,10 @@ def api_data():
 
     portfolio = {
         'mode': 'PAPER' if PAPER_MODE else 'LIVE',
+        # Archive view: the dashboard is reading the frozen paper-era snapshot,
+        # not the running bot's DB. The frontend renders this unmistakably.
+        'archive_view': _viewing_archive(),
+        'archive_available': _archive_available(),
         'available_cash': available_cash,
         'locked_cash': locked_cash,
         'total_equity': total_equity,

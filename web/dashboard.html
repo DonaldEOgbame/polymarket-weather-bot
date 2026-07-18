@@ -153,6 +153,27 @@
     box-shadow: inset 0 0 0 1px rgba(108,191,133,0.3);
   }
   .mode-live .mode-dot { background: var(--positive); box-shadow: 0 0 8px var(--positive); }
+  .mode-toggleable { cursor: pointer; user-select: none; }
+  .mode-toggleable:hover { filter: brightness(1.25); }
+  /* Frozen paper-era snapshot view: amber like paper, but dashed = "exhibit". */
+  .mode-archive {
+    color: var(--signal);
+    background: var(--signal-soft);
+    box-shadow: none;
+    border: 1px dashed rgba(245,177,60,0.55);
+  }
+  .mode-archive .mode-dot { background: var(--signal); opacity: 0.5; box-shadow: none; }
+  .archive-banner {
+    margin: 10px 18px 0;
+    padding: 8px 14px;
+    border: 1px dashed rgba(245,177,60,0.5);
+    border-radius: 8px;
+    background: var(--signal-soft);
+    color: var(--signal);
+    font-size: 12px;
+    letter-spacing: 0.08em;
+    text-align: center;
+  }
 
   .last-scan {
     display: inline-flex; align-items: center; gap: 8px;

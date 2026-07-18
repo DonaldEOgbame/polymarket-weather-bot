@@ -135,9 +135,22 @@ function TopBar({ portfolio, scanLog, activeTab, setActiveTab }) {
         <div className={`nav-item ${activeTab === 'models' ? 'active' : ''}`} onClick={() => setActiveTab('models')}>Signals</div>
       </div>
       <div className="top-right">
-        <span className={`mode-pill mode-${portfolio.mode.toLowerCase()}`}>
+        <span
+          className={`mode-pill ${portfolio.archive_view ? 'mode-archive' : `mode-${portfolio.mode.toLowerCase()}`} ${portfolio.archive_available ? 'mode-toggleable' : ''}`}
+          title={portfolio.archive_available
+            ? (portfolio.archive_view ? 'Viewing saved paper era — click for live' : 'Click to view saved paper era')
+            : undefined}
+          onClick={async () => {
+            if (!portfolio.archive_available) return;
+            await fetch('/api/archive-view', {
+              method: 'POST', headers: {'Content-Type': 'application/json'},
+              body: JSON.stringify({on: !portfolio.archive_view}),
+            });
+            window.dispatchEvent(new Event('stormedge-refetch'));
+          }}
+        >
           <span className="mode-dot" />
-          {portfolio.mode}
+          {portfolio.archive_view ? 'PAPER · SAVED' : portfolio.mode}
         </span>
         <div className="last-scan">
           <span className="dim">last scan</span>
@@ -912,7 +925,10 @@ function App() {
     };
     load();
     const iv = setInterval(load, 30_000);
-    return () => clearInterval(iv);
+    // Immediate refetch when the archive/live toggle flips — waiting up to 30s
+    // for the next poll would make the switch feel broken.
+    window.addEventListener('stormedge-refetch', load);
+    return () => { clearInterval(iv); window.removeEventListener('stormedge-refetch', load); };
   }, []);
 
   if (!data) {
@@ -930,6 +946,12 @@ function App() {
   return (
     <div className="app">
       <TopBar portfolio={M.portfolio} scanLog={M.scanLog} activeTab={activeTab} setActiveTab={setActiveTab} />
+      {M.portfolio.archive_view && (
+        <div className="archive-banner">
+          ◈ SAVED PAPER-ERA STATE — frozen snapshot, nothing here is running.
+          Click the mode pill to return to live.
+        </div>
+      )}
       {activeTab === 'desk' && (
         <>
           <CircuitBreakerBanner portfolio={M.portfolio} />
