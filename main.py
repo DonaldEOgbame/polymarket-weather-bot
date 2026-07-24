@@ -204,7 +204,11 @@ def run_monitor_cycle():
         open_count = executor.get_open_positions_count()
         # 1. Settle any positions whose markets have resolved on Polymarket
         executor.check_resolved_positions()
-        # 2. Check exit triggers (stop-loss, edge decay) on whatever remains open
+        # 2. Book positions sold manually on Polymarket at their real sale price
+        #    (before exit checks, so the bot never tries to sell shares it no
+        #    longer holds)
+        executor.sync_external_closes()
+        # 3. Check exit triggers (stop-loss, edge decay) on whatever remains open
         executor.check_exits()
         still_open = executor.get_open_positions_count()
         closed = open_count - still_open

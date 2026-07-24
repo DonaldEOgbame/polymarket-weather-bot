@@ -575,3 +575,177 @@ class TestSustainedLossGuard:
         assert exits == []  # never exits — held to resolution
         assert e._loss_streak.get(99, 0) == 0  # streak never accrues while guard is off
 
+
+
+class TestExternalCloseSync:
+    """Positions sold manually on the Polymarket website must reconcile into the
+    DB at the price actually received — not sit open until resolution and then
+    book $1/$0 (first live case: Guangzhou NO sold manually at $0.87; resolution
+    settlement would have credited $1.00, overstating PnL by ~$0.45).
+
+    Evidence rules: close ONLY when the wallet balance is missing AND sell fills
+    exist since entry. Missing balance alone = redemption/API lag, leave open.
+    Any API failure = unknown, never 'sold'."""
+
+    TOK = "43393472091697977127127730869570649514267918649527086255045669699126826621279"
+
+    def _exec(self):
+        return Executor.__new__(Executor)
+
+    def _pos(self, **over):
+        from datetime import timedelta
+        entry = (datetime.now(timezone.utc) - timedelta(hours=2)).isoformat()
+        pos = {
+            "id": 55, "market_id": "0x38b5", "token_id": self.TOK, "side": "NO",
+            "entry_price": 0.59, "size_usdc": 2.0, "shares": 3.389829,
+            "entry_time": entry, "question": "q", "city": "Guangzhou",
+            "target_date": "2026-07-24",
+        }
+        pos.update(over)
+        return pos
+
+    def _wire(self, monkeypatch, pos, wallet, sells):
+        import executor as ex
+        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(ex, "POLYMARKET_FUNDER", "0xdead")
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [pos])
+        monkeypatch.setattr(ex, "get_wallet_token_sizes", lambda user: wallet)
+        monkeypatch.setattr(ex, "get_wallet_sells", lambda *a, **k: sells)
+        e = self._exec()
+        closes, reduces = [], {}
+        monkeypatch.setattr(e, "_close_position",
+                            lambda pos, pnl_dollars, exit_reason: closes.append((pnl_dollars, exit_reason)))
+        monkeypatch.setattr(ex, "reduce_position_atomic",
+                            lambda **kw: reduces.update(kw) or True)
+        return e, closes, reduces
+
+    def test_positions_api_unreachable_no_action(self, monkeypatch):
+        pos = self._pos()
+        e, closes, reduces = self._wire(monkeypatch, pos, wallet=None, sells=[(0.87, 3.38)])
+        assert e.sync_external_closes() == 0
+        assert not closes and not reduces
+
+    def test_fully_held_no_action(self, monkeypatch):
+        pos = self._pos()
+        e, closes, reduces = self._wire(monkeypatch, pos, wallet={self.TOK: 3.389829}, sells=[(0.87, 3.38)])
+        assert e.sync_external_closes() == 0
+        assert not closes and not reduces
+
+    def test_dust_shortfall_counts_as_held(self, monkeypatch):
+        # Balance short by 0.03 sh (< dust tolerance) — rounding, not a sale.
+        pos = self._pos()
+        e, closes, reduces = self._wire(monkeypatch, pos, wallet={self.TOK: 3.36}, sells=[(0.87, 3.38)])
+        assert e.sync_external_closes() == 0
+        assert not closes and not reduces
+
+    def test_manual_full_sale_books_actual_price(self, monkeypatch):
+        # The live Guangzhou case: 3.38 of 3.3898 sh sold at $0.87, wallet shows
+        # nothing left. Close at real proceeds minus taker fee, NOT at $1.00.
+        import executor as ex
+        pos = self._pos()
+        e, closes, reduces = self._wire(monkeypatch, pos, wallet={}, sells=[(0.87, 3.38)])
+        assert e.sync_external_closes() == 1
+        assert len(closes) == 1 and not reduces
+        pnl, reason = closes[0]
+        fee = ex.TAKER_FEE_RATE * 0.87 * 0.13 * 3.38
+        assert pnl == pytest.approx(0.87 * 3.38 - fee - 2.0)
+        assert reason.startswith("EXTERNAL_CLOSE")
+
+    def test_missing_balance_without_sells_left_open(self, monkeypatch):
+        # Zero balance but no sell fills = post-resolution redemption or Data-API
+        # indexing lag. The resolution path is the correct closer; do nothing.
+        pos = self._pos()
+        e, closes, reduces = self._wire(monkeypatch, pos, wallet={}, sells=[])
+        assert e.sync_external_closes() == 0
+        assert not closes and not reduces
+
+    def test_trades_api_unreachable_left_open(self, monkeypatch):
+        pos = self._pos()
+        e, closes, reduces = self._wire(monkeypatch, pos, wallet={}, sells=None)
+        assert e.sync_external_closes() == 0
+        assert not closes and not reduces
+
+    def test_fresh_position_skipped_for_indexing_lag(self, monkeypatch):
+        from datetime import timedelta
+        entry = (datetime.now(timezone.utc) - timedelta(minutes=2)).isoformat()
+        pos = self._pos(entry_time=entry)
+        e, closes, reduces = self._wire(monkeypatch, pos, wallet={}, sells=[(0.87, 3.38)])
+        assert e.sync_external_closes() == 0
+        assert not closes and not reduces
+
+    def test_paper_mode_noop(self, monkeypatch):
+        import executor as ex
+        pos = self._pos()
+        e, closes, reduces = self._wire(monkeypatch, pos, wallet={}, sells=[(0.87, 3.38)])
+        monkeypatch.setattr(ex, "PAPER_MODE", True)
+        assert e.sync_external_closes() == 0
+        assert not closes
+
+    def test_partial_manual_sale_reduces(self, monkeypatch):
+        import executor as ex
+        pos = self._pos(shares=10.0, size_usdc=5.9)
+        e, closes, reduces = self._wire(monkeypatch, pos, wallet={self.TOK: 6.0}, sells=[(0.90, 4.0)])
+        assert e.sync_external_closes() == 1
+        assert not closes, "partial sale must not fully close"
+        assert reduces["sold_shares"] == pytest.approx(4.0)
+        assert reduces["entry_cost_freed"] == pytest.approx(4.0 * 0.59)
+        fee = ex.TAKER_FEE_RATE * 0.90 * 0.10 * 4.0
+        assert reduces["proceeds"] == pytest.approx(0.90 * 4.0 - fee)
+        assert reduces["pnl_delta"] == pytest.approx((0.90 * 4.0 - fee) - 4.0 * 0.59)
+
+    def test_external_close_never_submits_clob_sell(self, monkeypatch):
+        # The shares are already gone — a CLOB SELL would be rejected forever.
+        import executor as ex
+        e = self._exec()
+        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(e, "_submit_taker",
+                            lambda *a, **k: pytest.fail("EXTERNAL_ close must not hit the CLOB"))
+        monkeypatch.setattr(ex, "send_trade_exit", lambda *a, **k: None)
+        monkeypatch.setattr(ex, "get_orderbook_depth_usd", lambda tid: (None, None))
+        close_calls = {}
+        monkeypatch.setattr(ex, "close_position_atomic", lambda **kw: close_calls.update(kw) or True)
+        pos = self._pos()
+        e._close_position(pos, pnl_dollars=0.92, exit_reason="EXTERNAL_CLOSE (3.38 sh @ $0.870 manual sale)")
+        assert close_calls["pnl_dollars"] == pytest.approx(0.92)
+
+
+class TestWalletDataApiFilters:
+    """get_wallet_sells must only surface SELL fills for the right token after
+    entry; get_wallet_token_sizes must return None (unknown) on any API failure,
+    never an empty dict that reads as 'wallet is flat'."""
+
+    class _Resp:
+        def __init__(self, status, payload):
+            self.status_code = status
+            self._payload = payload
+        def json(self):
+            return self._payload
+
+    def test_sells_filters_side_asset_and_time(self, monkeypatch):
+        import scanner as sc
+        rows = [
+            {"side": "SELL", "asset": "tok", "price": 0.87, "size": 3.38, "timestamp": 2000},
+            {"side": "BUY",  "asset": "tok", "price": 0.59, "size": 3.39, "timestamp": 1500},  # wrong side
+            {"side": "SELL", "asset": "other", "price": 0.98, "size": 2.0, "timestamp": 2100}, # wrong token
+            {"side": "SELL", "asset": "tok", "price": 0.50, "size": 1.0, "timestamp": 100},    # before entry
+        ]
+        monkeypatch.setattr(sc, "safe_get", lambda *a, **k: self._Resp(200, rows))
+        assert sc.get_wallet_sells("0xdead", "0xmkt", "tok", since_epoch=1500) == [(0.87, 3.38)]
+
+    def test_sells_api_error_returns_none(self, monkeypatch):
+        import scanner as sc
+        monkeypatch.setattr(sc, "safe_get", lambda *a, **k: self._Resp(500, []))
+        assert sc.get_wallet_sells("0xdead", "0xmkt", "tok", since_epoch=0) is None
+
+    def test_sizes_sums_per_asset(self, monkeypatch):
+        import scanner as sc
+        rows = [{"asset": "a", "size": 1.5}, {"asset": "b", "size": 2.0}, {"asset": "a", "size": 0.5}]
+        monkeypatch.setattr(sc, "safe_get", lambda *a, **k: self._Resp(200, rows))
+        assert sc.get_wallet_token_sizes("0xdead") == {"a": 2.0, "b": 2.0}
+
+    def test_sizes_api_error_returns_none(self, monkeypatch):
+        import scanner as sc
+        monkeypatch.setattr(sc, "safe_get", lambda *a, **k: self._Resp(200, {"error": "nope"}))
+        assert sc.get_wallet_token_sizes("0xdead") is None
+        monkeypatch.setattr(sc, "safe_get", lambda *a, **k: self._Resp(503, []))
+        assert sc.get_wallet_token_sizes("0xdead") is None

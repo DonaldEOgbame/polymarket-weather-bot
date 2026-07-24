@@ -328,3 +328,14 @@ OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
 GAMMA_API_URL = "https://gamma-api.polymarket.com/markets"
 GAMMA_EVENTS_URL = "https://gamma-api.polymarket.com/events"
 CLOB_BASE_URL = "https://clob.polymarket.com"
+DATA_API_URL = "https://data-api.polymarket.com"
+
+# --- External-close sync ---
+# A position sold manually on the Polymarket website leaves the bot's DB row
+# open until resolution, and resolution then books $1/$0 instead of the price
+# actually received (first live case: Guangzhou NO sold at $0.87, resolution
+# would have credited $1.00). The sync compares DB positions against the
+# wallet's real token balances each monitor cycle and books manual sales at
+# their actual fill price. Positions younger than this many minutes are skipped
+# so Data-API indexing lag on a fresh entry can't be mistaken for a sale.
+EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN = int(os.getenv("EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN", "15"))

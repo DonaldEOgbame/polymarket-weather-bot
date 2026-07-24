@@ -10,6 +10,7 @@ from weather import get_station_coords, STATIONS
 from db import execute_query, fetch_query
 from config import (
     MIN_VOLUME, MAX_HOURS_TO_RESOLUTION, GAMMA_EVENTS_URL, GAMMA_API_URL, CLOB_BASE_URL,
+    DATA_API_URL,
     DEBUG_MARKET_SCAN, DEBUG_MARKET_SCAN_VERBOSE, DEBUG_WEATHER_DISCOVERY,
     MARKET_DISCOVERY_LIMIT, MARKET_DISCOVERY_MAX_PAGES,
     MARKET_DISCOVERY_STOP_AFTER_WEATHER, MAX_CLOB_CANDIDATES,
@@ -383,6 +384,80 @@ def get_gamma_mid_price(market_id: str, side: str):
         return yes_price if side == "YES" else (1.0 - yes_price)
     except Exception as e:
         logging.error(f"Gamma fallback price fetch failed for {market_id}: {e}")
+        return None
+
+
+def get_wallet_token_sizes(user_address: str) -> dict | None:
+    """Actual conditional-token balances held by the wallet, via the Data-API
+    positions endpoint. Returns {token_id_str: size}. A token absent from the
+    dict means the wallet holds none of it (sizeThreshold=0 so even dust rows
+    are returned when the API has them).
+
+    Returns None when the API can't be read — callers MUST treat None as
+    "unknown", never as "empty": booking a close because a balance endpoint
+    was down would fabricate an exit."""
+    try:
+        resp = safe_get(
+            f"{DATA_API_URL}/positions",
+            params={"user": user_address, "sizeThreshold": 0},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            logging.warning(f"Wallet positions for {user_address}: HTTP {resp.status_code}")
+            return None
+        data = resp.json()
+        if not isinstance(data, list):
+            return None
+        sizes: dict = {}
+        for p in data:
+            asset = str(p.get("asset") or "")
+            if not asset:
+                continue
+            try:
+                sizes[asset] = sizes.get(asset, 0.0) + float(p.get("size") or 0.0)
+            except (TypeError, ValueError):
+                continue
+        return sizes
+    except Exception as e:
+        logging.error(f"Wallet positions fetch failed for {user_address}: {e}")
+        return None
+
+
+def get_wallet_sells(user_address: str, market_id: str, token_id: str,
+                     since_epoch: float) -> list | None:
+    """SELL fills by this wallet for `token_id` at/after `since_epoch` (unix
+    seconds), via the Data-API trades endpoint filtered to `market_id`
+    (conditionId). Returns [(price, size), ...] newest-first — includes both
+    manual website sales and the bot's own CLOB sells; the caller decides what
+    a fill means. A 60s grace window absorbs clock skew between our entry
+    timestamp and the API's. Returns None when the API can't be read (unknown,
+    not "no sales")."""
+    try:
+        resp = safe_get(
+            f"{DATA_API_URL}/trades",
+            params={"user": user_address, "market": market_id, "limit": 100},
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            logging.warning(f"Wallet trades for {market_id}: HTTP {resp.status_code}")
+            return None
+        data = resp.json()
+        if not isinstance(data, list):
+            return None
+        fills = []
+        for t in data:
+            if t.get("side") != "SELL" or str(t.get("asset") or "") != str(token_id):
+                continue
+            try:
+                ts = float(t.get("timestamp") or 0)
+                price, size = float(t["price"]), float(t["size"])
+            except (TypeError, ValueError, KeyError):
+                continue
+            if ts >= since_epoch - 60 and size > 0:
+                fills.append((price, size))
+        return fills
+    except Exception as e:
+        logging.error(f"Wallet trades fetch failed for {market_id}: {e}")
         return None
 
 

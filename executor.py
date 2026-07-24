@@ -8,7 +8,8 @@ from py_clob_client_v2.clob_types import (
 from db import (execute_query, fetch_query, get_open_position, close_position_atomic,
                 open_position_atomic, reduce_position_atomic)
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
-from scanner import get_realtime_price, get_market_resolution, get_gamma_mid_price, get_orderbook_depth_usd
+from scanner import (get_realtime_price, get_market_resolution, get_gamma_mid_price,
+                     get_orderbook_depth_usd, get_wallet_token_sizes, get_wallet_sells)
 from zoneinfo import ZoneInfo
 from utils import parse_utc_datetime
 from weather import get_signal_engine, get_bucket_probability, _norm_cdf
@@ -20,7 +21,7 @@ from config import (
     HOLD_WINNERS_TO_RESOLUTION, THESIS_BREAK_PROB_DELTA, TAKE_PROFIT_PRICE, SUSTAINED_LOSS_POLLS,
     SUSTAINED_LOSS_MIN_DROP, REENTRY_COOLDOWN_HOURS,
     ENABLE_SUSTAINED_LOSS_GUARD, ENABLE_THESIS_BREAK_EXIT,
-    POLYMARKET_FUNDER, POLYMARKET_SIG_TYPE,
+    POLYMARKET_FUNDER, POLYMARKET_SIG_TYPE, EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN,
 )
 
 
@@ -89,6 +90,14 @@ class Executor:
                     f"Entry: ${pos['entry_price']:.3f} | Ask: ${ask:.3f} | Bid: ${bid:.3f}"
                 )
 
+        # Catch positions sold manually on Polymarket while the bot was down —
+        # the resolution check above can't see those (the market is still live,
+        # only the shares are gone).
+        try:
+            self.sync_external_closes(source="reconcile")
+        except Exception as e:
+            logging.error(f"Startup external-close sync failed (non-fatal): {e}", exc_info=True)
+
     def check_resolved_positions(self):
         """Poll Polymarket for resolution status of every open position. Settle any
         that have resolved. Called every monitor cycle so winning trades close at $1.00
@@ -101,6 +110,119 @@ class Executor:
         if settled_count:
             logging.info(f"Resolution check: {settled_count} position(s) settled this cycle")
         return settled_count
+
+    def sync_external_closes(self, source="monitor"):
+        """Detect positions closed manually on Polymarket (outside the bot) and
+        book them at the price actually received.
+
+        The bot's DB is not the wallet: a manual sale on the website leaves the
+        positions row open until resolution, and resolution then credits $1/$0
+        instead of the real sale proceeds (first live case: Guangzhou NO sold
+        manually at $0.87 — resolution would have booked $1.00, overstating PnL
+        by ~$0.45). Each cycle this compares every DB position against the
+        wallet's actual token balance and, when shares are missing, corroborates
+        against the wallet's SELL fills since entry before booking anything.
+
+        Evidence rules (both required to close — either alone is not enough):
+          * balance gone/reduced per the Data-API positions endpoint, AND
+          * SELL fills for that token since entry per the trades endpoint.
+        A missing balance with NO sell fills is left open loudly: that pattern
+        is post-resolution redemption or API indexing lag, and the resolution
+        path (_try_settle_position) is the correct closer for it. Any API
+        failure means "unknown", never "sold".
+
+        Returns the number of positions closed or reduced."""
+        if PAPER_MODE or not POLYMARKET_FUNDER:
+            return 0
+        positions = fetch_query("SELECT * FROM positions")
+        if not positions:
+            return 0
+        wallet = get_wallet_token_sizes(POLYMARKET_FUNDER)
+        if wallet is None:
+            return 0  # endpoint unreadable — unknown, not "empty"
+
+        synced = 0
+        now = datetime.now(timezone.utc)
+        for pos in positions:
+            try:
+                synced += self._sync_one_external_close(pos, wallet, now, source)
+            except Exception as e:
+                logging.error(
+                    f"External-close sync failed for {pos['market_id']} ({pos['side']}): {e}",
+                    exc_info=True,
+                )
+        if synced:
+            logging.info(f"External-close sync ({source}): {synced} position(s) reconciled")
+        return synced
+
+    def _sync_one_external_close(self, pos, wallet, now, source):
+        """Reconcile one DB position against the wallet. Returns 1 if the
+        position was closed/reduced, else 0."""
+        entry_dt = parse_utc_datetime(pos["entry_time"])
+        age_min = (now - entry_dt).total_seconds() / 60.0
+        if age_min < EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN:
+            return 0  # Data-API may not have indexed the entry yet
+
+        held = pos["shares"] if pos.get("shares") else (
+            pos["size_usdc"] / pos["entry_price"] if pos["entry_price"] > 0 else 0)
+        if held <= 0:
+            return 0
+        onchain = wallet.get(str(pos["token_id"]), 0.0)
+        # Dust tolerance: manual sales round to 0.01 sh, leaving crumbs (the
+        # live Guangzhou sale left 0.0098 of 3.3898 sh). Within tolerance of
+        # the full size = still held, nothing to do.
+        dust = max(held * 0.01, 0.05)
+        if onchain >= held - dust:
+            return 0
+
+        sells = get_wallet_sells(
+            POLYMARKET_FUNDER, pos["market_id"], pos["token_id"], entry_dt.timestamp())
+        if sells is None:
+            return 0  # trades endpoint unreadable — retry next cycle
+        sold = sum(s for _, s in sells)
+        if sold <= 0:
+            logging.warning(
+                f"External-close sync: {pos['market_id']} ({pos['side']}) wallet holds "
+                f"{onchain:.4f} of {held:.4f} sh but NO sell fills found since entry — "
+                f"leaving open (likely post-resolution redemption or Data-API lag; "
+                f"resolution settlement will close it)."
+            )
+            return 0
+
+        proceeds = sum(p * s for p, s in sells)
+        vwap = proceeds / sold
+        # Same taker-fee model as the bot's own live exits; the Data-API price
+        # is the raw fill price, fees are charged on top.
+        fees = sum(TAKER_FEE_RATE * p * (1.0 - p) * s for p, s in sells)
+
+        if onchain <= dust:
+            # Fully sold (modulo dust). PnL = what the sale actually returned
+            # minus what the position cost.
+            pnl = (proceeds - fees) - pos["size_usdc"]
+            self._close_position(
+                pos, pnl_dollars=pnl,
+                exit_reason=f"EXTERNAL_CLOSE ({sold:.2f} sh @ ${vwap:.3f} manual sale)",
+            )
+            return 1
+
+        # Partial manual sale: shrink the position by what actually left the
+        # wallet, book the realized chunk, keep the rest under management.
+        sold_eff = min(sold, held - onchain)
+        frac = sold_eff / sold
+        part_proceeds = (proceeds - fees) * frac
+        cost_freed = sold_eff * pos["entry_price"]
+        reduced = reduce_position_atomic(
+            pos_id=pos["id"], market_id=pos["market_id"], side=pos["side"],
+            sold_shares=sold_eff, entry_cost_freed=cost_freed,
+            proceeds=part_proceeds, pnl_delta=part_proceeds - cost_freed,
+        )
+        if reduced:
+            logging.warning(
+                f"External PARTIAL close: {pos['market_id']} ({pos['side']}) — "
+                f"{sold_eff:.2f} of {held:.2f} sh sold manually @ ~${vwap:.3f}; "
+                f"position reduced to {onchain:.2f} sh."
+            )
+        return 1 if reduced else 0
 
     def _try_settle_position(self, pos, source="monitor"):
         """If Polymarket reports this position's market as resolved, close it with
@@ -792,7 +914,12 @@ class Executor:
         except Exception:
             exit_ask_depth, exit_bid_depth = None, None
 
-        skip_clob_exit = exit_reason == "EXPIRED_ON_RESTART" or exit_reason.startswith("RESOLVED_")
+        # EXTERNAL_ closes were already sold by the user on Polymarket — the
+        # shares are gone, so submitting a CLOB sell would be rejected forever
+        # and strand the DB row open.
+        skip_clob_exit = (exit_reason == "EXPIRED_ON_RESTART"
+                          or exit_reason.startswith("RESOLVED_")
+                          or exit_reason.startswith("EXTERNAL_"))
         if not PAPER_MODE and not skip_clob_exit:
             # Prefer the share count actually filled at entry (positions.shares);
             # the historical fallback re-derives it from doubly-rounded values and
