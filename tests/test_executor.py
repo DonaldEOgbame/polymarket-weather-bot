@@ -228,7 +228,9 @@ class TestLiveExitFeeDeduction:
         e._close_position(pos, pnl_dollars=999.0, exit_reason="Stop Loss (-10.0%)")
 
         shares = pos["size_usdc"] / pos["entry_price"]
-        expected_fee = (500 / 10000.0) * 0.70 * (1.0 - 0.70) * shares
+        # fee_bps is the ROUND-TRIP rate; the exchange charges half per leg
+        # (verified against actual wallet USDC deltas, 16 live fills).
+        expected_fee = (500 / 10000.0 / 2.0) * 0.70 * (1.0 - 0.70) * shares
         expected_pnl = (0.70 - 0.55) * shares - expected_fee
 
         assert captured["pnl_dollars"] == pytest.approx(expected_pnl)
@@ -276,8 +278,9 @@ class TestPartialExitFill:
         assert reduce_calls["sold_shares"] == 4.0
         # Money conservation: entry cost freed = sold * entry_price.
         assert reduce_calls["entry_cost_freed"] == pytest.approx(4.0 * 0.55)
-        # Proceeds = sold*price minus the taker fee on the sold shares only.
-        sold_fee = (500 / 10000.0) * 0.70 * 0.30 * 4.0
+        # Proceeds = sold*price minus the per-leg taker fee on the sold shares
+        # only (fee_bps is round-trip; the exchange charges half per leg).
+        sold_fee = (500 / 10000.0 / 2.0) * 0.70 * 0.30 * 4.0
         assert reduce_calls["proceeds"] == pytest.approx(4.0 * 0.70 - sold_fee)
 
     def test_full_fill_closes(self, monkeypatch):

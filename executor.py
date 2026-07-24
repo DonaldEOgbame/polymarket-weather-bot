@@ -393,6 +393,20 @@ class Executor:
         res = fetch_query("SELECT COUNT(*) as count FROM positions")
         return res[0]["count"] if res else 0
 
+    @staticmethod
+    def _fill_fee_rate(fill):
+        """Per-leg taker fee rate for a fill. get_fee_rate_bps reports the
+        market's ROUND-TRIP bps (1000 on live weather markets) but the exchange
+        charges HALF that per leg — verified against the wallet's actual USDC
+        deltas across all 16 live fills 2026-07-18..24: every leg was charged
+        exactly 0.05*p*(1-p)*shares, never 0.10. Using the bps raw doubled every
+        booked fee and drifted the ledger $0.27 below the real wallet in 6 days
+        (same bug the one-off FEE_RECONCILE hand-corrected on the first Wuhan
+        entry — that fixed the ledger once but left the code doubling)."""
+        if fill.get("fee_bps"):
+            return fill["fee_bps"] / 10000.0 / 2.0
+        return TAKER_FEE_RATE
+
     def _read_fill(self, resp, order_id, fallback_price):
         """Determine the ACTUAL matched size (shares) and average fill price for a
         just-submitted order. The POST /order response schema is not contractually
@@ -556,8 +570,7 @@ class Executor:
             price = round(fill["price"], 4)
             shares = fill["shares"]
             size = round(shares * price, 2)                  # actual USDC deployed
-            fee_rate = (fill["fee_bps"] / 10000.0) if fill.get("fee_bps") else TAKER_FEE_RATE
-            entry_fee = fee_rate * price * (1.0 - price) * shares
+            entry_fee = self._fill_fee_rate(fill) * price * (1.0 - price) * shares
             slip = price - signal_data["price"]
             logging.info(
                 f"FILLED {opp.market_id} {side}: {shares} sh @ ${price:.4f} "
@@ -944,8 +957,7 @@ class Executor:
             # fee_bps was already fetched, silently overstating every live exit's PnL.
             exit_price = fill["price"]
             sold = min(fill["shares"], held_shares)
-            fee_rate = (fill["fee_bps"] / 10000.0) if fill.get("fee_bps") else TAKER_FEE_RATE
-            sold_fee = fee_rate * exit_price * (1.0 - exit_price) * sold
+            sold_fee = self._fill_fee_rate(fill) * exit_price * (1.0 - exit_price) * sold
             sold_pnl = (exit_price - pos["entry_price"]) * sold - sold_fee
             logging.info(
                 f"EXIT FILLED {pos['market_id']} ({pos['side']}): {sold} sh of {held_shares} "
