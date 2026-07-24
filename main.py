@@ -14,7 +14,7 @@ from executor import Executor
 from alerts import send_daily_summary, send_error_alert, send_circuit_breaker_alert
 from config import SCAN_INTERVAL_MINUTES, MONITOR_INTERVAL_MINUTES, DAILY_LOSS_LIMIT
 from weather import log_model_accuracy, get_station_coords, prefetch_signal_engines
-from metar import resolved_extreme_f
+from metar import final_extreme_f
 from utils import get_session
 import schedule
 
@@ -122,8 +122,12 @@ def check_resolutions():
                 # Verify against the METAR feed — the SAME source Polymarket resolves
                 # against (Wunderground = airport METAR). Learning per-model bias
                 # against ERA5 taught the model to hit the wrong ruler; the actual is
-                # rounded to whole °C to match resolution precision.
-                actual_temp = resolved_extreme_f(city, target_date, is_high)
+                # rounded to whole °C to match resolution precision. final_extreme_f
+                # returns None until the station's LOCAL day has fully elapsed —
+                # the UTC target_date gate above fires mid-day for Asian stations,
+                # and a partial-day max here poisoned model_accuracy with morning
+                # temps recorded as daily highs.
+                actual_temp = final_extreme_f(city, target_date, is_high)
                 if actual_temp is not None:
                     for model_name, forecast_temp in raw_models.items():
                         log_model_accuracy(city, target_date, model_name, forecast_temp, actual_temp)

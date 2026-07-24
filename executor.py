@@ -12,7 +12,7 @@ from scanner import get_realtime_price, get_market_resolution, get_gamma_mid_pri
 from zoneinfo import ZoneInfo
 from utils import parse_utc_datetime
 from weather import get_signal_engine, get_bucket_probability, _norm_cdf
-from metar import get_station, fetch_day_extremes, round_half_away, resolved_extreme_f
+from metar import get_station, fetch_day_extremes, round_half_away, final_extreme_f
 from config import (
     PAPER_MODE, POLYMARKET_PK, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE,
     MAX_CONCURRENT_POSITIONS, STOP_LOSS_PCT, ENABLE_STOP_LOSS, EXIT_EDGE_FLOOR, CLOB_BASE_URL,
@@ -220,9 +220,9 @@ class Executor:
             )
             if existing:
                 return False
-            actual_f = resolved_extreme_f(city, target_date, is_high)
+            actual_f = final_extreme_f(city, target_date, is_high)
             if actual_f is None:
-                return False  # METAR not published yet — retry next cycle
+                return False  # local day not over / METAR not published — retry next cycle
 
             m = fetch_query(
                 "SELECT bucket_low, bucket_high FROM markets WHERE market_id=?",

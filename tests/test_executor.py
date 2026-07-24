@@ -163,7 +163,7 @@ class TestSettleClosedTrade:
         import executor as ex
         e = Executor.__new__(Executor)
         # Actual 77°F, bucket [69.4,70.2] → misses bucket → NO wins.
-        monkeypatch.setattr(ex, "resolved_extreme_f", lambda *a: 77.0)
+        monkeypatch.setattr(ex, "final_extreme_f", lambda *a: 77.0)
         monkeypatch.setattr(ex, "fetch_query", lambda sql, params=(): (
             [] if "FROM resolutions" in sql else [{"bucket_low": 69.4, "bucket_high": 70.2}]))
         inserted = {}
@@ -188,7 +188,7 @@ class TestSettleClosedTrade:
         import executor as ex
         e = Executor.__new__(Executor)
         monkeypatch.setattr(ex, "fetch_query", lambda sql, params=(): [])
-        monkeypatch.setattr(ex, "resolved_extreme_f", lambda *a: None)
+        monkeypatch.setattr(ex, "final_extreme_f", lambda *a: None)
         wrote = []
         monkeypatch.setattr(ex, "execute_query", lambda *a, **k: wrote.append(1))
         assert e.settle_closed_trade(self._trade()) is False

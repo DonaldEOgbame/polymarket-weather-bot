@@ -59,3 +59,35 @@ class TestCachePolicy:
         monkeypatch.setattr(metar, "safe_get", boom)
         assert metar.fetch_day_extremes("KTST", "UTC", "2020-01-01") == (None, None)
         assert ("KTST", "2020-01-01") not in _METAR_CACHE
+
+
+class TestFinalExtremeF:
+    """final_extreme_f must return None until the station-local day has fully
+    elapsed — settling on a partial-day max booked phantom wins (Guangzhou 2026-07-23
+    was 'resolved' at 8:36am local using the morning temperature as the daily high)."""
+
+    def test_none_while_local_day_in_progress(self, monkeypatch):
+        monkeypatch.setattr(metar, "day_complete", lambda tz, d: False)
+        called = []
+        monkeypatch.setattr(metar, "resolved_extreme_f", lambda *a: called.append(a) or 95.0)
+        assert metar.final_extreme_f("Guangzhou", "2026-07-23", True) is None
+        assert called == []  # must not even consult the partial-day feed
+
+    def test_passes_through_once_day_complete(self, monkeypatch):
+        monkeypatch.setattr(metar, "day_complete", lambda tz, d: True)
+        monkeypatch.setattr(metar, "resolved_extreme_f", lambda *a: 96.8)
+        assert metar.final_extreme_f("Guangzhou", "2026-07-22", True) == 96.8
+
+    def test_none_for_unknown_city(self):
+        assert metar.final_extreme_f("Atlantis", "2026-07-22", True) is None
+
+
+class TestDayComplete:
+    def test_today_is_incomplete(self):
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        today_sh = datetime.now(ZoneInfo("Asia/Shanghai")).date().isoformat()
+        assert metar.day_complete("Asia/Shanghai", today_sh) is False
+
+    def test_distant_past_is_complete(self):
+        assert metar.day_complete("Asia/Shanghai", "2026-07-01") is True

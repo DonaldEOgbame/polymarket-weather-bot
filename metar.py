@@ -136,26 +136,42 @@ def fetch_day_extremes(icao, tz, date_str):
     # intraday max evolve — a permanent cache here froze the "observed max" at the
     # first fetch of the day, blinding the bucket-bust check to the afternoon high.
     # Failed fetches ((None, None)) are never cached so transient errors can heal.
-    if result != (None, None):
-        try:
-            now_local = datetime.now(ZoneInfo(tz))
-        except Exception:
-            now_local = datetime.utcnow()
-        # 2h grace after local midnight: IEM's archive can lag, so a day fetched
-        # at 00:05 local may still be missing its final observations.
-        local_today = now_local.date().isoformat()
-        day_complete = date_str < local_today and not (
-            (now_local.date() - timedelta(days=1)).isoformat() == date_str
-            and now_local.hour < 2
-        )
-        if day_complete:
-            _METAR_CACHE[key] = result
+    if result != (None, None) and day_complete(tz, date_str):
+        _METAR_CACHE[key] = result
     return result
 
 
+def day_complete(tz, date_str):
+    """True once the station's LOCAL calendar day date_str has fully elapsed, with a
+    2h grace after local midnight because IEM's archive can lag its final obs."""
+    try:
+        now_local = datetime.now(ZoneInfo(tz))
+    except Exception:
+        now_local = datetime.utcnow()
+    if date_str >= now_local.date().isoformat():
+        return False
+    return not (
+        (now_local.date() - timedelta(days=1)).isoformat() == date_str
+        and now_local.hour < 2
+    )
+
+
+def final_extreme_f(city_key, date_str, is_high):
+    """The SETTLED daily extreme: like resolved_extreme_f, but returns None until the
+    station's local calendar day has fully elapsed. Settlement and calibration must
+    use this — resolved_extreme_f mid-day returns the partial max (e.g. Guangzhou's
+    8am temperature), which booked phantom wins and poisoned model_accuracy."""
+    icao, tz = get_station(city_key)
+    if not icao or not day_complete(tz, date_str):
+        return None
+    return resolved_extreme_f(city_key, date_str, is_high)
+
+
 def resolved_extreme_f(city_key, date_str, is_high):
-    """The realized daily extreme at this city's resolution station on date_str,
-    returned in °F to match the rest of the pipeline. None if not yet available.
+    """The realized daily extreme SO FAR at this city's resolution station on
+    date_str, returned in °F to match the rest of the pipeline. None if not yet
+    available. Mid-day this is the running extreme, NOT the final one — use it for
+    intraday bucket-bust checks only; settlement must go through final_extreme_f.
 
     Rounds to whole °C first (the market's resolution precision) then converts, so a
     31.4°C reading and a 30.6°C reading both land where the market actually settles."""
