@@ -319,6 +319,7 @@ MODEL_BIAS_CORRECTIONS = {
 # state is ~320MB and filled the original 1GB volume; 14d is plenty because
 # calibration scores resolved rows within days.
 SIGNAL_RETENTION_DAYS = int(os.getenv("SIGNAL_RETENTION_DAYS", "14"))
+SKIP_SIGNAL_RETENTION_DAYS = int(os.getenv("SKIP_SIGNAL_RETENTION_DAYS", "3"))
 SCAN_LOG_RETENTION_DAYS = int(os.getenv("SCAN_LOG_RETENTION_DAYS", "14"))
 NOTIFICATION_RETENTION_DAYS = int(os.getenv("NOTIFICATION_RETENTION_DAYS", "30"))
 

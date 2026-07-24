@@ -477,9 +477,17 @@ def vacuum_db():
             conn.close()
 
 
-def purge_old_signals(keep_days=60):
-    """Delete signal rows older than keep_days. Called once per day to prevent table bloat."""
+def purge_old_signals(keep_days=60, skip_keep_days=None):
+    """Delete signal rows older than keep_days. Called once per day to prevent table
+    bloat. SKIP rows (the ~120k/day per-market skip diagnostics, each carrying the
+    full raw_models JSON) get their own, much shorter skip_keep_days window — at the
+    shared 14-day retention they alone grew the DB to ~950MB and filled the volume."""
     execute_query("DELETE FROM signals WHERE timestamp < ?", (_iso_cutoff(keep_days),))
+    if skip_keep_days is not None:
+        execute_query(
+            "DELETE FROM signals WHERE signal_type LIKE 'SKIP%' AND timestamp < ?",
+            (_iso_cutoff(skip_keep_days),),
+        )
 
 
 def purge_old_scan_log(keep_days=14):

@@ -216,10 +216,10 @@ def run_monitor_cycle():
 def _daily_purge():
     try:
         from config import (NOTIFICATION_RETENTION_DAYS, SIGNAL_RETENTION_DAYS,
-                            SCAN_LOG_RETENTION_DAYS)
+                            SCAN_LOG_RETENTION_DAYS, SKIP_SIGNAL_RETENTION_DAYS)
         # Pass the configured retentions — the no-arg calls silently ignored the
         # SIGNAL_RETENTION_DAYS / SCAN_LOG_RETENTION_DAYS env overrides.
-        purge_old_signals(SIGNAL_RETENTION_DAYS)
+        purge_old_signals(SIGNAL_RETENTION_DAYS, SKIP_SIGNAL_RETENTION_DAYS)
         purge_old_scan_log(SCAN_LOG_RETENTION_DAYS)
         purge_old_notifications(NOTIFICATION_RETENTION_DAYS)
         # DELETE alone never shrinks the file — sqlite just marks pages free, so
