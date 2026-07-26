@@ -175,6 +175,15 @@ KELLY_CAP = float(os.getenv("KELLY_CAP", "0.08"))
 # Polymarket's real CLOB minimum order is ~$1; below this, live orders won't fill.
 MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "1.00"))
 
+# Refuse entries at or above this price. Buying NO at 0.88 risks the full stake to
+# win $0.14 per $1 — a 0.16:1 payoff needing an ~88% hit rate just to break even.
+# Measured over all 43 closed trades (paper+live, replayed against Polymarket's own
+# tick history 2026-07-26): the 0.80+ band deployed $24.00 of $82.60 total capital
+# and returned $1.87, while the sub-0.60 band deployed $20.25 and returned $16.79.
+# Capping at 0.75 gives up $2.45 of P&L but frees $26.00 of capital — ROI rises from
+# 37.8% to 50.8%. It also blocks the Guangzhou 2026-07-14 loss (entry 0.880) outright.
+MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.75"))
+
 STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.15"))
 ENABLE_STOP_LOSS = os.getenv("ENABLE_STOP_LOSS", "false").lower() == "true"
 EXIT_EDGE_FLOOR = float(os.getenv("EXIT_EDGE_FLOOR", "0.05"))

@@ -13,7 +13,7 @@ from config import (
     NARROW_BUCKET_WIDTH_F, NARROW_BUCKET_EDGE_THRESHOLD, NARROW_BUCKET_STD_INFLATION,
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION,
     TAKER_FEE_RATE, SLIPPAGE_FRACTION, MAX_ENTRY_SPREAD_FRACTION,
-    FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION,
+    FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION, MAX_ENTRY_PRICE,
 )
 
 
@@ -223,6 +223,15 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             skip_reason = f"NO edge {no_edge:.3f} but order-book spread unreadable — cannot verify entry cost"
         elif no_spread_frac > MAX_ENTRY_SPREAD_FRACTION:
             skip_reason = f"NO edge {no_edge:.3f} but market spread too wide ({no_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"
+        elif opp.no_price >= MAX_ENTRY_PRICE:
+            # Payoff asymmetry gate: at price p the trade risks 1 to win (1-p)/p.
+            # Above 0.75 that is worse than 1:3 and demands a hit rate the model
+            # cannot reliably clear. See MAX_ENTRY_PRICE in config.py.
+            skip_reason = (
+                f"NO edge {no_edge:.3f} but entry price too high "
+                f"({opp.no_price:.3f} >= {MAX_ENTRY_PRICE:.2f}): risks ${1.0:.2f} to win "
+                f"${(1.0 - opp.no_price) / opp.no_price:.2f}"
+            )
         elif not forecast_margin_ok("NO", engine_res["ensemble_mean"], opp.bucket_low, opp.bucket_high, FORECAST_MARGIN_F):
             skip_reason = f"NO edge {no_edge:.3f} but forecast too close to bucket edge (mean {engine_res['ensemble_mean']:.1f}°F, need ≥{FORECAST_MARGIN_F}°F clear of bucket)"
         elif not forecast_direction_agrees("NO", engine_res.get("raw_weighted_mean"), opp.bucket_low, opp.bucket_high):
@@ -250,6 +259,15 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             (no_edge, "NO", opp.no_price, opp.token_id_no),
         ]:
             if s_edge < effective_edge_threshold:
+                continue
+
+            # The payoff-asymmetry cap applies to exploration trades too — this path
+            # builds a signal directly and would otherwise bypass the strict gate chain.
+            if s_price >= MAX_ENTRY_PRICE:
+                logging.info(
+                    f"SHADOW_BLOCK | {opp.city} {opp.date} [{s_side}] | "
+                    f"entry price {s_price:.3f} >= MAX_ENTRY_PRICE {MAX_ENTRY_PRICE:.2f}"
+                )
                 continue
 
             shadow_agr_ok = agreement >= SHADOW_MIN_AGREEMENT

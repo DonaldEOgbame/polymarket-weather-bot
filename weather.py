@@ -80,7 +80,14 @@ STATIONS = {
     "Cape Town": {"lat": -33.9648, "lon": 18.6017, "region": "GLOBAL"}, # Cape Town Intl (FACT)
     # Asia-Pacific
     "Tokyo": {"lat": 35.5523, "lon": 139.7798, "region": "AP"},        # Haneda (RJTT)
-    "Hong Kong": {"lat": 22.3080, "lon": 113.9185, "region": "AP"},    # HKG (VHHH)
+    # HK Observatory HQ, Tsim Sha Tsui — NOT the airport. Every other city in this
+    # table resolves on an airport station, so the airport convention was applied
+    # here by default and was wrong: HK markets resolve on the Hong Kong Observatory
+    # "Absolute Daily Max (deg. C)" from its Daily Extract, per the market
+    # description text. HKG (22.3080, 113.9185) sits ~26km west on reclaimed land
+    # surrounded by water; HKO is inland urban Kowloon and reads warmer on hot days.
+    # On the 1°C buckets these markets use, that bias decides the outcome.
+    "Hong Kong": {"lat": 22.3022, "lon": 114.1746, "region": "AP"},    # HK Observatory HQ
     "Seoul": {"lat": 37.4602, "lon": 126.4407, "region": "AP"},        # INCHEON (RKSI) — NOT the city centre
     "Shanghai": {"lat": 31.1443, "lon": 121.8083, "region": "AP"},     # Pudong (ZSPD)
     "Beijing": {"lat": 40.0799, "lon": 116.5847, "region": "AP"},      # Capital (ZBAA)
