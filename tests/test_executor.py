@@ -368,6 +368,10 @@ class TestIntradayMetarExit:
     def test_low_temp_market_exits_when_obs_hits_bucket(self, monkeypatch):
         import executor as ex
         monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", True)
+        # Pin the stop loss off: this test asserts the METAR thesis-break exit fires,
+        # and its 0.62 -> 0.19 drawdown (-69%) would trip STOP_LOSS_PCT (enabled
+        # 2026-07-26) first, exiting for the wrong reason and hiding a real regression.
+        monkeypatch.setattr(ex, "ENABLE_STOP_LOSS", False)
         e = self._exec()
 
         # Target date is today
@@ -492,6 +496,30 @@ class TestSustainedLossGuard:
             "is_high": 0,
         }
 
+    def test_stop_loss_fires_past_threshold_holds_above_it(self, monkeypatch):
+        """STOP_LOSS_PCT (0.60, enabled 2026-07-26) exits a collapsing position but
+        leaves shallower drawdowns alone. The boundary matters and is tight: live
+        Chongqing 2026-07-25 bottomed at -56.2% and recovered to a winner, so the
+        threshold must sit BELOW that. Entry 0.60 -> 0.23 is -61.7% (exits); -> 0.25
+        is -58.3% (holds, and is where Chongqing would have sat)."""
+        import executor as ex
+        monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", False)
+        monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", False)
+        monkeypatch.setattr(ex, "ENABLE_STOP_LOSS", True)
+        monkeypatch.setattr(ex, "STOP_LOSS_PCT", 0.60)
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
+
+        for price, should_exit in [(0.23, True), (0.25, False)]:
+            monkeypatch.setattr(ex, "get_realtime_price", lambda *a, _p=price: (_p, _p))
+            e = self._exec()
+            exits = []
+            monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits.append(reason))
+            e._check_exit_for_position(self._pos())
+            if should_exit:
+                assert len(exits) == 1 and exits[0].startswith("Stop Loss"), exits
+            else:
+                assert exits == [], exits
+
     def test_fires_after_threshold_polls(self, monkeypatch):
         import executor as ex
         monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", True)
@@ -563,6 +591,11 @@ class TestSustainedLossGuard:
         # defaults: both guards off
         monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", False)
         monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", False)
+        # Pin the stop loss off: this test isolates the SUSTAINED-loss guard. Its -50%
+        # drawdown is shallower than STOP_LOSS_PCT (0.60) today, but pinning the flag
+        # keeps the two guards independent so lowering the threshold later can't
+        # silently turn this into a stop-loss test.
+        monkeypatch.setattr(ex, "ENABLE_STOP_LOSS", False)
         monkeypatch.setattr(ex, "SUSTAINED_LOSS_POLLS", 3)
         monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
         # deep drawdown (0.30 vs 0.60 entry = -50%), sustained across 5 polls

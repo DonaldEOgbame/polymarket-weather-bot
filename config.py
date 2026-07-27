@@ -184,8 +184,26 @@ MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "1.00"))
 # 37.8% to 50.8%. It also blocks the Guangzhou 2026-07-14 loss (entry 0.880) outright.
 MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.75"))
 
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.15"))
-ENABLE_STOP_LOSS = os.getenv("ENABLE_STOP_LOSS", "false").lower() == "true"
+# Exit when the mid has fallen this far below entry. Set from a replay of all 52
+# closed trades against Polymarket's own tick history (2026-07-26).
+#
+# LIVE era (16 trades, real fills): a 50% stop fires 4x — saves $0.90/$0.97/$0.56 on
+# the three collapses (Guangzhou 07-23, New York 07-26, Hong Kong 07-26, all of which
+# slid to zero over hours) and costs $2.29 on Chongqing 07-25, which dipped to -56.2%
+# and recovered. Net +$0.14. A 60% stop clears Chongqing and nets +$1.96.
+#
+# PAPER era (36 trades, modeled fills): NEGATIVE at both levels (-$2.96 at 50%,
+# -$3.67 at 60%) because two paper winners fell past -60% and recovered (New York
+# 07-07 to 0.310, Hong Kong 07-17 to 0.358).
+#
+# So this is a judgement that live data supersedes paper, on a base of 3 losses.
+# Deep-dip-then-recover is real and documented 3x — expect this stop to cut a winner
+# eventually. 60% is the live-optimal level: it is the first threshold that catches
+# all three collapses and clears Chongqing's -56.2% dip, so it fires 3/3 correct with
+# no false positives. The margin above Chongqing is only ~4pp, so a future winner
+# dipping past -60% would flip this — revisit once the loss sample grows past 3.
+STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.60"))
+ENABLE_STOP_LOSS = os.getenv("ENABLE_STOP_LOSS", "true").lower() == "true"
 EXIT_EDGE_FLOOR = float(os.getenv("EXIT_EDGE_FLOOR", "0.05"))
 TAKE_PROFIT_PRICE = float(os.getenv("TAKE_PROFIT_PRICE", "0.98"))
 # Number of consecutive monitor cycles (each 5 min) the mid-price must sit materially
