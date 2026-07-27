@@ -520,6 +520,61 @@ class TestSustainedLossGuard:
             else:
                 assert exits == [], exits
 
+    def _past_date_pos(self):
+        p = self._pos()
+        p["target_date"] = "2020-01-01"   # long past — hold-to-resolution gate is active
+        return p
+
+    def test_post_date_salvage_fires_only_on_a_real_bid_with_depth(self, monkeypatch):
+        """Past the target date the bot holds for resolution, EXCEPT for a position
+        already past STOP_LOSS_PCT that still has a fillable bid. The depth check is
+        what separates this from the phantom-$0.999 fill class: an extreme quote with
+        no size behind it must NOT book an exit."""
+        import executor as ex
+        monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", False)
+        monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", False)
+        monkeypatch.setattr(ex, "ENABLE_STOP_LOSS", True)
+        monkeypatch.setattr(ex, "STOP_LOSS_PCT", 0.60)
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
+
+        # entry 0.60, shares held = 2.0/0.60 = 3.333
+        # bid 0.20 => -66.7% (past the stop). Need depth >= 3.333*0.20 = $0.67.
+        cases = [
+            (0.20, 5.00, True,  "real bid with depth -> salvage"),
+            (0.20, 0.10, False, "real bid but no depth -> phantom, must hold"),
+            (0.20, None, False, "depth unreadable -> fail closed, must hold"),
+            (0.40, 5.00, False, "-33% only, above the stop -> must hold"),
+            (0.00, 5.00, False, "no bid at all -> must hold"),
+        ]
+        for bid, depth, should_exit, label in cases:
+            monkeypatch.setattr(ex, "get_realtime_price", lambda *a, _b=bid: (_b, _b))
+            monkeypatch.setattr(ex, "get_orderbook_depth_usd", lambda *a, _d=depth: (None, _d))
+            e = self._exec()
+            exits = []
+            monkeypatch.setattr(e, "_close_position",
+                                lambda pos, pnl_dollars=None, exit_reason=None: exits.append(exit_reason))
+            e._check_exit_for_position(self._past_date_pos())
+            if should_exit:
+                assert len(exits) == 1 and "salvage" in exits[0], f"{label}: {exits}"
+            else:
+                assert exits == [], f"{label}: {exits}"
+
+    def test_post_date_salvage_respects_disabled_stop_loss(self, monkeypatch):
+        """With the stop loss off, the post-date gate holds everything as before."""
+        import executor as ex
+        monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", False)
+        monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", False)
+        monkeypatch.setattr(ex, "ENABLE_STOP_LOSS", False)
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.05, 0.05))
+        monkeypatch.setattr(ex, "get_orderbook_depth_usd", lambda *a: (None, 50.0))
+        e = self._exec()
+        exits = []
+        monkeypatch.setattr(e, "_close_position",
+                            lambda pos, pnl_dollars=None, exit_reason=None: exits.append(exit_reason))
+        e._check_exit_for_position(self._past_date_pos())
+        assert exits == []
+
     def test_fires_after_threshold_polls(self, monkeypatch):
         import executor as ex
         monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", True)

@@ -650,6 +650,31 @@ class Executor:
         # logged signals was 0.81). Leave it for check_resolved_positions() to
         # settle at the true resolution value instead.
         if self._target_date_passed(pos.get("target_date"), now):
+            # One exception to hold-to-resolution: a position already collapsed past
+            # STOP_LOSS_PCT is heading to $0, and any real bid still resting on it is
+            # money that settlement will not return. Salvage it — but ONLY against a
+            # confirmed bid with genuine depth, exactly like the fast take-profit
+            # above. A stale/extreme quote with no size is the phantom-fill class this
+            # gate exists to block, so the depth check is what makes this safe.
+            # Measured 2026-07-26 on the three live collapses: by the time the target
+            # date has passed the bid is $0.001-0.02, so this recovers cents, not
+            # dollars. The real value is not leaving a fillable bid on the table.
+            if ENABLE_STOP_LOSS:
+                sl_ask, sl_bid = get_realtime_price(pos["token_id"])
+                entry = pos["entry_price"]
+                if sl_bid > 0 and entry > 0 and (sl_bid - entry) / entry <= -STOP_LOSS_PCT:
+                    _, bid_depth = get_orderbook_depth_usd(pos["token_id"])
+                    shares_held = pos["size_usdc"] / entry
+                    if bid_depth is not None and bid_depth >= shares_held * sl_bid:
+                        self._close_position(
+                            pos, pnl_dollars=None,
+                            exit_reason=(
+                                f"Stop Loss post-date salvage "
+                                f"({(sl_bid - entry) / entry:.1%}, bid ${sl_bid:.3f}, "
+                                f"depth ${bid_depth:.2f})"
+                            ),
+                        )
+                        return
             logging.debug(
                 f"Exit check skipped for {pos['market_id']} ({pos['side']}): target "
                 f"date {pos.get('target_date')} passed — holding for resolution settlement."
