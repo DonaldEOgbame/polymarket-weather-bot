@@ -6,15 +6,20 @@ from db import execute_query
 from datetime import datetime, timezone
 from config import (
     EDGE_THRESHOLD, MIN_MODEL_AGREEMENT, MAX_MODEL_SPREAD,
-    KELLY_CAP, HARD_MAX_POSITION_SIZE, MIN_POSITION_SIZE, FIXED_POSITION_SIZE,
-    MAX_POSITION_FRACTION, MAX_TOTAL_EXPOSURE_FRACTION, BASE_POSITION_FRACTION,
+    KELLY_CAP, MIN_POSITION_SIZE,
+    MAX_POSITION_FRACTION, BASE_POSITION_FRACTION,
     SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD, SHADOW_MAX_SIZE_USDC,
     ENABLE_SHADOW_EXPLORATION, PAPER_MODE,
     NARROW_BUCKET_WIDTH_F, NARROW_BUCKET_EDGE_THRESHOLD, NARROW_BUCKET_STD_INFLATION,
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION,
     TAKER_FEE_RATE, SLIPPAGE_FRACTION, MAX_ENTRY_SPREAD_FRACTION,
     FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION, MAX_ENTRY_PRICE,
+    setting,
 )
+# FIXED_POSITION_SIZE / HARD_MAX_POSITION_SIZE / MAX_TOTAL_EXPOSURE_FRACTION are
+# deliberately NOT imported as constants: they are dashboard-tunable at runtime
+# and read via config.setting() at the moment of each sizing decision, so a
+# settings change applies to the next trade with no restart.
 
 
 def transaction_cost(price, spread_fraction=None):
@@ -318,11 +323,18 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             total_equity = portfolio_state["total_equity"]
             locked_cash = portfolio_state["locked_cash"]
 
-            if FIXED_POSITION_SIZE > 0:
+            # Snapshot the runtime-tunable knobs ONCE for this decision, so a
+            # dashboard save landing mid-evaluation cannot mix old and new
+            # values inside a single sizing computation.
+            fixed_stake = setting("FIXED_POSITION_SIZE")
+            hard_max = setting("HARD_MAX_POSITION_SIZE")
+            exposure_fraction = setting("MAX_TOTAL_EXPOSURE_FRACTION")
+
+            if fixed_stake > 0:
                 # Flat-stake mode: every trade is the same size or it does not happen.
-                # HARD_MAX_POSITION_SIZE still applies as a ceiling so the dollar cap
-                # remains the single place that bounds per-trade risk.
-                final_size = min(FIXED_POSITION_SIZE, HARD_MAX_POSITION_SIZE)
+                # The hard ceiling still applies so the dollar cap remains the
+                # single place that bounds per-trade risk.
+                final_size = min(fixed_stake, hard_max)
                 # Strict: no partial fills of the stake. Shrinking to fit available
                 # cash would reintroduce uneven sizes, which is what flat staking
                 # exists to avoid — so an underfunded signal is skipped instead.
@@ -341,13 +353,13 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                 final_size = min(
                     suggested_size,
                     total_equity * MAX_POSITION_FRACTION,
-                    HARD_MAX_POSITION_SIZE
+                    hard_max
                 )
 
             # Enforce minimum position size. The micro-account rescue below is a
             # Kelly-path concession (it would silently override a flat stake set
             # below MIN_POSITION_SIZE), so in flat-stake mode just skip instead.
-            if signal and final_size < MIN_POSITION_SIZE and FIXED_POSITION_SIZE > 0:
+            if signal and final_size < MIN_POSITION_SIZE and fixed_stake > 0:
                 signal = None
                 skip_reason = (
                     f"Flat stake ${final_size:.2f} is below the ${MIN_POSITION_SIZE:.2f} "
@@ -357,7 +369,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                 # Micro-account rescue: if calculated size is below minimum, floor to MIN_POSITION_SIZE
                 # if we have the cash and it fits within our total exposure limit, preventing sizing deadlock.
                 if (MIN_POSITION_SIZE <= available_cash and
-                        locked_cash + MIN_POSITION_SIZE <= total_equity * MAX_TOTAL_EXPOSURE_FRACTION):
+                        locked_cash + MIN_POSITION_SIZE <= total_equity * exposure_fraction):
                     logging.info(
                         f"Micro-account rescue: calculated size ${final_size:.2f} floored "
                         f"to MIN_POSITION_SIZE ${MIN_POSITION_SIZE:.2f} (equity=${total_equity:.2f})"
@@ -368,9 +380,9 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                     skip_reason = f"Calculated size ${final_size:.2f} below minimum ${MIN_POSITION_SIZE}"
 
             # Enforce maximum total exposure cap across the portfolio
-            if signal and locked_cash + final_size > total_equity * MAX_TOTAL_EXPOSURE_FRACTION:
+            if signal and locked_cash + final_size > total_equity * exposure_fraction:
                 signal = None
-                skip_reason = f"Total exposure cap reached. Locked: ${locked_cash:.2f}, Size: ${final_size:.2f}, Max Allowed: ${total_equity * MAX_TOTAL_EXPOSURE_FRACTION:.2f}"
+                skip_reason = f"Total exposure cap reached. Locked: ${locked_cash:.2f}, Size: ${final_size:.2f}, Max Allowed: ${total_equity * exposure_fraction:.2f}"
 
             # Ensure we actually have the cash available to deploy
             elif signal and available_cash < final_size:

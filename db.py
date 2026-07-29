@@ -231,6 +231,26 @@ def init_db():
             )
         ''')
 
+        # Trading eras. Each row is one funded run of the bot, archived to its
+        # own frozen DB snapshot when it ends. The original design had exactly
+        # one archive at a fixed path ('paper_archive.db') with a boolean
+        # dashboard toggle; that cannot express "paper era, then live era 1,
+        # then live era 2 after a full withdrawal and re-fund".
+        # `archive_path` is NULL for the era currently running.
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS eras (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                label TEXT NOT NULL,
+                mode TEXT NOT NULL,
+                started_at TEXT NOT NULL,
+                ended_at TEXT,
+                seed_amount REAL,
+                final_balance REAL,
+                archive_path TEXT,
+                note TEXT
+            )
+        ''')
+
         # Indexes — safe to re-run; IF NOT EXISTS is idempotent
         conn.execute("CREATE INDEX IF NOT EXISTS idx_bankroll_id ON bankroll(id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_notifications_id ON notifications(id DESC)")
@@ -312,6 +332,150 @@ def save_settings(values):
 set_settings = save_settings
 
 
+def get_eras():
+    """Every era, newest first. The one with archive_path IS NULL is live."""
+    return [dict(r) for r in fetch_query(
+        "SELECT * FROM eras ORDER BY id DESC")]
+
+
+def get_current_era():
+    """The era currently running (not yet archived), or None if the ledger has
+    never been started under the era system."""
+    rows = fetch_query(
+        "SELECT * FROM eras WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1")
+    return dict(rows[0]) if rows else None
+
+
+def start_era(label, mode, seed_amount, note=None):
+    """Open a new era. Called by start_new_era.py after the money tables have
+    been wiped and re-seeded, so era N+1 begins with a clean ledger."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _write_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            cur = conn.execute(
+                "INSERT INTO eras (label, mode, started_at, seed_amount, note) "
+                "VALUES (?, ?, ?, ?, ?)",
+                (label, mode, now, float(seed_amount), note),
+            )
+            conn.commit()
+            return cur.lastrowid
+
+
+def close_era(era_id, final_balance, archive_path):
+    """Mark an era finished and point it at its frozen snapshot."""
+    now = datetime.now(timezone.utc).isoformat()
+    with _write_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "UPDATE eras SET ended_at=?, final_balance=?, archive_path=? WHERE id=?",
+                (now, float(final_balance), archive_path, era_id),
+            )
+            conn.commit()
+
+
+def cutover_era(new_label, new_mode, seed, reset_settings=False):
+    """Close the running era and open a fresh one. The shared core behind both
+    the Settings tab's "Start new era" button and start_new_era.py — one
+    implementation so the two can never drift.
+
+    Steps: refuse while positions are open; freeze the whole DB to
+    era_<NNN>_<label>.db and TRIM it (SKIP signals and pre-era signals dropped —
+    an untrimmed snapshot is ~250MB and a few of them would fill the volume);
+    then in ONE transaction: seal the era row, wipe the money tables (bankroll,
+    trades, positions, resolutions — research tables are kept so calibration
+    keeps learning across eras), seed the new ledger, open the new era row.
+    A crash mid-cutover therefore leaves either the old era fully intact or the
+    new one fully opened, never a half-wiped ledger.
+
+    Returns a summary dict. Raises RuntimeError on refusal."""
+    import re as _re
+
+    open_pos = fetch_query("SELECT side, question FROM positions")
+    if open_pos:
+        raise RuntimeError(
+            f"{len(open_pos)} position(s) still open — let this era finish settling first")
+
+    cur_era = get_current_era()
+    n_trades = fetch_query("SELECT COUNT(*) AS c FROM trades")[0]["c"]
+    old_rows = fetch_query("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1")
+    old_balance = old_rows[0]["balance"] if old_rows else 0.0
+    n_existing = fetch_query("SELECT COUNT(*) AS c FROM eras")[0]["c"]
+
+    # ---- 1. freeze + trim the outgoing era (only if there is history) ----
+    archive_path = None
+    if n_trades or cur_era:
+        closing_label = _re.sub(r"[^A-Za-z0-9._-]", "-",
+                                (cur_era or {}).get("label") or "pre-era-history")
+        era_no = (cur_era["id"] if cur_era else n_existing) or 1
+        archive_path = os.path.join(
+            os.path.dirname(DB_PATH), f"era_{era_no:03d}_{closing_label}.db")
+        if os.path.exists(archive_path):
+            raise RuntimeError(f"{archive_path} already exists — refusing to overwrite an archive")
+        src = sqlite3.connect(DB_PATH)
+        try:
+            dst = sqlite3.connect(archive_path)
+            with dst:
+                src.backup(dst)
+            dst.close()
+        finally:
+            src.close()
+        era_started = cur_era["started_at"] if cur_era else None
+        arch = sqlite3.connect(archive_path)
+        try:
+            with arch:
+                arch.execute("DELETE FROM signals WHERE signal_type LIKE 'SKIP%'")
+                if era_started:
+                    arch.execute("DELETE FROM signals WHERE timestamp < ?", (era_started,))
+                    arch.execute("DELETE FROM scan_log WHERE id NOT IN "
+                                 "(SELECT id FROM scan_log ORDER BY id DESC LIMIT 500)")
+            arch.execute("VACUUM")
+        except sqlite3.OperationalError as e:
+            logging.warning(f"era archive trim skipped: {e}")
+        finally:
+            arch.close()
+
+    # ---- 2. seal + wipe + seed + open, atomically ----
+    # Direct SQL rather than close_era()/start_era(): those helpers take
+    # _write_lock themselves and it is a plain (non-reentrant) Lock — and more
+    # importantly this whole block must be ONE transaction.
+    now = datetime.now(timezone.utc).isoformat()
+    with _write_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            if cur_era:
+                conn.execute(
+                    "UPDATE eras SET ended_at=?, final_balance=?, archive_path=? WHERE id=?",
+                    (now, float(old_balance), archive_path, cur_era["id"]))
+            elif archive_path:
+                # History from before the era system: record it retroactively so
+                # the archive is reachable from the dashboard, not an orphan file.
+                conn.execute(
+                    "INSERT INTO eras (label, mode, started_at, ended_at, seed_amount, "
+                    "final_balance, archive_path, note) VALUES (?,?,?,?,?,?,?,?)",
+                    ("pre-era-history", new_mode, now, now, 0.0, float(old_balance),
+                     archive_path, "retro row for trades made before the era system"))
+            for t in ("bankroll", "trades", "positions", "resolutions"):
+                conn.execute(f"DELETE FROM {t}")
+            if reset_settings:
+                conn.execute("DELETE FROM settings")
+            conn.execute(
+                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id) "
+                "VALUES (?, 'LIVE_SEED', ?, ?, NULL)", (now, float(seed), float(seed)))
+            new_era = conn.execute(
+                "INSERT INTO eras (label, mode, started_at, seed_amount) VALUES (?,?,?,?)",
+                (new_label, new_mode, now, float(seed))).lastrowid
+            conn.commit()
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute("VACUUM")
+
+    logging.info(f"Era cutover: '{new_label}' (id {new_era}) opened at ${seed:.2f}; "
+                 f"{n_trades} trades archived to {archive_path or '(nothing to archive)'}")
+    return {
+        "new_era_id": new_era, "new_label": new_label, "mode": new_mode,
+        "seed": float(seed), "archived_trades": n_trades,
+        "closed_balance": float(old_balance), "archive_path": archive_path,
+    }
+
+
 def record_deposit(amount, note=None):
     """Append a DEPOSIT row: adds cash WITHOUT touching the P&L baseline.
 
@@ -345,8 +509,11 @@ def get_total_deposited():
         "SELECT COALESCE(SUM(amount), 0) AS deposited FROM bankroll WHERE event='DEPOSIT'"
     )
     deposited = rows[0]["deposited"] if rows else 0.0
+    # Two seed spellings exist: _seed_bankroll writes 'SEED', cutover_to_live.py
+    # writes 'LIVE_SEED'. The live ledger opened with LIVE_SEED, so matching only
+    # 'SEED' would omit the original capital and overstate the return.
     seed_rows = fetch_query(
-        "SELECT amount FROM bankroll WHERE event='SEED' ORDER BY id LIMIT 1"
+        "SELECT amount FROM bankroll WHERE event IN ('SEED','LIVE_SEED') ORDER BY id LIMIT 1"
     )
     seed = seed_rows[0]["amount"] if seed_rows else STARTING_BANKROLL
     return seed + (deposited or 0.0)

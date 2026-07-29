@@ -133,6 +133,7 @@ function TopBar({ portfolio, scanLog, activeTab, setActiveTab }) {
         <div className={`nav-item ${activeTab === 'desk' ? 'active' : ''}`} onClick={() => setActiveTab('desk')}>Desk</div>
         <div className={`nav-item ${activeTab === 'archive' ? 'active' : ''}`} onClick={() => setActiveTab('archive')}>Archive</div>
         <div className={`nav-item ${activeTab === 'models' ? 'active' : ''}`} onClick={() => setActiveTab('models')}>Signals</div>
+        <div className={`nav-item ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')}>Settings</div>
       </div>
       <div className="top-right">
         <span
@@ -207,15 +208,21 @@ function CircuitBreakerBanner({ portfolio }) {
 }
 
 function HeaderStrip({ portfolio }) {
-  const equityChange = portfolio.total_equity - portfolio.starting_bankroll;
-  const equityChangePct = equityChange / portfolio.starting_bankroll;
+  // Measure against total capital paid in (seed + deposits), NOT the original
+  // seed: a deposit adds cash without being profit, so dividing by the seed
+  // would report a funding event as a gain. Withdrawn cash counts TOWARD the
+  // result — money taken off the table is banked profit, not a trading loss.
+  const capitalIn = portfolio.total_deposited || portfolio.starting_bankroll;
+  const withdrawn = portfolio.total_withdrawn || 0;
+  const equityChange = portfolio.total_equity + withdrawn - capitalIn;
+  const equityChangePct = capitalIn ? equityChange / capitalIn : 0;
   return (
     <section className="header-strip">
       <KpiCard
         label="Total equity"
         value={fmtUSD(portfolio.total_equity)}
         sub={<span className={equityChange >= 0 ? 'pos' : 'neg'}>
-          {fmtUSD(equityChange, true)} <span className="dim">since start</span>
+          {fmtUSD(equityChange, true)} <span className="dim">vs capital in</span>
         </span>}
         tone="hero"
       />
@@ -227,7 +234,7 @@ function HeaderStrip({ portfolio }) {
       <KpiCard
         label="Locked in positions"
         value={fmtUSD(portfolio.locked_cash)}
-        sub={<span className="dim">exposure {fmtPct(portfolio.exposure_pct)} <span className="sep">·</span> cap 30%</span>}
+        sub={<span className="dim">exposure {fmtPct(portfolio.exposure_pct)} <span className="sep">·</span> cap {fmtPct(portfolio.max_total_exposure_fraction ?? 0.70, 0)}</span>}
       />
       <KpiCard
         label="Today's P&L"
@@ -796,6 +803,491 @@ function ScanFeed({ scanLog }) {
   );
 }
 
+// ---------- Settings ----------
+// Percent-style knobs are stored as fractions but edited as whole percents —
+// typing "70" is natural, 0.70 is not.
+const PCT_FIELDS = { MAX_TOTAL_EXPOSURE_FRACTION: true, STOP_LOSS_PCT: true };
+
+function NumField({ id, label, help, value, onChange, prefix, suffix, step, error, warn, disabled }) {
+  return (
+    <div className="field-row">
+      <div>
+        <div className="field-label">{label}</div>
+        {help && <div className="field-help">{help}</div>}
+        {error && <div className="field-error">{error}</div>}
+        {!error && warn && <div className="field-warn">{warn}</div>}
+      </div>
+      <div className={`input ${error ? 'has-error' : ''}`}>
+        {prefix && <span className="affix">{prefix}</span>}
+        <input
+          type="number" step={step || 'any'} value={value} disabled={disabled}
+          onChange={e => onChange(e.target.value)} aria-label={label} id={id}
+        />
+        {suffix && <span className="affix">{suffix}</span>}
+      </div>
+    </div>
+  );
+}
+
+function NumFieldText({ label, help, value, onChange, placeholder }) {
+  return (
+    <div className="field-row">
+      <div>
+        <div className="field-label">{label}</div>
+        {help && <div className="field-help">{help}</div>}
+      </div>
+      <div className="input">
+        <input type="text" value={value} placeholder={placeholder}
+               onChange={e => onChange(e.target.value)} aria-label={label} />
+      </div>
+    </div>
+  );
+}
+
+// What the bot will ACTUALLY do with a given set of values. Recomputed on every
+// keystroke — this is the "show me the value as I tweak it" part.
+function deriveImpact(v, ctx) {
+  const equity = ctx.total_equity || 0;
+  const size = Number(v.FIXED_POSITION_SIZE) || 0;
+  const ceiling = Number(v.HARD_MAX_POSITION_SIZE) || 0;
+  // strategy.py takes min() of the two, so the ceiling silently wins when lower.
+  const effective = Math.min(size, ceiling);
+  const exposureCap = equity * (Number(v.MAX_TOTAL_EXPOSURE_FRACTION) || 0);
+  const slotsByExposure = effective > 0 ? Math.floor(exposureCap / effective) : 0;
+  const slotsByCash = effective > 0 ? Math.floor((ctx.available_cash || 0) / effective) : 0;
+  const maxConc = Number(v.MAX_CONCURRENT_POSITIONS) || 0;
+  const slots = Math.max(0, Math.min(maxConc, slotsByExposure, slotsByCash));
+  let binding = 'max concurrent';
+  if (slots === slotsByCash && slotsByCash <= slotsByExposure && slotsByCash <= maxConc) binding = 'available cash';
+  else if (slots === slotsByExposure && slotsByExposure <= maxConc) binding = 'exposure cap';
+  // The daily loss limit is DERIVED: a budget of N full-stake losses, so the
+  // dollar figure below rescales live as the stake or the budget is edited.
+  const lossStakes = Number(v.DAILY_LOSS_STAKES) || 0;
+  return {
+    effective,
+    clamped: size > ceiling,
+    pctOfEquity: equity ? effective / equity : 0,
+    exposureCap, slots, binding,
+    // On a binary $0/$1 market the max loss per position IS the whole stake,
+    // so this is a real worst case, not a scare number.
+    worstCase: slots * effective,
+    dailyLossDollars: effective * lossStakes,
+    lossesToHalt: Math.ceil(lossStakes),
+    stopLossPerTrade: v.ENABLE_STOP_LOSS ? effective * (Number(v.STOP_LOSS_PCT) || 0) : effective,
+  };
+}
+
+function SettingsPanel({ portfolio }) {
+  const [server, setServer] = useState(null);
+  const [draft, setDraft] = useState(null);
+  const [phase, setPhase] = useState('idle');   // idle|confirming|saving
+  const [fieldErrors, setFieldErrors] = useState({});
+  const [banner, setBanner] = useState(null);
+  const [depositAmt, setDepositAmt] = useState('');
+  const [depositConfirm, setDepositConfirm] = useState(false);
+  const [depositBusy, setDepositBusy] = useState(false);
+  const [eras, setEras] = useState(null);
+  const [eraLabel, setEraLabel] = useState('');
+  const [eraConfirm, setEraConfirm] = useState(false);
+  const [eraBusy, setEraBusy] = useState(false);
+
+  const load = async () => {
+    try {
+      const r = await fetch('/api/settings');
+      if (r.status === 401) { window.location.href = '/'; return; }
+      const d = await r.json();
+      // Percent-style values are edited as whole numbers.
+      const shown = { ...d.values };
+      Object.keys(PCT_FIELDS).forEach(k => { if (shown[k] != null) shown[k] = +(shown[k] * 100).toFixed(4); });
+      setServer({ ...d, shownValues: shown });
+      setDraft(shown);
+      try {
+        const er = await fetch('/api/eras');
+        if (er.ok) setEras(await er.json());
+      } catch (e) { /* era card just shows less */ }
+    } catch (e) { setBanner({ err: true, msg: 'Could not load settings: ' + e.message }); }
+  };
+
+  useEffect(() => { load(); }, []);
+
+  if (!server || !draft) return <section className="card"><div className="dim small">Loading settings…</div></section>;
+
+  if (server.archive_view) {
+    return (
+      <section className="card">
+        <header className="card-head"><div><h2>Settings</h2></div></header>
+        <div className="settings-note">
+          Viewing the frozen paper-era archive. Switch back to live (the mode pill,
+          top right) to change settings.
+        </div>
+      </section>
+    );
+  }
+
+  // Values in real units (fractions, not percents) for impact + save.
+  const realValues = (() => {
+    const out = { ...draft };
+    Object.keys(PCT_FIELDS).forEach(k => { if (out[k] != null && out[k] !== '') out[k] = Number(out[k]) / 100; });
+    return out;
+  })();
+  const impact = deriveImpact(realValues, server.context);
+
+  const dirtyKeys = Object.keys(server.shownValues)
+    .filter(k => String(draft[k]) !== String(server.shownValues[k]));
+
+  const set = (key, val) => {
+    setDraft(d => {
+      const next = { ...d, [key]: val };
+      // The ceiling clamps the stake (strategy.py min()), so raising the stake
+      // above it must raise it too — otherwise the change is a silent no-op.
+      if (key === 'FIXED_POSITION_SIZE' && Number(val) > Number(d.HARD_MAX_POSITION_SIZE || 0)) {
+        next.HARD_MAX_POSITION_SIZE = val;
+      }
+      return next;
+    });
+    setFieldErrors(fe => ({ ...fe, [key]: null }));
+  };
+
+  const save = async () => {
+    setPhase('saving'); setBanner(null); setFieldErrors({});
+    const payload = {};
+    dirtyKeys.forEach(k => { payload[k] = realValues[k]; });
+    // A stake raise auto-raises the ceiling; include it even if the user never
+    // touched the field directly.
+    if (payload.FIXED_POSITION_SIZE != null) payload.HARD_MAX_POSITION_SIZE = realValues.HARD_MAX_POSITION_SIZE;
+    try {
+      const r = await fetch('/api/settings', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ settings: payload }),
+      });
+      const d = await r.json();
+      setPhase('idle');
+      if (!r.ok) {
+        if (d.field_errors) setFieldErrors(d.field_errors);
+        setBanner({ err: true, msg: d.error || 'Save failed' });
+        return;
+      }
+      // Applied live: the runtime store is already swapped, the next bot
+      // decision uses the new values. Just re-sync the panel and the desk.
+      await load();
+      window.dispatchEvent(new Event('stormedge-refetch'));
+      setBanner({ msg: d.changed && d.changed.length
+        ? 'Applied immediately: ' + d.changed.join(', ')
+        : (d.message || 'No changes.') });
+    } catch (e) {
+      setPhase('idle');
+      setBanner({ err: true, msg: 'Save failed: ' + e.message });
+    }
+  };
+
+  const doDeposit = async () => {
+    setDepositBusy(true); setBanner(null);
+    try {
+      const r = await fetch('/api/deposit', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ amount: Number(depositAmt), confirm: true }),
+      });
+      const d = await r.json();
+      if (!r.ok) setBanner({ err: true, msg: d.error || 'Deposit failed' });
+      else {
+        setBanner({ msg: `Deposit of ${fmtUSD(d.amount)} recorded — balance is now ${fmtUSD(d.new_balance)}.` });
+        setDepositAmt(''); setDepositConfirm(false);
+        await load();
+        window.dispatchEvent(new Event('stormedge-refetch'));
+      }
+    } catch (e) { setBanner({ err: true, msg: e.message }); }
+    setDepositBusy(false);
+  };
+
+  const startNewEra = async () => {
+    setEraBusy(true); setBanner(null);
+    try {
+      const r = await fetch('/api/new-era', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ confirm: true, label: eraLabel.trim() || undefined }),
+      });
+      const d = await r.json();
+      if (!r.ok) setBanner({ err: true, msg: d.error || 'Era cutover failed' });
+      else {
+        setBanner({ msg: `Era '${d.new_label}' opened at ${fmtUSD(d.seed)} — ` +
+          `${d.archived_trades} trade(s) archived. ` +
+          (d.seed === 0 ? 'Fund the wallet and the bot will book it automatically.' : '') });
+        setEraLabel(''); setEraConfirm(false);
+        await load();
+        window.dispatchEvent(new Event('stormedge-refetch'));
+      }
+    } catch (e) { setBanner({ err: true, msg: e.message }); }
+    setEraBusy(false);
+  };
+
+  const ctx = server.context;
+  const depositNum = Number(depositAmt);
+  const depositValid = depositNum > 0 && depositNum <= 10000;
+  const bigDeposit = depositNum > 10 * (ctx.available_cash || 1);
+
+  return (
+    <div className="col-stack">
+      {banner && <div className={`settings-note ${banner.err ? 'err' : ''}`}>{banner.msg}</div>}
+      <div className="settings-grid">
+        {/* ---- sizing ---- */}
+        <section className="card">
+          <header className="card-head">
+            <div>
+              <h2>Position sizing</h2>
+              <p className="card-sub">how much each trade stakes</p>
+            </div>
+          </header>
+          <NumField
+            label="Stake per trade" prefix="$" step="0.25"
+            value={draft.FIXED_POSITION_SIZE}
+            onChange={v => set('FIXED_POSITION_SIZE', v)}
+            error={fieldErrors.FIXED_POSITION_SIZE}
+            help={`Every trade stakes exactly this. CLOB minimum is ${fmtUSD(ctx.min_position_size)}.`}
+          />
+          <NumField
+            label="Per-trade ceiling" prefix="$" step="0.25"
+            value={draft.HARD_MAX_POSITION_SIZE}
+            onChange={v => set('HARD_MAX_POSITION_SIZE', v)}
+            error={fieldErrors.HARD_MAX_POSITION_SIZE}
+            help="Absolute cap applied on top of the stake."
+            warn={Number(draft.HARD_MAX_POSITION_SIZE) === Number(draft.FIXED_POSITION_SIZE)
+              && dirtyKeys.includes('HARD_MAX_POSITION_SIZE')
+              ? 'Raised automatically to match the stake — the ceiling clamps it, so leaving it lower would keep every trade at the old size.'
+              : null}
+          />
+          <div className="impact-block">
+            <div className="impact-row">
+              <span className="k">Effective stake</span>
+              <span className={`v ${impact.clamped ? 'bad' : ''}`}>
+                {fmtUSD(impact.effective)}{impact.clamped ? ' — clamped by ceiling' : ''}
+              </span>
+            </div>
+            <div className="impact-row">
+              <span className="k">Share of equity</span>
+              <span className="v">{fmtPct(impact.pctOfEquity)} of {fmtUSD(ctx.total_equity)}</span>
+            </div>
+            <div className="impact-row">
+              <span className="k">Positions allowed</span>
+              <span className="v">{impact.slots} <span className="dim">— limited by {impact.binding}</span></span>
+            </div>
+            <div className="impact-row">
+              <span className="k">Worst case open</span>
+              <span className="v">{fmtUSD(impact.worstCase)} if all resolve to zero</span>
+            </div>
+            <div className="impact-row">
+              <span className="k">Daily loss limit</span>
+              <span className={`v ${impact.lossesToHalt <= 2 ? 'warn' : ''}`}>
+                {fmtUSD(impact.dailyLossDollars)} — halts after {impact.lossesToHalt} loss{impact.lossesToHalt === 1 ? '' : 'es'}
+              </span>
+            </div>
+          </div>
+        </section>
+
+        {/* ---- risk ---- */}
+        <section className="card">
+          <header className="card-head">
+            <div>
+              <h2>Risk limits</h2>
+              <p className="card-sub">portfolio-level guards</p>
+            </div>
+          </header>
+          <NumField
+            label="Max concurrent positions" step="1"
+            value={draft.MAX_CONCURRENT_POSITIONS}
+            onChange={v => set('MAX_CONCURRENT_POSITIONS', v)}
+            error={fieldErrors.MAX_CONCURRENT_POSITIONS}
+            help="Refuse new entries once this many are open."
+          />
+          <NumField
+            label="Daily loss budget" suffix="stakes" step="0.5"
+            value={draft.DAILY_LOSS_STAKES}
+            onChange={v => set('DAILY_LOSS_STAKES', v)}
+            error={fieldErrors.DAILY_LOSS_STAKES}
+            help={`Halts the day after this many full-stake losses — currently ${fmtUSD(impact.dailyLossDollars)}. Scales automatically when the stake changes.`}
+          />
+          <NumField
+            label="Total exposure cap" suffix="%" step="5"
+            value={draft.MAX_TOTAL_EXPOSURE_FRACTION}
+            onChange={v => set('MAX_TOTAL_EXPOSURE_FRACTION', v)}
+            error={fieldErrors.MAX_TOTAL_EXPOSURE_FRACTION}
+            help={`Share of equity allowed in open positions — ${fmtUSD(impact.exposureCap)} right now.`}
+          />
+        </section>
+
+        {/* ---- exits ---- */}
+        <section className="card">
+          <header className="card-head">
+            <div>
+              <h2>Exits</h2>
+              <p className="card-sub">when a position is closed early</p>
+            </div>
+          </header>
+          <div className="field-row">
+            <div>
+              <div className="field-label">Stop loss</div>
+              <div className="field-help">Sell when the mid falls far enough below entry.</div>
+            </div>
+            <div className="seg">
+              <button className={draft.ENABLE_STOP_LOSS ? 'on' : ''} onClick={() => set('ENABLE_STOP_LOSS', true)}>ON</button>
+              <button className={!draft.ENABLE_STOP_LOSS ? 'on' : ''} onClick={() => set('ENABLE_STOP_LOSS', false)}>OFF</button>
+            </div>
+          </div>
+          <NumField
+            label="Stop loss level" suffix="%" step="5"
+            value={draft.STOP_LOSS_PCT}
+            disabled={!draft.ENABLE_STOP_LOSS}
+            onChange={v => set('STOP_LOSS_PCT', v)}
+            error={fieldErrors.STOP_LOSS_PCT}
+            help={draft.ENABLE_STOP_LOSS
+              ? `Cuts a loss at ${fmtUSD(impact.stopLossPerTrade)} instead of the full ${fmtUSD(impact.effective)}.`
+              : 'Stop loss is off — a losing position rides to settlement.'}
+          />
+          <NumField
+            label="Take profit price" prefix="$" step="0.01"
+            value={draft.TAKE_PROFIT_PRICE}
+            onChange={v => set('TAKE_PROFIT_PRICE', v)}
+            error={fieldErrors.TAKE_PROFIT_PRICE}
+            help="Sell the moment a real bid reaches this."
+          />
+        </section>
+
+        {/* ---- bankroll ---- */}
+        <section className="card">
+          <header className="card-head">
+            <div>
+              <h2>Bankroll</h2>
+              <p className="card-sub">record money paid into the account</p>
+            </div>
+          </header>
+          <div className="impact-block" style={{ marginTop: 0 }}>
+            <div className="impact-row"><span className="k">Available cash</span><span className="v">{fmtUSD(ctx.available_cash)}</span></div>
+            <div className="impact-row"><span className="k">In open positions</span><span className="v">{fmtUSD(ctx.locked_cash)}</span></div>
+            <div className="impact-row"><span className="k">Total capital in</span><span className="v">{fmtUSD(ctx.total_deposited)}</span></div>
+          </div>
+          <NumField
+            label="Record a deposit" prefix="$" step="1"
+            value={depositAmt}
+            onChange={v => { setDepositAmt(v); setDepositConfirm(false); }}
+            help="Adds cash to the ledger. Does not count as profit and needs no restart."
+            warn={bigDeposit ? 'This is far larger than your current balance — is the figure in dollars, not naira?' : null}
+          />
+          {depositValid && (
+            <div className="impact-row" style={{ marginTop: 4 }}>
+              <span className="k">New balance would be</span>
+              <span className="v">{fmtUSD((ctx.available_cash || 0) + depositNum)}</span>
+            </div>
+          )}
+          <div style={{ display: 'flex', gap: 9, marginTop: 10 }}>
+            {!depositConfirm ? (
+              <button className="btn btn-ghost" disabled={!depositValid} onClick={() => setDepositConfirm(true)}>
+                Record deposit
+              </button>
+            ) : (
+              <>
+                <button className="btn btn-primary" disabled={depositBusy} onClick={doDeposit}>
+                  {depositBusy ? 'Recording…' : `Confirm ${fmtUSD(depositNum)}`}
+                </button>
+                <button className="btn btn-ghost" onClick={() => setDepositConfirm(false)}>Cancel</button>
+              </>
+            )}
+          </div>
+          <div className="field-help" style={{ marginTop: 8 }}>
+            Deposits and withdrawals made on Polymarket itself are detected and booked
+            automatically within two monitor cycles (~10 min) — this field is only for
+            recording one before the bot notices.
+          </div>
+        </section>
+
+        {/* ---- trading era ---- */}
+        <section className="card">
+          <header className="card-head">
+            <div>
+              <h2>Trading era</h2>
+              <p className="card-sub">archive this run and start fresh</p>
+            </div>
+          </header>
+          <div className="impact-block" style={{ marginTop: 0 }}>
+            <div className="impact-row">
+              <span className="k">Current era</span>
+              <span className="v">{eras && eras.current ? `${eras.current.label} · since ${String(eras.current.started_at).slice(0, 10)}` : 'pre-era history'}</span>
+            </div>
+            <div className="impact-row">
+              <span className="k">Archived eras</span>
+              <span className="v">{eras ? (eras.archived || []).length + (eras.legacy_paper_archive ? 1 : 0) : '—'}</span>
+            </div>
+          </div>
+          <NumFieldText
+            label="New era label" value={eraLabel} onChange={setEraLabel}
+            placeholder="live-2"
+            help="Closes the current era: every trade and the bankroll ledger are frozen into a browsable archive, then the ledger re-seeds from the REAL wallet balance. Signals and calibration data carry over. Settings keep their values."
+          />
+          {ctx.open_positions > 0 && (
+            <div className="field-warn">Blocked while {ctx.open_positions} position(s) are open — let them settle first.</div>
+          )}
+          <div style={{ display: 'flex', gap: 9, marginTop: 10 }}>
+            {!eraConfirm ? (
+              <button className="btn btn-ghost" disabled={ctx.open_positions > 0 || eraBusy}
+                      onClick={() => setEraConfirm(true)}>
+                Start new era
+              </button>
+            ) : (
+              <>
+                <button className="btn btn-primary" disabled={eraBusy} onClick={startNewEra}>
+                  {eraBusy ? 'Archiving…' : 'Confirm — archive & start fresh'}
+                </button>
+                <button className="btn btn-ghost" disabled={eraBusy} onClick={() => setEraConfirm(false)}>Cancel</button>
+              </>
+            )}
+          </div>
+        </section>
+      </div>
+
+      <div className="settings-bar">
+        <span className={dirtyKeys.length ? 'settings-dirty' : 'dim small'}>
+          {dirtyKeys.length ? `${dirtyKeys.length} unsaved change${dirtyKeys.length === 1 ? '' : 's'}` : 'No changes'}
+        </span>
+        <span className="spacer" />
+        <button className="btn btn-ghost" disabled={!dirtyKeys.length} onClick={() => setDraft(server.shownValues)}>Revert</button>
+        <button
+          className="btn btn-primary"
+          disabled={!dirtyKeys.length || phase === 'saving'}
+          onClick={() => setPhase('confirming')}
+        >
+          {phase === 'saving' ? 'Saving…' : 'Save changes'}
+        </button>
+      </div>
+
+      {phase === 'confirming' && (
+        <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) setPhase('idle'); }}>
+          <div className="modal">
+            <h3>Apply these settings?</h3>
+            <div className="modal-diff">
+              {dirtyKeys.map(k => (
+                <div key={k}>
+                  {server.meta[k].label}:{' '}
+                  <span className="from">{String(server.shownValues[k])}</span>{' → '}
+                  <span className="to">{String(draft[k])}</span>
+                </div>
+              ))}
+            </div>
+            <div className="modal-body">
+              Changes apply immediately — the very next entry or exit decision uses the
+              new values. No restart, no downtime.
+              {ctx.open_positions > 0 && ` Note: ${ctx.open_positions} open position(s) are
+              affected right away — a tighter stop loss or take profit acts on them at the
+              next monitor cycle (within ~5 minutes).`}
+            </div>
+            <div className="modal-actions">
+              <button className="btn btn-ghost" onClick={() => setPhase('idle')}>Cancel</button>
+              <button className="btn btn-primary" onClick={save}>Apply now</button>
+            </div>
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ---------- App ----------
 function App() {
   const [data, setData] = useState(null);
@@ -871,6 +1363,7 @@ function App() {
           <RecentTrades trades={M.trades} />
         </div>
       )}
+      {activeTab === 'settings' && <SettingsPanel portfolio={M.portfolio} />}
       {activeTab === 'models' && (
         <div>
           <RecentSignals signals={M.recentSignals} />

@@ -29,7 +29,7 @@ MANAGED_SETTINGS = (
     "FIXED_POSITION_SIZE",
     "HARD_MAX_POSITION_SIZE",
     "MAX_CONCURRENT_POSITIONS",
-    "DAILY_LOSS_LIMIT",
+    "DAILY_LOSS_STAKES",
     "MAX_TOTAL_EXPOSURE_FRACTION",
     "ENABLE_STOP_LOSS",
     "STOP_LOSS_PCT",
@@ -248,11 +248,23 @@ BASE_FORECAST_ERROR = {
 # therefore writes BOTH from its single "stake per trade" field, so that silent
 # no-op state cannot be created from the UI.
 FIXED_POSITION_SIZE = float(_tunable("FIXED_POSITION_SIZE", "2.0"))
-DAILY_LOSS_LIMIT = float(_tunable("DAILY_LOSS_LIMIT", "-8.00"))
+# Daily loss budget, expressed in FULL STAKES rather than dollars, so it scales
+# automatically when the stake changes (user decision 2026-07-29: "the daily loss
+# limit is supposed to be dynamic — based off the position size"). The dollar
+# limit the circuit breaker enforces is derived at CHECK TIME:
+#     limit = -(effective_stake * DAILY_LOSS_STAKES)
+# via daily_loss_limit() below. Default 4 stakes × the $2 default stake = -$8,
+# identical to the old fixed DAILY_LOSS_LIMIT default, so behavior is continuous.
+DAILY_LOSS_STAKES = float(_tunable("DAILY_LOSS_STAKES", "4"))
 HARD_MAX_POSITION_SIZE = float(_tunable("HARD_MAX_POSITION_SIZE", "2.0"))
 MAX_POSITION_FRACTION = float(os.getenv("MAX_POSITION_FRACTION", "0.10"))
 MAX_TOTAL_EXPOSURE_FRACTION = float(_tunable("MAX_TOTAL_EXPOSURE_FRACTION", "0.70"))
-MAX_CONCURRENT_POSITIONS = int(float(_tunable("MAX_CONCURRENT_POSITIONS", "10")))
+# Default lowered 10 -> 4 by user decision 2026-07-29. Editable in the dashboard
+# Settings tab. Rationale: 10 slots was never reachable on a ~$19 bankroll (the
+# 70% exposure cap bound first), so it was a dead knob; on a funded account it
+# would be live and 10 correlated same-day weather bets is real concentration.
+# Four is a deliberate diversification floor, not a capital constraint.
+MAX_CONCURRENT_POSITIONS = int(float(_tunable("MAX_CONCURRENT_POSITIONS", "4")))
 BASE_POSITION_FRACTION = float(os.getenv("BASE_POSITION_FRACTION", "0.05"))
 KELLY_CAP = float(os.getenv("KELLY_CAP", "0.08"))
 # Polymarket's real CLOB minimum order is ~$1; below this, live orders won't fill.
@@ -296,7 +308,12 @@ ONE_TRADE_PER_CITY_DATE = os.getenv("ONE_TRADE_PER_CITY_DATE", "true").lower() =
 # all three collapses and clears Chongqing's -56.2% dip, so it fires 3/3 correct with
 # no false positives. The margin above Chongqing is only ~4pp, so a future winner
 # dipping past -60% would flip this — revisit once the loss sample grows past 3.
-STOP_LOSS_PCT = float(_tunable("STOP_LOSS_PCT", "0.60"))
+#
+# SET TO 0.50 by user decision 2026-07-29, overriding the 0.60 replay result. The
+# tradeoff is explicit: 50% cuts losses ~$0.20/trade sooner than 60%, but it would
+# have stopped out Chongqing 07-25 at its -56.2% dip, which then recovered to a win
+# (-$2.29 vs the +$1.27 it actually made). Editable in the dashboard Settings tab.
+STOP_LOSS_PCT = float(_tunable("STOP_LOSS_PCT", "0.50"))
 ENABLE_STOP_LOSS = str(_tunable("ENABLE_STOP_LOSS", "true")).lower() == "true"
 EXIT_EDGE_FLOOR = float(os.getenv("EXIT_EDGE_FLOOR", "0.05"))
 TAKE_PROFIT_PRICE = float(_tunable("TAKE_PROFIT_PRICE", "0.98"))
@@ -460,3 +477,66 @@ DATA_API_URL = "https://data-api.polymarket.com"
 # their actual fill price. Positions younger than this many minutes are skipped
 # so Data-API indexing lag on a fresh entry can't be mistaken for a sale.
 EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN = int(os.getenv("EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN", "15"))
+
+
+# --- Runtime settings store (hot-reload, no restart) ---
+# The managed money/risk knobs are read through setting() at their CALL SITES
+# (strategy sizing, executor exits/concurrency, the circuit breaker) instead of
+# being frozen by `from config import X`. The dashboard's settings POST calls
+# apply_runtime_overrides() after persisting, so a change takes effect on the
+# very next decision the bot makes — no process restart (user decision
+# 2026-07-29, replacing the earlier save-and-restart design).
+#
+# Everything OUTSIDE MANAGED_SETTINGS keeps the plain import-time constant
+# behavior on purpose: calibration constants and strategy gates are
+# code-controlled and should require a deploy to change.
+import threading as _threading
+
+_RUNTIME_LOCK = _threading.RLock()
+_RUNTIME = {
+    "FIXED_POSITION_SIZE": FIXED_POSITION_SIZE,
+    "HARD_MAX_POSITION_SIZE": HARD_MAX_POSITION_SIZE,
+    "MAX_CONCURRENT_POSITIONS": MAX_CONCURRENT_POSITIONS,
+    "DAILY_LOSS_STAKES": DAILY_LOSS_STAKES,
+    "MAX_TOTAL_EXPOSURE_FRACTION": MAX_TOTAL_EXPOSURE_FRACTION,
+    "ENABLE_STOP_LOSS": ENABLE_STOP_LOSS,
+    "STOP_LOSS_PCT": STOP_LOSS_PCT,
+    "TAKE_PROFIT_PRICE": TAKE_PROFIT_PRICE,
+}
+
+
+def setting(key):
+    """Current value of a managed setting. Thread-safe: the Flask thread writes
+    via apply_runtime_overrides while the bot thread reads mid-cycle. A single
+    decision always sees one consistent value; the next decision sees the new
+    one — that is the intended semantics of a live-tunable knob."""
+    with _RUNTIME_LOCK:
+        return _RUNTIME[key]
+
+
+def apply_runtime_overrides(values):
+    """Swap new typed values into the live store. Called by the settings POST
+    after the DB write succeeds, so memory and disk cannot disagree for longer
+    than the gap between the two calls. Unknown keys are refused loudly —
+    silently accepting one would fake success for a knob that nothing reads."""
+    bad = [k for k in values if k not in _RUNTIME]
+    if bad:
+        raise KeyError(f"not runtime-tunable: {', '.join(sorted(bad))}")
+    with _RUNTIME_LOCK:
+        _RUNTIME.update(values)
+
+
+def effective_stake():
+    """What a trade will actually stake: strategy.py takes min(stake, ceiling)."""
+    with _RUNTIME_LOCK:
+        return min(_RUNTIME["FIXED_POSITION_SIZE"], _RUNTIME["HARD_MAX_POSITION_SIZE"])
+
+
+def daily_loss_limit():
+    """The circuit breaker's dollar threshold, DERIVED at check time:
+    -(effective stake × DAILY_LOSS_STAKES). Change the stake and the limit
+    scales with it — a fixed dollar limit tuned for $2 stakes would otherwise
+    halt a $6-stake day after barely one loss."""
+    with _RUNTIME_LOCK:
+        stake = min(_RUNTIME["FIXED_POSITION_SIZE"], _RUNTIME["HARD_MAX_POSITION_SIZE"])
+        return -(stake * _RUNTIME["DAILY_LOSS_STAKES"])

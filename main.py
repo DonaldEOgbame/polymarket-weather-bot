@@ -12,7 +12,7 @@ from scanner import scan_markets, verify_parser_fixtures, prefetch_order_books
 from strategy import evaluate_opportunity
 from executor import Executor
 from alerts import send_daily_summary, send_error_alert, send_circuit_breaker_alert
-from config import SCAN_INTERVAL_MINUTES, MONITOR_INTERVAL_MINUTES, DAILY_LOSS_LIMIT
+from config import SCAN_INTERVAL_MINUTES, MONITOR_INTERVAL_MINUTES, daily_loss_limit
 from weather import log_model_accuracy, get_station_coords, prefetch_signal_engines
 from metar import final_extreme_f
 from utils import get_session
@@ -39,6 +39,12 @@ logging.getLogger("urllib3").setLevel(logging.WARNING)
 executor = None
 running = True
 
+# Set by the dashboard's /api/new-era endpoint for the few seconds the era
+# cutover runs: the scan cycle must not open a position between "archive the
+# old era" and "wipe the money tables" — that trade's CLOB order would be real
+# while its DB rows got wiped. Checked at the top of run_scan_cycle.
+trading_paused = False
+
 # Tracks circuit-breaker state across scan cycles so the dashboard notification
 # fires once on the transition into tripped — not every 10-minute cycle.
 _circuit_tripped = False
@@ -51,11 +57,15 @@ def handle_sigterm(*args):
 def check_circuit_breaker():
     global _circuit_tripped
     daily_pnl = get_daily_pnl()
-    if daily_pnl <= DAILY_LOSS_LIMIT:
-        logging.warning(f"Circuit breaker tripped. Daily loss ${daily_pnl:.2f} hit limit ${DAILY_LOSS_LIMIT:.2f}. No new trades until midnight UTC.")
+    # The limit is DERIVED at check time (-(effective stake × DAILY_LOSS_STAKES))
+    # so it scales when the stake is changed in the dashboard — a fixed dollar
+    # number tuned for $2 stakes would halt a $6-stake day after one loss.
+    limit = daily_loss_limit()
+    if daily_pnl <= limit:
+        logging.warning(f"Circuit breaker tripped. Daily loss ${daily_pnl:.2f} hit limit ${limit:.2f}. No new trades until midnight UTC.")
         # Notify only on the edge (untripped -> tripped) to avoid a feed flood.
         if not _circuit_tripped:
-            send_circuit_breaker_alert(daily_pnl, DAILY_LOSS_LIMIT)
+            send_circuit_breaker_alert(daily_pnl, limit)
             _circuit_tripped = True
         return True
     # PnL recovered above the limit (e.g. new UTC day) — re-arm the notification.
@@ -158,6 +168,9 @@ def _beat():
 def run_scan_cycle():
     if not running:
         return
+    if trading_paused:
+        logging.info("Scan skipped: era cutover in progress.")
+        return
 
     try:
         # Inside the try: check_circuit_breaker hits sqlite, and an OperationalError
@@ -208,6 +221,9 @@ def run_monitor_cycle():
         #    (before exit checks, so the bot never tries to sell shares it no
         #    longer holds)
         executor.sync_external_closes()
+        # 2b. Book deposits/withdrawals made on Polymarket outside the bot —
+        #     the wallet is the truth for cash, exactly as it is for shares.
+        executor.sync_wallet_cash()
         # 3. Check exit triggers (stop-loss, edge decay) on whatever remains open
         executor.check_exits()
         still_open = executor.get_open_positions_count()
@@ -281,11 +297,12 @@ def daily_summary():
 def _print_startup_summary():
     from config import (
         PAPER_MODE, STARTING_BANKROLL, EDGE_THRESHOLD, MIN_MODEL_AGREEMENT,
-        MAX_MODEL_SPREAD, KELLY_CAP, HARD_MAX_POSITION_SIZE, MIN_POSITION_SIZE,
-        MAX_CONCURRENT_POSITIONS, DAILY_LOSS_LIMIT, MAX_HOURS_TO_RESOLUTION,
+        MAX_MODEL_SPREAD, KELLY_CAP, MIN_POSITION_SIZE,
+        MAX_HOURS_TO_RESOLUTION,
         MIN_VOLUME, MARKET_DISCOVERY_MAX_PAGES, MARKET_DISCOVERY_LIMIT,
         SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD, SHADOW_MAX_SIZE_USDC,
         ENABLE_SHADOW_EXPLORATION, TAKER_FEE_RATE, SLIPPAGE_FRACTION,
+        setting, daily_loss_limit,
     )
     portfolio = get_portfolio_state()
     open_pos = fetch_query("SELECT COUNT(*) as c FROM positions")[0]["c"]
@@ -298,8 +315,8 @@ def _print_startup_summary():
         f"  Polymarket Weather Bot  [{mode} MODE]",
         "=" * 52,
         f"  Bankroll     : ${portfolio['total_equity']:.2f}  (cash ${portfolio['available_cash']:.2f}  locked ${portfolio['locked_cash']:.2f})",
-        f"  Open pos     : {open_pos} / {MAX_CONCURRENT_POSITIONS}  |  Daily loss limit: ${DAILY_LOSS_LIMIT:.2f}",
-        f"  Edge thresh  : {EDGE_THRESHOLD:.0%} (net of taker fee {TAKER_FEE_RATE:.0%}·p·(1-p) + {SLIPPAGE_FRACTION:.1%} slippage)  |  Kelly cap: {KELLY_CAP:.0%}  |  Max size: ${HARD_MAX_POSITION_SIZE:.2f}",
+        f"  Open pos     : {open_pos} / {setting('MAX_CONCURRENT_POSITIONS')}  |  Daily loss limit: ${daily_loss_limit():.2f} ({setting('DAILY_LOSS_STAKES'):g} stakes)",
+        f"  Edge thresh  : {EDGE_THRESHOLD:.0%} (net of taker fee {TAKER_FEE_RATE:.0%}·p·(1-p) + {SLIPPAGE_FRACTION:.1%} slippage)  |  Kelly cap: {KELLY_CAP:.0%}  |  Max size: ${setting('HARD_MAX_POSITION_SIZE'):.2f}",
         f"  Strict gates : agreement ≥ {MIN_MODEL_AGREEMENT:.0%}  |  spread < {MAX_MODEL_SPREAD}°F",
         f"  Shadow gates : agreement ≥ {SHADOW_MIN_AGREEMENT:.0%}  |  spread < {SHADOW_MAX_SPREAD}°F  |  {shadow_label}",
         f"  Market filter: vol ≥ ${MIN_VOLUME:,.0f}  |  ≤ {MAX_HOURS_TO_RESOLUTION:.0f}h to resolution",

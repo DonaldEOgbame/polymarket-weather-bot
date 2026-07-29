@@ -6,7 +6,8 @@ from py_clob_client_v2.clob_types import (
     MarketOrderArgsV2, OrderType, ApiCreds, BalanceAllowanceParams, AssetType,
 )
 from db import (execute_query, fetch_query, get_open_position, close_position_atomic,
-                open_position_atomic, reduce_position_atomic)
+                open_position_atomic, reduce_position_atomic,
+                update_bankroll, get_current_bankroll, add_notification)
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
 from scanner import (get_realtime_price, get_market_resolution, get_gamma_mid_price,
                      get_orderbook_depth_usd, get_wallet_token_sizes, get_wallet_sells)
@@ -16,14 +17,48 @@ from weather import get_signal_engine, get_bucket_probability, _norm_cdf
 from metar import get_station, fetch_day_extremes, round_half_away, final_extreme_f
 from config import (
     PAPER_MODE, POLYMARKET_PK, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE,
-    MAX_CONCURRENT_POSITIONS, STOP_LOSS_PCT, ENABLE_STOP_LOSS, EXIT_EDGE_FLOOR, CLOB_BASE_URL,
+    EXIT_EDGE_FLOOR, CLOB_BASE_URL,
     MIN_MODEL_COUNT, TAKER_FEE_RATE,
-    HOLD_WINNERS_TO_RESOLUTION, THESIS_BREAK_PROB_DELTA, TAKE_PROFIT_PRICE, SUSTAINED_LOSS_POLLS,
+    HOLD_WINNERS_TO_RESOLUTION, THESIS_BREAK_PROB_DELTA, SUSTAINED_LOSS_POLLS,
     SUSTAINED_LOSS_MIN_DROP, REENTRY_COOLDOWN_HOURS,
     ENABLE_SUSTAINED_LOSS_GUARD, ENABLE_THESIS_BREAK_EXIT,
     POLYMARKET_FUNDER, POLYMARKET_SIG_TYPE, EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN,
     ONE_TRADE_PER_CITY_DATE,
+    setting,
 )
+# MAX_CONCURRENT_POSITIONS / ENABLE_STOP_LOSS / STOP_LOSS_PCT / TAKE_PROFIT_PRICE
+# are dashboard-tunable at runtime and read via config.setting() at each
+# decision point — a settings change applies to the next entry/exit check
+# without a restart, including exits on ALREADY-OPEN positions (intended:
+# tightening the stop loss should protect the positions you hold now).
+
+
+def get_wallet_collateral(client=None):
+    """Real USDC collateral in the wallet right now, or None if unreadable.
+
+    Builds a throwaway client when none is supplied (used by the dashboard's
+    new-era endpoint, which runs in the Flask thread and has no Executor).
+    update_balance_allowance first: the CLOB's balance view is a CACHE that
+    does not track on-chain deposits by itself. Every failure returns None —
+    'unknown', never 'zero', because callers book money moves off this number."""
+    try:
+        if client is None:
+            if PAPER_MODE or not POLYMARKET_PK:
+                return None
+            kwargs = {"key": POLYMARKET_PK, "chain_id": 137}
+            if POLYMARKET_SIG_TYPE:
+                kwargs["signature_type"] = POLYMARKET_SIG_TYPE
+                kwargs["funder"] = POLYMARKET_FUNDER
+            client = ClobClient(CLOB_BASE_URL, **kwargs)
+            client.set_api_creds(client.create_or_derive_api_key())
+        client.update_balance_allowance(BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL, signature_type=POLYMARKET_SIG_TYPE))
+        raw = client.get_balance_allowance(BalanceAllowanceParams(
+            asset_type=AssetType.COLLATERAL, signature_type=POLYMARKET_SIG_TYPE))
+        return int(raw["balance"]) / 1e6
+    except Exception as e:
+        logging.warning(f"Wallet collateral read failed: {type(e).__name__}: {e}")
+        return None
 
 
 class Executor:
@@ -58,7 +93,17 @@ class Executor:
                 ))
             except Exception as e:
                 logging.warning(f"Balance-cache refresh failed at boot (non-fatal): {e}")
+        # Wallet-cash sync: last CLOB balance awaiting a second confirming read.
+        self._pending_wallet_bal = None
         self.reconcile_positions()
+        # First cash-sync pass at boot — NOT inside reconcile_positions, which
+        # early-returns when the book is flat, and a flat book waiting for
+        # funding is exactly when this matters. The two-read guard means boot
+        # alone never books; the first monitor cycle confirms and books.
+        try:
+            self.sync_wallet_cash(source="boot")
+        except Exception as e:
+            logging.error(f"Boot wallet-cash sync failed (non-fatal): {e}", exc_info=True)
         # Tracks consecutive below-entry mid-price polls per position id.
         # Reset on price recovery. Used by the sustained-loss guard in _check_exit_for_position.
         self._loss_streak: dict = {}
@@ -155,6 +200,73 @@ class Executor:
         if synced:
             logging.info(f"External-close sync ({source}): {synced} position(s) reconciled")
         return synced
+
+    def sync_wallet_cash(self, source="monitor"):
+        """Detect deposits and withdrawals made on Polymarket OUTSIDE the bot and
+        book them in the ledger automatically — no manual command, no restart.
+
+        Why this exists: on 2026-07-28 the user withdrew the entire balance on
+        the website and the ledger kept believing $20.91 while the wallet held
+        $0.00. The bot is meant to be in sync with Polymarket; cash is the one
+        thing external-close sync did not cover. This also makes RE-FUNDING
+        automatic: money lands in the wallet → the next cycle books a DEPOSIT →
+        the bot starts sizing against the real bankroll.
+
+        Guards, because this books money off an API number:
+          * two consecutive cycles must agree (within $0.50) before anything is
+            booked — a single flaky read can never move the ledger;
+          * a failed read is 'unknown', never 'zero';
+          * differences under $1 are ignored (fee dust, rounding);
+          * withdrawals are only booked while NO positions are open — right
+            after a settlement the wallet can briefly lag the ledger while
+            redemption clears, and that must not be booked as a withdrawal.
+            Deposits have no such ambiguity and are booked any time.
+        """
+        if PAPER_MODE or self.client is None:
+            return 0
+        bal = get_wallet_collateral(self.client)
+        if bal is None:
+            self._pending_wallet_bal = None   # unknown — start over next cycle
+            return 0
+        ledger = get_current_bankroll()
+        diff = round(bal - ledger, 2)
+        if abs(diff) < 1.00:
+            self._pending_wallet_bal = None
+            return 0
+
+        prev = self._pending_wallet_bal
+        if prev is None or abs(prev - bal) > 0.50:
+            # First sighting (or the number moved): remember it and wait for a
+            # confirming read next cycle before touching the ledger.
+            self._pending_wallet_bal = bal
+            logging.info(
+                f"Wallet/ledger divergence: wallet ${bal:.2f} vs ledger ${ledger:.2f} "
+                f"({diff:+.2f}) — awaiting confirming read before booking ({source})")
+            return 0
+        self._pending_wallet_bal = None
+
+        if diff > 0:
+            new_bal = update_bankroll("DEPOSIT", diff)
+            logging.info(f"AUTO-SYNC deposit: wallet ${bal:.2f} > ledger ${ledger:.2f} — "
+                         f"booked +${diff:.2f}, balance now ${new_bal:.2f}")
+            add_notification('deposit',
+                             f'Deposit detected on Polymarket: +${diff:.2f}. '
+                             f'Available cash now ${new_bal:.2f}.', severity='info')
+            return 1
+
+        open_n = fetch_query("SELECT COUNT(*) AS c FROM positions")[0]["c"]
+        if open_n:
+            logging.warning(
+                f"Wallet ${bal:.2f} below ledger ${ledger:.2f} with {open_n} open "
+                f"position(s) — could be redemption lag, NOT booking a withdrawal")
+            return 0
+        new_bal = update_bankroll("WITHDRAWAL", diff)   # diff is negative
+        logging.info(f"AUTO-SYNC withdrawal: wallet ${bal:.2f} < ledger ${ledger:.2f} — "
+                     f"booked {diff:.2f}, balance now ${new_bal:.2f}")
+        add_notification('withdrawal',
+                         f'Withdrawal detected on Polymarket: -${abs(diff):.2f}. '
+                         f'Available cash now ${new_bal:.2f}.', severity='warning')
+        return 1
 
     def _sync_one_external_close(self, pos, wallet, now, source):
         """Reconcile one DB position against the wallet. Returns 1 if the
@@ -559,8 +671,9 @@ class Executor:
                 except (ValueError, TypeError):
                     pass  # unparseable timestamp — don't block entry on it
 
-        if self.get_open_positions_count() >= MAX_CONCURRENT_POSITIONS:
-            logging.info(f"Max {MAX_CONCURRENT_POSITIONS} concurrent positions reached, skipping entry.")
+        max_concurrent = setting("MAX_CONCURRENT_POSITIONS")
+        if self.get_open_positions_count() >= max_concurrent:
+            logging.info(f"Max {max_concurrent} concurrent positions reached, skipping entry.")
             return
 
         # Alert if model count was low for this signal (degraded confidence)
@@ -650,10 +763,11 @@ class Executor:
         # phantom-$0.999 exit. At 0.98 there is almost nothing left to gain by
         # holding to $1, so securing it immediately is the intended behaviour.
         tp_ask, tp_bid = get_realtime_price(pos["token_id"])
-        if tp_bid >= TAKE_PROFIT_PRICE:
+        take_profit = setting("TAKE_PROFIT_PRICE")
+        if tp_bid >= take_profit:
             self._close_position(
                 pos, pnl_dollars=None,
-                exit_reason=f"Take Profit (bid {tp_bid:.3f} >= {TAKE_PROFIT_PRICE:.2f})",
+                exit_reason=f"Take Profit (bid {tp_bid:.3f} >= {take_profit:.2f})",
             )
             return
 
@@ -678,10 +792,10 @@ class Executor:
             # Measured 2026-07-26 on the three live collapses: by the time the target
             # date has passed the bid is $0.001-0.02, so this recovers cents, not
             # dollars. The real value is not leaving a fillable bid on the table.
-            if ENABLE_STOP_LOSS:
+            if setting("ENABLE_STOP_LOSS"):
                 sl_ask, sl_bid = get_realtime_price(pos["token_id"])
                 entry = pos["entry_price"]
-                if sl_bid > 0 and entry > 0 and (sl_bid - entry) / entry <= -STOP_LOSS_PCT:
+                if sl_bid > 0 and entry > 0 and (sl_bid - entry) / entry <= -setting("STOP_LOSS_PCT"):
                     _, bid_depth = get_orderbook_depth_usd(pos["token_id"])
                     shares_held = pos["size_usdc"] / entry
                     if bid_depth is not None and bid_depth >= shares_held * sl_bid:
@@ -764,13 +878,13 @@ class Executor:
                 f"Sustained loss ({streak} polls below entry, "
                 f"mid=${current_price:.3f} vs entry=${entry_price:.3f}, pnl={pnl_pct:.1%})"
             )
-        elif ENABLE_STOP_LOSS and pnl_pct <= -STOP_LOSS_PCT:
+        elif setting("ENABLE_STOP_LOSS") and pnl_pct <= -setting("STOP_LOSS_PCT"):
             exit_reason = f"Stop Loss ({pnl_pct:.1%})"
-        elif bid_price > 0 and exit_fill >= TAKE_PROFIT_PRICE:
+        elif bid_price > 0 and exit_fill >= setting("TAKE_PROFIT_PRICE"):
             # bid_price > 0 guard: on the Gamma fallback exit_fill is a stale
             # estimate with NO real book behind it — firing take-profit there books
             # a paper fill nobody would pay (the phantom-$0.999 failure class).
-            exit_reason = f"Take Profit (Price {exit_fill:.2f} >= {TAKE_PROFIT_PRICE:.2f})"
+            exit_reason = f"Take Profit (Price {exit_fill:.2f} >= {setting('TAKE_PROFIT_PRICE'):.2f})"
         else:
             signals = fetch_query(
                 "SELECT bucket_low, bucket_high, target_date, model_prob FROM signals "

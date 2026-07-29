@@ -371,7 +371,7 @@ class TestIntradayMetarExit:
         # Pin the stop loss off: this test asserts the METAR thesis-break exit fires,
         # and its 0.62 -> 0.19 drawdown (-69%) would trip STOP_LOSS_PCT (enabled
         # 2026-07-26) first, exiting for the wrong reason and hiding a real regression.
-        monkeypatch.setattr(ex, "ENABLE_STOP_LOSS", False)
+        monkeypatch.setitem(__import__("config")._RUNTIME, "ENABLE_STOP_LOSS", False)
         e = self._exec()
 
         # Target date is today
@@ -505,8 +505,8 @@ class TestSustainedLossGuard:
         import executor as ex
         monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", False)
         monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", False)
-        monkeypatch.setattr(ex, "ENABLE_STOP_LOSS", True)
-        monkeypatch.setattr(ex, "STOP_LOSS_PCT", 0.60)
+        monkeypatch.setitem(__import__("config")._RUNTIME, "ENABLE_STOP_LOSS", True)
+        monkeypatch.setitem(__import__("config")._RUNTIME, "STOP_LOSS_PCT", 0.60)
         monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
 
         for price, should_exit in [(0.23, True), (0.25, False)]:
@@ -533,8 +533,8 @@ class TestSustainedLossGuard:
         import executor as ex
         monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", False)
         monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", False)
-        monkeypatch.setattr(ex, "ENABLE_STOP_LOSS", True)
-        monkeypatch.setattr(ex, "STOP_LOSS_PCT", 0.60)
+        monkeypatch.setitem(__import__("config")._RUNTIME, "ENABLE_STOP_LOSS", True)
+        monkeypatch.setitem(__import__("config")._RUNTIME, "STOP_LOSS_PCT", 0.60)
         monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
 
         # entry 0.60, shares held = 2.0/0.60 = 3.333
@@ -564,7 +564,7 @@ class TestSustainedLossGuard:
         import executor as ex
         monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", False)
         monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", False)
-        monkeypatch.setattr(ex, "ENABLE_STOP_LOSS", False)
+        monkeypatch.setitem(__import__("config")._RUNTIME, "ENABLE_STOP_LOSS", False)
         monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
         monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.05, 0.05))
         monkeypatch.setattr(ex, "get_orderbook_depth_usd", lambda *a: (None, 50.0))
@@ -650,7 +650,7 @@ class TestSustainedLossGuard:
         # drawdown is shallower than STOP_LOSS_PCT (0.60) today, but pinning the flag
         # keeps the two guards independent so lowering the threshold later can't
         # silently turn this into a stop-loss test.
-        monkeypatch.setattr(ex, "ENABLE_STOP_LOSS", False)
+        monkeypatch.setitem(__import__("config")._RUNTIME, "ENABLE_STOP_LOSS", False)
         monkeypatch.setattr(ex, "SUSTAINED_LOSS_POLLS", 3)
         monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
         # deep drawdown (0.30 vs 0.60 entry = -50%), sustained across 5 polls
