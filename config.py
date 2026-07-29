@@ -1,8 +1,16 @@
 """
 Centralized configuration for the Polymarket Weather Bot.
 All tunable thresholds are loaded from environment variables with safe defaults.
+
+A small set of money/risk knobs (see MANAGED_SETTINGS) can additionally be
+overridden at runtime from the `settings` table, written by the dashboard's
+Settings tab. Those overrides are read ONCE here at import time: every module
+does `from config import X`, binding a copy of the value into its own namespace,
+so a settings change only reaches the bot after a process restart. That is why
+the Settings tab saves and then restarts rather than pretending to hot-reload.
 """
 import os
+import sqlite3
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -12,6 +20,64 @@ PAPER_MODE = os.getenv("PAPER_MODE", "true").lower() == "true"
 
 # --- Database ---
 DB_PATH = os.getenv("DB_PATH", "data/bot.db")
+
+# --- Runtime-editable overrides (dashboard Settings tab) ---
+# Only these keys may be overridden from the database. Everything else stays
+# code/env controlled — calibration constants and station tables in particular
+# are documented, version-tracked, and must not be editable from a web form.
+MANAGED_SETTINGS = (
+    "FIXED_POSITION_SIZE",
+    "HARD_MAX_POSITION_SIZE",
+    "MAX_CONCURRENT_POSITIONS",
+    "DAILY_LOSS_LIMIT",
+    "MAX_TOTAL_EXPOSURE_FRACTION",
+    "ENABLE_STOP_LOSS",
+    "STOP_LOSS_PCT",
+    "TAKE_PROFIT_PRICE",
+)
+
+
+def _load_overrides():
+    """Read managed overrides from the settings table using raw sqlite3.
+
+    Raw sqlite3 rather than db.py because db.py imports THIS module — the
+    dependency runs one way only and importing db here would be circular.
+
+    Every failure mode falls back to {}: the file may not exist yet, the table
+    is created by init_db() which runs AFTER this import (main.py), the DB may
+    be locked by the bot thread, or a row may be malformed. None of those may
+    stop the process from booting, so this never raises.
+    """
+    try:
+        if not os.path.exists(DB_PATH):
+            return {}
+        conn = sqlite3.connect(f"file:{DB_PATH}?mode=ro", uri=True, timeout=2.0)
+        try:
+            rows = conn.execute(
+                "SELECT key, value FROM settings"
+            ).fetchall()
+        finally:
+            conn.close()
+        return {k: v for k, v in rows if k in MANAGED_SETTINGS and v is not None}
+    except Exception:
+        return {}
+
+
+_DB_OVERRIDES = _load_overrides()
+
+
+def _tunable(key, default):
+    """Resolve a managed setting: DB override > env var > hardcoded default.
+
+    The DB wins over the environment because the Settings tab is the live
+    control surface — a stale fly.toml value silently overriding what the user
+    just saved in the UI is exactly the confusion this feature removes.
+    Returns a string either way, so the caller's float()/int()/== "true"
+    coercion is identical for stored and environment values.
+    """
+    if key in _DB_OVERRIDES:
+        return _DB_OVERRIDES[key]
+    return os.getenv(key, default)
 
 # --- Bankroll ---
 STARTING_BANKROLL = float(os.getenv("STARTING_BANKROLL", "40.0"))
@@ -178,13 +244,15 @@ BASE_FORECAST_ERROR = {
 # This codifies what was already happening — HARD_MAX_POSITION_SIZE was the
 # binding constraint on this bankroll and every real trade had sized exactly $2.
 # HARD_MAX_POSITION_SIZE is still enforced as a ceiling, so raising the flat size
-# above it does nothing until that is raised too.
-FIXED_POSITION_SIZE = float(os.getenv("FIXED_POSITION_SIZE", "2.0"))
-DAILY_LOSS_LIMIT = float(os.getenv("DAILY_LOSS_LIMIT", "-8.00"))
-HARD_MAX_POSITION_SIZE = float(os.getenv("HARD_MAX_POSITION_SIZE", "2.0"))
+# above it does nothing until that is raised too. The dashboard Settings tab
+# therefore writes BOTH from its single "stake per trade" field, so that silent
+# no-op state cannot be created from the UI.
+FIXED_POSITION_SIZE = float(_tunable("FIXED_POSITION_SIZE", "2.0"))
+DAILY_LOSS_LIMIT = float(_tunable("DAILY_LOSS_LIMIT", "-8.00"))
+HARD_MAX_POSITION_SIZE = float(_tunable("HARD_MAX_POSITION_SIZE", "2.0"))
 MAX_POSITION_FRACTION = float(os.getenv("MAX_POSITION_FRACTION", "0.10"))
-MAX_TOTAL_EXPOSURE_FRACTION = float(os.getenv("MAX_TOTAL_EXPOSURE_FRACTION", "0.70"))
-MAX_CONCURRENT_POSITIONS = int(os.getenv("MAX_CONCURRENT_POSITIONS", "10"))
+MAX_TOTAL_EXPOSURE_FRACTION = float(_tunable("MAX_TOTAL_EXPOSURE_FRACTION", "0.70"))
+MAX_CONCURRENT_POSITIONS = int(float(_tunable("MAX_CONCURRENT_POSITIONS", "10")))
 BASE_POSITION_FRACTION = float(os.getenv("BASE_POSITION_FRACTION", "0.05"))
 KELLY_CAP = float(os.getenv("KELLY_CAP", "0.08"))
 # Polymarket's real CLOB minimum order is ~$1; below this, live orders won't fill.
@@ -228,10 +296,10 @@ ONE_TRADE_PER_CITY_DATE = os.getenv("ONE_TRADE_PER_CITY_DATE", "true").lower() =
 # all three collapses and clears Chongqing's -56.2% dip, so it fires 3/3 correct with
 # no false positives. The margin above Chongqing is only ~4pp, so a future winner
 # dipping past -60% would flip this — revisit once the loss sample grows past 3.
-STOP_LOSS_PCT = float(os.getenv("STOP_LOSS_PCT", "0.60"))
-ENABLE_STOP_LOSS = os.getenv("ENABLE_STOP_LOSS", "true").lower() == "true"
+STOP_LOSS_PCT = float(_tunable("STOP_LOSS_PCT", "0.60"))
+ENABLE_STOP_LOSS = str(_tunable("ENABLE_STOP_LOSS", "true")).lower() == "true"
 EXIT_EDGE_FLOOR = float(os.getenv("EXIT_EDGE_FLOOR", "0.05"))
-TAKE_PROFIT_PRICE = float(os.getenv("TAKE_PROFIT_PRICE", "0.98"))
+TAKE_PROFIT_PRICE = float(_tunable("TAKE_PROFIT_PRICE", "0.98"))
 # Number of consecutive monitor cycles (each 5 min) the mid-price must sit materially
 # BELOW the entry price before the position is force-exited, regardless of what the edge
 # formula computes. This catches cases where the forecast probability is stale/wrong and

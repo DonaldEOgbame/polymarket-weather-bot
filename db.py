@@ -219,6 +219,18 @@ def init_db():
             )
         ''')
 
+        # Runtime-editable settings (dashboard Settings tab). Values are TEXT
+        # because config.py casts them with the same float()/int()/=="true"
+        # coercions it already applies to os.getenv strings — one code path for
+        # env vars and stored overrides alike.
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS settings (
+                key TEXT PRIMARY KEY,
+                value TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+        ''')
+
         # Indexes — safe to re-run; IF NOT EXISTS is idempotent
         conn.execute("CREATE INDEX IF NOT EXISTS idx_bankroll_id ON bankroll(id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_notifications_id ON notifications(id DESC)")
@@ -248,6 +260,96 @@ def _seed_bankroll(starting_amount):
             (now, "SEED", starting_amount, starting_amount, None)
         )
         conn.commit()
+
+
+def get_settings():
+    """All stored setting overrides as {key: str}. Empty dict if none are set.
+
+    config.py reads the same table directly with raw sqlite3 (it cannot import
+    this module — db.py imports config, so the dependency only runs one way).
+    This helper exists for the dashboard API, which already imports db."""
+    rows = fetch_query("SELECT key, value FROM settings")
+    return {r["key"]: r["value"] for r in rows}
+
+
+def save_settings(values):
+    """Upsert setting overrides from a {key: value} mapping. Booleans are
+    normalised to 'true'/'false' so config.py's .lower() == "true" check reads
+    them back correctly; everything else is str()'d.
+
+    Returns the list of keys whose stored value actually CHANGED, so the caller
+    can report (and log) exactly what the operator altered.
+
+    Takes effect only after a process restart — every module binds config values
+    at import time (from config import X), so nothing re-reads them in-flight."""
+    if not values:
+        return []
+    now = datetime.now(timezone.utc).isoformat()
+    changed = []
+    with _write_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            existing = {k: v for k, v in
+                        conn.execute("SELECT key, value FROM settings").fetchall()}
+            for key, value in values.items():
+                if isinstance(value, bool):
+                    stored = "true" if value else "false"
+                else:
+                    stored = str(value)
+                if existing.get(key) == stored:
+                    continue
+                changed.append(key)
+                conn.execute(
+                    "INSERT INTO settings (key, value, updated_at) VALUES (?, ?, ?) "
+                    "ON CONFLICT(key) DO UPDATE SET value=excluded.value, "
+                    "updated_at=excluded.updated_at",
+                    (key, stored, now),
+                )
+            conn.commit()
+    return changed
+
+
+# Back-compat alias — save_settings is the canonical name.
+set_settings = save_settings
+
+
+def record_deposit(amount, note=None):
+    """Append a DEPOSIT row: adds cash WITHOUT touching the P&L baseline.
+
+    Safe by construction — realized P&L is computed only from trades.pnl
+    (get_daily_pnl, the dashboard's stats), and the bankroll ledger is not an
+    input to any of it. So a deposit raises available cash and leaves every
+    performance figure untouched. STARTING_BANKROLL is deliberately not
+    updated: it is the historical seed the ledger opened with. Use
+    get_total_deposited() as the denominator for return-on-capital."""
+    amount = float(amount)
+    if amount <= 0:
+        raise ValueError("deposit amount must be positive")
+    new_balance = update_bankroll("DEPOSIT", amount)
+    logging.info(f"DEPOSIT ${amount:.2f} ({note or 'no note'}) -> balance ${new_balance:.2f}")
+    try:
+        add_notification('deposit',
+                         f'Deposit of ${amount:.2f} recorded. '
+                         f'Available cash now ${new_balance:.2f}.', severity='info')
+    except Exception:
+        pass  # a missing notification must never lose the deposit
+    return new_balance
+
+
+def get_total_deposited():
+    """Seed plus every recorded DEPOSIT — i.e. total capital the user has put in.
+
+    Returns are measured against this, not STARTING_BANKROLL: a deposit adds
+    cash without being profit, so dividing by the original seed would report a
+    funding event as a gain."""
+    rows = fetch_query(
+        "SELECT COALESCE(SUM(amount), 0) AS deposited FROM bankroll WHERE event='DEPOSIT'"
+    )
+    deposited = rows[0]["deposited"] if rows else 0.0
+    seed_rows = fetch_query(
+        "SELECT amount FROM bankroll WHERE event='SEED' ORDER BY id LIMIT 1"
+    )
+    seed = seed_rows[0]["amount"] if seed_rows else STARTING_BANKROLL
+    return seed + (deposited or 0.0)
 
 
 def get_current_bankroll():

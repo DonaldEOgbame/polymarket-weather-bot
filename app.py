@@ -15,10 +15,25 @@ from flask import Flask, jsonify, session, request, send_from_directory, redirec
 
 app = Flask(__name__, static_folder='web')
 app.secret_key = os.getenv('DASHBOARD_SECRET', 'stormedge-change-in-prod')
+# The settings endpoints can restart the bot and change position sizing, so a
+# cross-site POST is no longer a harmless nuisance. There is no CSRF token in
+# this app; SameSite=Lax is the cheap protection that actually covers it, since
+# it stops the browser attaching this cookie to cross-origin POSTs at all.
+app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
+app.config['SESSION_COOKIE_HTTPONLY'] = True
 
 DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', 'stormedge')
 DASHBOARD_EMAIL    = os.getenv('DASHBOARD_EMAIL', 'donaldemmaogbame@gmail.com')
-from config import DB_PATH, PAPER_MODE, DAILY_LOSS_LIMIT, STARTING_BANKROLL, MAX_CONCURRENT_POSITIONS
+# A settings save kills the process to reload config (see _schedule_restart).
+# That only works under a supervisor that brings it back — on Fly this is
+# min_machines_running=1 + auto_start_machines=true (fly.toml). Running locally
+# with `python app.py` there is nothing to restart it, so the save is refused
+# rather than leaving the operator staring at a dead dashboard.
+RESTART_SUPERVISED = os.getenv('RESTART_SUPERVISED', 'true').lower() == 'true'
+from config import (DB_PATH, PAPER_MODE, DAILY_LOSS_LIMIT, STARTING_BANKROLL,
+                    MAX_CONCURRENT_POSITIONS, MAX_TOTAL_EXPOSURE_FRACTION,
+                    FIXED_POSITION_SIZE, HARD_MAX_POSITION_SIZE, MIN_POSITION_SIZE,
+                    STOP_LOSS_PCT, ENABLE_STOP_LOSS, TAKE_PROFIT_PRICE)
 DB_PATH = os.path.abspath(DB_PATH)
 # Frozen snapshot of the paper-trading era, written once at live cutover.
 # When the dashboard session toggles into archive view, every query reads this
@@ -35,6 +50,59 @@ MODEL_META = {
     'gem_global':    (0.15, 'global', 'GEM Global'),
     'jma_gsm':       (0.30, 'AP', 'JMA GSM'),
 }
+
+
+# ---- Settings registry ----
+# key -> (type, min, max, label). Bounds are enforced server-side; the UI reads
+# them from /api/settings so both sides agree without duplicating the numbers.
+# Deliberately money+risk only: strategy gates and calibration constants are
+# fitted from resolved-trade data and carry their provenance in config.py
+# comments, so editing them from a web form would divorce value from evidence.
+SETTING_SPECS = {
+    'FIXED_POSITION_SIZE':        ('float', 1.0,     100.0, 'Stake per trade'),
+    'HARD_MAX_POSITION_SIZE':     ('float', 1.0,     100.0, 'Per-trade ceiling'),
+    'MAX_CONCURRENT_POSITIONS':   ('int',   1,       50,    'Max concurrent positions'),
+    # NEGATIVE dollars. A positive value would satisfy `daily_pnl <= limit` on
+    # the very first cycle and halt trading permanently (main.py check_circuit_breaker),
+    # so the upper bound makes that unrepresentable rather than merely discouraged.
+    'DAILY_LOSS_LIMIT':           ('float', -1000.0, -1.0,  'Daily loss limit'),
+    'MAX_TOTAL_EXPOSURE_FRACTION':('float', 0.05,    1.0,   'Total exposure cap'),
+    'ENABLE_STOP_LOSS':           ('bool',  None,    None,  'Stop loss'),
+    'STOP_LOSS_PCT':              ('float', 0.05,    0.95,  'Stop loss level'),
+    'TAKE_PROFIT_PRICE':          ('float', 0.50,    0.999, 'Take profit price'),
+}
+
+_TRUE_STRINGS = {'true', '1', 'yes', 'on'}
+
+
+def _coerce_setting(key, raw):
+    """JSON value or stored text -> correctly typed Python value."""
+    vtype = SETTING_SPECS[key][0]
+    if vtype == 'bool':
+        return raw if isinstance(raw, bool) else str(raw).strip().lower() in _TRUE_STRINGS
+    if vtype == 'int':
+        return int(float(raw))      # tolerate 8.0 from a JSON number
+    return float(raw)
+
+
+def _validate_setting(key, raw):
+    """Range check one setting. Returns (typed_value, error_message)."""
+    if key not in SETTING_SPECS:
+        return None, f"unknown setting '{key}'"
+    vtype, lo, hi, label = SETTING_SPECS[key]
+    if vtype == 'bool':
+        return _coerce_setting(key, raw), None
+    try:
+        value = _coerce_setting(key, raw)
+    except (TypeError, ValueError):
+        return None, f"{label}: '{raw}' is not a valid {vtype}"
+    if value != value or value in (float('inf'), float('-inf')):  # NaN / inf
+        return None, f"{label}: must be a finite number"
+    if lo is not None and value < lo:
+        return None, f"{label}: {value} is below the minimum {lo}"
+    if hi is not None and value > hi:
+        return None, f"{label}: {value} is above the maximum {hi}"
+    return value, None
 
 
 # ---- DB helpers ----
@@ -127,6 +195,201 @@ def api_archive_view():
     return jsonify(ok=True, archive_view=bool(session.get('view_archive')))
 
 
+def _total_deposited():
+    """SEED + every DEPOSIT = total capital ever put in.
+
+    Goes through _q() rather than db.get_total_deposited() so it honours
+    archive view like every other dashboard figure. Falls back to the seed
+    constant when the ledger has no SEED row (fresh/empty DB)."""
+    rows = _q("SELECT COALESCE(SUM(amount), 0) AS t FROM bankroll "
+              "WHERE event IN ('SEED','DEPOSIT')")
+    total = rows[0]['t'] if rows else 0.0
+    return total or STARTING_BANKROLL
+
+
+# ---- Settings ----
+
+def _restart_preconditions():
+    """(ok, reason) — whether it is safe to kill the process right now.
+
+    Refuses while any position is open. executor._submit_taker sends the CLOB
+    order BEFORE open_position_atomic writes the DB row, so a kill inside that
+    window strands shares on-chain with no position record. The window is
+    narrow but it is real money, and with the book flat this costs nothing.
+    """
+    if _viewing_archive():
+        return False, 'dashboard is in archive view — switch back to live first'
+    rows = _q('SELECT COUNT(*) AS c FROM positions')
+    open_n = rows[0]['c'] if rows else 0
+    if open_n:
+        return False, (f'{open_n} position(s) still open — sizing and exit settings '
+                       f'must not change mid-trade')
+    return True, None
+
+
+def _schedule_restart(reason):
+    """Exit shortly after the HTTP response flushes, so the client sees a 200
+    instead of a connection reset and can show a "restarting" state.
+
+    os._exit (not sys.exit) for the same reason as _start_bot below: this runs
+    on a timer thread, where SystemExit would unwind only that thread and leave
+    the process alive holding the OLD config — precisely the silent failure
+    this mechanism exists to prevent. Exit code 0: intentional, not a crash.
+    """
+    def _die():
+        logging.warning(f'Restarting process to apply settings: {reason}')
+        os._exit(0)
+    threading.Timer(1.5, _die).start()
+
+
+def _live_settings():
+    """What the bot is ACTUALLY running with — read from the config module, not
+    the settings table. The two differ exactly when a save happened but the
+    restart did not, and showing the running value is the honest one."""
+    import config as _cfg
+    return {key: getattr(_cfg, key) for key in SETTING_SPECS}
+
+
+@app.get('/api/settings')
+@require_auth
+def api_settings_get():
+    """Current effective settings, their bounds, and the bankroll context the
+    UI needs for its live impact readouts."""
+    from db import get_total_deposited
+    cash_rows = _q('SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1')
+    available_cash = cash_rows[0]['balance'] if cash_rows else STARTING_BANKROLL
+    pos_rows = _q('SELECT size_usdc FROM positions')
+    locked = sum(r['size_usdc'] for r in pos_rows)
+    ok, reason = _restart_preconditions()
+    return jsonify({
+        'values': _live_settings(),
+        'meta': {k: {'type': t, 'min': lo, 'max': hi, 'label': label}
+                 for k, (t, lo, hi, label) in SETTING_SPECS.items()},
+        'context': {
+            'available_cash': available_cash,
+            'locked_cash': locked,
+            'total_equity': available_cash + locked,
+            'open_positions': len(pos_rows),
+            'min_position_size': MIN_POSITION_SIZE,
+            'total_deposited': get_total_deposited(),
+            'paper_mode': PAPER_MODE,
+        },
+        'can_restart': ok,
+        'restart_blocked_reason': reason,
+        'restart_supervised': RESTART_SUPERVISED,
+        'archive_view': _viewing_archive(),
+    })
+
+
+@app.post('/api/settings')
+@require_auth
+def api_settings_post():
+    """Persist money/risk settings, then restart to load them.
+
+    The restart is required, not cosmetic: every module binds config values at
+    import time (from config import X), so the running process holds frozen
+    copies that no amount of DB writing can change.
+    Order is validate -> check preconditions -> save -> restart, so we never
+    leave the DB holding settings the process didn't pick up.
+    """
+    from db import save_settings, add_notification
+    if _viewing_archive():
+        return jsonify(error='cannot change settings while viewing the paper archive'), 409
+
+    d = request.get_json(silent=True) or {}
+    incoming = d.get('settings') or {}
+    if not isinstance(incoming, dict) or not incoming:
+        return jsonify(error='no settings supplied'), 400
+
+    typed, field_errors = {}, {}
+    for key, raw in incoming.items():
+        value, err = _validate_setting(key, raw)
+        if err:
+            field_errors[key] = err
+        else:
+            typed[key] = value
+
+    # Cross-field rules — need the live bankroll, so they live here rather than
+    # in the per-field bounds above.
+    live = _live_settings()
+
+    def eff(key):
+        return typed.get(key, live[key])
+
+    size, ceiling = eff('FIXED_POSITION_SIZE'), eff('HARD_MAX_POSITION_SIZE')
+    if size > ceiling:
+        field_errors['HARD_MAX_POSITION_SIZE'] = (
+            f'Ceiling ${ceiling:.2f} is below the ${size:.2f} stake — strategy.py takes '
+            f'min() of the two, so every trade would silently clamp to ${ceiling:.2f}.')
+    if size < MIN_POSITION_SIZE:
+        field_errors['FIXED_POSITION_SIZE'] = (
+            f'${size:.2f} is below the ${MIN_POSITION_SIZE:.2f} CLOB minimum — '
+            f'live orders would not fill.')
+
+    cash_rows = _q('SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1')
+    available_cash = cash_rows[0]['balance'] if cash_rows else STARTING_BANKROLL
+    pos_rows = _q('SELECT size_usdc FROM positions')
+    total_equity = available_cash + sum(r['size_usdc'] for r in pos_rows)
+    if size > available_cash:
+        field_errors['FIXED_POSITION_SIZE'] = (
+            f'${size:.2f} exceeds available cash ${available_cash:.2f} — every signal '
+            f'would be skipped for insufficient funds.')
+    exposure_cap = total_equity * eff('MAX_TOTAL_EXPOSURE_FRACTION')
+    if size > exposure_cap:
+        field_errors['MAX_TOTAL_EXPOSURE_FRACTION'] = (
+            f'The exposure cap allows ${exposure_cap:.2f} in total, less than one '
+            f'${size:.2f} position — no trade could ever open.')
+
+    if field_errors:
+        return jsonify(error='validation failed', field_errors=field_errors), 400
+
+    ok, reason = _restart_preconditions()
+    if not ok:
+        return jsonify(error=reason, can_restart=False), 409
+    if not RESTART_SUPERVISED:
+        return jsonify(error='RESTART_SUPERVISED=false: nothing would bring this process '
+                             'back up, so settings were NOT saved.'), 409
+
+    changed = save_settings({k: v for k, v in typed.items() if v != live[k]})
+    if not changed:
+        return jsonify(ok=True, restarting=False, changed=[],
+                       message='no changes — nothing to apply')
+    add_notification('settings', f'Settings changed: {", ".join(changed)}. Restarting to apply.',
+                     severity='warning')
+    _schedule_restart(f'settings changed: {", ".join(changed)}')
+    return jsonify(ok=True, restarting=True, changed=changed, restart_eta_seconds=30)
+
+
+@app.post('/api/deposit')
+@require_auth
+def api_deposit():
+    """Record a cash deposit in the bankroll ledger.
+
+    Append-only and additive: does NOT touch the P&L baseline (realized P&L is
+    computed from trades.pnl alone) and needs NO restart — bankroll is read
+    live from the DB on every scan, never bound at import.
+    """
+    from db import record_deposit, get_total_deposited
+    if _viewing_archive():
+        return jsonify(error='cannot record a deposit while viewing the paper archive'), 409
+    d = request.get_json(silent=True) or {}
+    try:
+        amount = round(float(d.get('amount')), 2)
+    except (TypeError, ValueError):
+        return jsonify(error='amount must be a number'), 400
+    if amount <= 0:
+        return jsonify(error='deposit amount must be positive'), 400
+    # Catches a Naira-for-dollars mixup (₦200,000 typed instead of ~$125).
+    if amount > 10000:
+        return jsonify(error='deposits above $10,000 are blocked as a typo guard — '
+                             'is this figure in dollars?'), 400
+    if not d.get('confirm'):
+        return jsonify(error='deposit requires confirm=true'), 400
+    new_balance = record_deposit(amount, note=(d.get('note') or '')[:200])
+    return jsonify(ok=True, amount=amount, new_balance=new_balance,
+                   total_deposited=get_total_deposited())
+
+
 @app.get('/api/data')
 @require_auth
 def api_data():
@@ -171,6 +434,11 @@ def api_data():
         'circuit_breaker_used': circuit_used,
         'circuit_tripped': circuit_tripped,
         'max_concurrent_positions': MAX_CONCURRENT_POSITIONS,
+        'max_total_exposure_fraction': MAX_TOTAL_EXPOSURE_FRACTION,
+        # Seed + every deposit = total capital put in. The return figure divides
+        # by this, not starting_bankroll: a deposit adds cash without being
+        # profit, so the old denominator would book a funding event as a gain.
+        'total_deposited': _total_deposited(),
     }
 
     # ---- open positions (with live mid prices from CLOB) ----
