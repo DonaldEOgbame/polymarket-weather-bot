@@ -53,7 +53,8 @@ STATION_ICAO = {
     "Istanbul": ("LTFM", "Europe/Istanbul"),
     "Madrid": ("LEMD", "Europe/Madrid"),
     "Milan": ("LIMC", "Europe/Rome"),
-    "Moscow": ("UUDD", "Europe/Moscow"),
+    # Vnukovo, not Domodedovo — matches the NOAA/UUWW source Moscow markets name.
+    "Moscow": ("UUWW", "Europe/Moscow"),
     "Munich": ("EDDM", "Europe/Berlin"),
     "Warsaw": ("EPWA", "Europe/Warsaw"),
     "Tel Aviv": ("LLBG", "Asia/Jerusalem"),
@@ -85,6 +86,56 @@ STATION_ICAO = {
 
 # in-process cache: (icao, date_str) -> (max_c, min_c)
 _METAR_CACHE: dict = {}
+
+# --- Hong Kong Observatory (HKO) settlement source ---
+# HK markets do NOT settle on Wunderground/airport METAR like every other city: the
+# market text names the HK Observatory's "Absolute Daily Max/Min (deg. C)" from its
+# Daily Extract (Tsim Sha Tsui HQ — the airport reads ~1°C+ cooler; on 2026-07-26 the
+# airport METAR max was 25°C while HKO published 28.3°C, which is exactly how both
+# July HK losses "surprised" the model). The Daily Extract endpoint below is JSON
+# (despite the .xml name), one row per COMPLETED local day — in-progress days are
+# simply absent, which is the same settlement gate the market itself uses ("can not
+# resolve until data for this date has been published").
+# Precision: HKO publishes ONE DECIMAL and the market takes the integer range that
+# CONTAINS the reading, so 28.9°C settles the 28°C bucket — floor, NOT round-half-away
+# (which would call it 29 and mis-score every x.5-x.9 boundary day).
+HKO_DAILY_EXTRACT_URL = "https://www.hko.gov.hk/cis/dailyExtract/dailyExtract_{ym}.xml"
+HKO_CITIES = {"Hong Kong"}
+# cache: "YYYYMM" -> {day_int: (max_c, min_c)}; only fully-elapsed months are cached
+# permanently — the current month grows a row each day and is refetched.
+_HKO_CACHE: dict = {}
+
+
+def _fetch_hko_month(year, month):
+    ym = f"{year:04d}{month:02d}"
+    if ym in _HKO_CACHE:
+        return _HKO_CACHE[ym]
+    days = {}
+    try:
+        resp = safe_get(HKO_DAILY_EXTRACT_URL.format(ym=ym), timeout=30)
+        if resp.status_code == 200:
+            for row in resp.json()["stn"]["data"][0]["dayData"]:
+                # rows: [day, pressure, ABS MAX, mean, ABS MIN, dewpt, RH..., rain];
+                # trailing "Mean/Total" / "Normal" rows have non-numeric day fields.
+                try:
+                    day = int(row[0])
+                    days[day] = (float(row[2]), float(row[4]))
+                except (ValueError, IndexError):
+                    continue
+    except Exception as e:
+        logging.error(f"HKO daily extract fetch failed for {ym}: {e}")
+        return days
+    now_hk = datetime.now(ZoneInfo("Asia/Hong_Kong"))
+    if (year, month) < (now_hk.year, now_hk.month):
+        _HKO_CACHE[ym] = days
+    return days
+
+
+def hko_day_extremes_c(date_str):
+    """(max_c, min_c) from the HKO Daily Extract for a local calendar day, one-decimal
+    precision. (None, None) until HKO publishes the day (typically next morning HKT)."""
+    y, m, d = (int(x) for x in date_str.split("-"))
+    return _fetch_hko_month(y, m).get(d, (None, None))
 
 
 def get_station(city_key):
@@ -160,10 +211,19 @@ def final_extreme_f(city_key, date_str, is_high):
     """The SETTLED daily extreme: like resolved_extreme_f, but returns None until the
     station's local calendar day has fully elapsed. Settlement and calibration must
     use this — resolved_extreme_f mid-day returns the partial max (e.g. Guangzhou's
-    8am temperature), which booked phantom wins and poisoned model_accuracy."""
+    8am temperature), which booked phantom wins and poisoned model_accuracy.
+
+    HKO cities additionally wait for the Observatory to PUBLISH the day (the market's
+    own resolution gate) — the airport METAR is never used to settle them."""
     icao, tz = get_station(city_key)
     if not icao or not day_complete(tz, date_str):
         return None
+    if city_key in HKO_CITIES:
+        mx_c, mn_c = hko_day_extremes_c(date_str)
+        val_c = mx_c if is_high else mn_c
+        if val_c is None:
+            return None  # not yet published — the market can't resolve either
+        return math.floor(val_c) * 9.0 / 5.0 + 32.0  # "range contains" = floor
     return resolved_extreme_f(city_key, date_str, is_high)
 
 
@@ -174,16 +234,44 @@ def resolved_extreme_f(city_key, date_str, is_high):
     intraday bucket-bust checks only; settlement must go through final_extreme_f.
 
     Rounds to whole °C first (the market's resolution precision) then converts, so a
-    31.4°C reading and a 30.6°C reading both land where the market actually settles."""
+    31.4°C reading and a 30.6°C reading both land where the market actually settles.
+
+    HKO cities: uses the published HKO value (floor semantics) once available; before
+    publication falls back to the airport METAR as a rough intraday proxy — good
+    enough for bucket-bust monitoring, never used for settlement (final_extreme_f)."""
     icao, tz = get_station(city_key)
     if not icao:
         return None
+    if city_key in HKO_CITIES:
+        mx_c, mn_c = hko_day_extremes_c(date_str)
+        val_c = mx_c if is_high else mn_c
+        if val_c is not None:
+            return math.floor(val_c) * 9.0 / 5.0 + 32.0
+        # fall through to airport METAR as intraday approximation
     mx_c, mn_c = fetch_day_extremes(icao, tz, date_str)
     val_c = mx_c if is_high else mn_c
     if val_c is None:
         return None
     rounded_c = round_half_away(val_c)  # whole-°C resolution precision
     return rounded_c * 9.0 / 5.0 + 32.0
+
+
+def day_extremes_f(city_key, date_str):
+    """Settlement-grade (max_f, min_f) for a city's local calendar day, on the ruler
+    and precision semantics the market actually pays on. (None, None) until the day
+    is complete (and, for HKO cities, published). This is the function calibration
+    should score against — fetch_day_extremes + round_half_away is the WU/METAR
+    convention only."""
+    icao, tz = get_station(city_key)
+    if not icao or not day_complete(tz, date_str):
+        return (None, None)
+    if city_key in HKO_CITIES:
+        mx_c, mn_c = hko_day_extremes_c(date_str)
+        to_f = lambda c: math.floor(c) * 9.0 / 5.0 + 32.0 if c is not None else None
+    else:
+        mx_c, mn_c = fetch_day_extremes(icao, tz, date_str)
+        to_f = lambda c: round_half_away(c) * 9.0 / 5.0 + 32.0 if c is not None else None
+    return (to_f(mx_c), to_f(mn_c))
 
 
 def round_half_away(v):

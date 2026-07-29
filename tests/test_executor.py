@@ -840,3 +840,53 @@ class TestWalletDataApiFilters:
         assert sc.get_wallet_token_sizes("0xdead") is None
         monkeypatch.setattr(sc, "safe_get", lambda *a, **k: self._Resp(503, []))
         assert sc.get_wallet_token_sizes("0xdead") is None
+
+
+class TestOneTradePerCityDate:
+    """Sibling buckets on the same city/target-date settle on ONE realized
+    temperature — a second entry there is stacked exposure, not a new bet. Any prior
+    trade (open or closed) for the pair must block entry."""
+
+    class _Opp:
+        market_id = "0xnew"
+        city = "Hong Kong"
+        date = "2026-07-26"
+        question = "q"
+        is_high = True
+
+    def _exec(self):
+        return Executor.__new__(Executor)
+
+    def _signal(self):
+        return {"opp": self._Opp(), "side": "NO", "size_usdc": 2.0, "price": 0.6,
+                "edge": 0.2, "model_prob": 0.15, "token_id": "t", "model_count": 4}
+
+    def test_second_trade_same_city_date_blocked(self, monkeypatch):
+        import executor as ex
+        monkeypatch.setattr(ex, "get_open_position", lambda mid: None)
+        calls = []
+        def fake_fetch(sql, params=()):
+            calls.append(sql)
+            if "FROM trades WHERE city=?" in sql:
+                return [{"id": 63}]  # prior HK trade that day
+            return []
+        monkeypatch.setattr(ex, "fetch_query", fake_fetch)
+        opened = []
+        monkeypatch.setattr(ex, "open_position_atomic",
+                            lambda **kw: opened.append(kw))
+        self._exec().execute_trade(self._signal())
+        assert opened == []          # entry refused
+        assert any("FROM trades WHERE city=?" in c for c in calls)
+
+    def test_first_trade_for_city_date_proceeds_to_later_gates(self, monkeypatch):
+        """With no prior city/date trade, execution must get PAST the restriction
+        (we stop it at the concurrent-positions gate to avoid a full order path)."""
+        import executor as ex
+        monkeypatch.setattr(ex, "get_open_position", lambda mid: None)
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
+        monkeypatch.setattr(Executor, "get_open_positions_count", lambda self: 10**9)
+        opened = []
+        monkeypatch.setattr(ex, "open_position_atomic",
+                            lambda **kw: opened.append(kw))
+        self._exec().execute_trade(self._signal())
+        assert opened == []  # blocked at max-concurrent, i.e. restriction passed

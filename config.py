@@ -115,15 +115,30 @@ CONVECTIVE_CITIES = set(os.getenv("CONVECTIVE_CITIES", "Miami,Houston,Dallas,Atl
 # reproduces the training condition (they compose, they do not double-count). If you
 # ever change or disable NARROW_BUCKET_STD_INFLATION, re-fit these from fresh signals.
 ENABLE_PROB_CALIBRATION = os.getenv("ENABLE_PROB_CALIBRATION", "true").lower() == "true"
-# Constants RE-FIT against the METAR resolution ruler (373 forecasts, 2026-07-04) — the
-# feed Polymarket actually settles on. Against METAR the raw model is even more
-# overconfident than it looked against ERA5 (predicted 5% → observed 19%; 15% → 29%),
-# so the correcting curve is stronger: low slope compresses probabilities toward the
-# realized base rate, reflecting that our forecast has less discriminating power against
-# noisy whole-°C observations than the smooth reanalysis suggested. (Old ERA5 fit was
-# INTERCEPT=1.1182 SLOPE=1.1619.) Re-fit from `calibrate.py --source metar` as data grows.
-PROB_CALIBRATION_INTERCEPT = float(os.getenv("PROB_CALIBRATION_INTERCEPT", "-0.1715"))
-PROB_CALIBRATION_SLOPE = float(os.getenv("PROB_CALIBRATION_SLOPE", "0.4457"))
+# Constants RE-FIT 2026-07-28 on the full live-era window (signals Jul 19-29, 749
+# gate-passing markets over ~10 days, scored on the markets' ACTUAL rulers — HKO Daily
+# Extract for Hong Kong, Vnukovo for Moscow, WU/METAR elsewhere), CONDITIONED on the
+# entry gate (raw NO edge >= 0.08) and weighted one-market-one-vote. The conditioning
+# is the point: unconditionally the raw Gaussian probs are now nearly calibrated
+# (fitted slope ~1.18 ≈ identity, sigma std(z) 1.01/1.15 across the two windows) —
+# but on the slice where the model DISAGREES with the market
+# enough to trade, the market carries real information and the model must be pulled
+# toward it (adverse selection). Measured on that gated slice, the OLD constants said
+# 25% where reality was 31%, and 32% where reality was 49.5% — the fake-edge zone that
+# produced the July live losses (NY/GZ/TLV: model 17-23%, market 34-40%, market right).
+# IMPORTANT: these constants are fit THROUGH the taper below (_calibrate_prob blends
+# the logistic toward identity as p→0.5), i.e. chosen so the FINAL pipeline output —
+# not the bare logistic — matches observed hit rates. A bare-logistic fit of the same
+# data (+0.372/0.683) under-corrects by up to 9pp once the taper dilutes it.
+# Deployed mapping: raw 0.15→0.31, 0.20→0.35, 0.30→0.40 (old: 0.28/0.31/0.37) —
+# shaves 3-8pp off mid-range NO edges so only genuinely clear disagreements trade.
+# On the merged gated slice this lands predicted≈observed in the heavy bins (34.3%
+# predicted vs 34.7% observed where the old constants said 32% and reality was 49.5%).
+# (History: ERA5 fit 1.1182/1.1619; unconditional METAR fit 2026-07-04 -0.1715/0.4457.)
+# Re-fit from a bigger window as live data grows; fit harness: calfit.py session
+# scratchpad 2026-07-28 (invert deployed mapping → raw, taper-aware logistic, gated cells).
+PROB_CALIBRATION_INTERCEPT = float(os.getenv("PROB_CALIBRATION_INTERCEPT", "0.8000"))
+PROB_CALIBRATION_SLOPE = float(os.getenv("PROB_CALIBRATION_SLOPE", "0.7480"))
 
 # Floor on the calibrated bucket probability (bounded AND open-ended). The
 # residual overconfidence after Platt lives in the extreme-low tail: on resolved
@@ -175,14 +190,25 @@ KELLY_CAP = float(os.getenv("KELLY_CAP", "0.08"))
 # Polymarket's real CLOB minimum order is ~$1; below this, live orders won't fill.
 MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "1.00"))
 
-# Refuse entries at or above this price. Buying NO at 0.88 risks the full stake to
-# win $0.14 per $1 — a 0.16:1 payoff needing an ~88% hit rate just to break even.
-# Measured over all 43 closed trades (paper+live, replayed against Polymarket's own
-# tick history 2026-07-26): the 0.80+ band deployed $24.00 of $82.60 total capital
-# and returned $1.87, while the sub-0.60 band deployed $20.25 and returned $16.79.
-# Capping at 0.75 gives up $2.45 of P&L but frees $26.00 of capital — ROI rises from
-# 37.8% to 50.8%. It also blocks the Guangzhou 2026-07-14 loss (entry 0.880) outright.
-MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.75"))
+# Refuse entries at or above this price. DISABLED at 1.00 by user decision 2026-07-28:
+# in the live era the seven >=0.75 entries collectively netted +$1.00 with zero busts,
+# so the cap was giving up realized P&L to insure against a bust class the new
+# calibration constants (which price the tail up directly) and the per-city/date entry
+# limit already mitigate. The knob and both gate checks are retained — the original
+# case for 0.75 (43-trade replay 2026-07-26: 0.80+ band returned $1.87 on $24.00
+# deployed vs $16.79 on $20.25 sub-0.60; a 0.16:1 payoff needs ~88% hit rate to break
+# even) still stands if the bust class ever reappears. Set back below 1.00 to re-arm.
+MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "1.00"))
+
+# One trade per city per target day (user rule 2026-07-28). The live log shows repeat
+# same-city/same-day entries stacking correlated risk on one weather outcome: two Hong
+# Kong entries on 07-26 (one lost), two Shenzhen on 07-27, two Sao Paulo on 07-29, and
+# the paper-era Guangzhou market took 9 entries. Different buckets on the same
+# city/date are NOT independent bets — they share one realized temperature — so a
+# second "opportunity" there is mostly the same exposure at worse aggregate odds.
+# Checked against the trades table (any prior entry for the city/date blocks, open or
+# closed, so a stopped-out city can't be re-entered via a sibling bucket either).
+ONE_TRADE_PER_CITY_DATE = os.getenv("ONE_TRADE_PER_CITY_DATE", "true").lower() == "true"
 
 # Exit when the mid has fallen this far below entry. Set from a replay of all 52
 # closed trades against Polymarket's own tick history (2026-07-26).

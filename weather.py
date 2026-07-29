@@ -68,7 +68,12 @@ STATIONS = {
     "Istanbul": {"lat": 41.2753, "lon": 28.7519, "region": "EU"},      # Istanbul Airport (LTFM)
     "Madrid": {"lat": 40.4936, "lon": -3.5668, "region": "EU"},        # Barajas (LEMD)
     "Milan": {"lat": 45.6306, "lon": 8.7231, "region": "EU"},          # Malpensa (LIMC)
-    "Moscow": {"lat": 55.4088, "lon": 37.9063, "region": "EU"},        # Domodedovo (UUDD)
+    # Vnukovo, NOT Domodedovo: Moscow markets resolve on NOAA's feed for Vnukovo
+    # International (weather.gov/wrh/timeseries?site=UUWW per the market description).
+    # The airport-convention default picked Domodedovo, ~40km away — same class of
+    # bug as the Hong Kong Observatory fix. Audited across all Gamma weather markets
+    # 2026-07-28; every other city's station matched.
+    "Moscow": {"lat": 55.5915, "lon": 37.2615, "region": "EU"},        # Vnukovo (UUWW)
     "Munich": {"lat": 48.3537, "lon": 11.7750, "region": "EU"},        # Munich (EDDM)
     "Warsaw": {"lat": 52.1657, "lon": 20.9671, "region": "EU"},        # Chopin (EPWA)
     # Middle East / Africa (GFS unavailable — GLOBAL blend, no GFS).
@@ -103,7 +108,13 @@ STATIONS = {
     "Kuala Lumpur": {"lat": 2.7456, "lon": 101.7072, "region": "AP"},  # KLIA (WMKK)
     "Jakarta": {"lat": -6.1256, "lon": 106.6559, "region": "AP"},      # Soekarno-Hatta (WIII)
     "Manila": {"lat": 14.5086, "lon": 121.0197, "region": "AP"},       # NAIA (RPLL)
-    "Karachi": {"lat": 24.8936, "lon": 66.9385, "region": "AP"},       # Masroor Airbase (OPMR)
+    # Karachi REMOVED (untradeable until resolved): Polymarket's own market description
+    # contradicts itself — the text names "Masroor Airbase Station" (OPMR) but the
+    # resolution URL in the same description points at wunderground .../pk/karachi/OPKC
+    # (Jinnah Intl, ~10km away). Which station actually settles is unknowable from the
+    # text; a wrong guess is the Hong Kong bug all over again. Re-add once a resolved
+    # Karachi market's outcome is checked against both stations' readings.
+    # "Karachi": {"lat": 24.8936, "lon": 66.9385, "region": "AP"},     # Masroor Airbase (OPMR)
     "Lucknow": {"lat": 26.7606, "lon": 80.8893, "region": "AP"},       # CCS Intl (VILK)
     "Wellington": {"lat": -41.3272, "lon": 174.8053, "region": "AP"},  # Wellington Intl (NZWN)
 }

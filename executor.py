@@ -22,6 +22,7 @@ from config import (
     SUSTAINED_LOSS_MIN_DROP, REENTRY_COOLDOWN_HOURS,
     ENABLE_SUSTAINED_LOSS_GUARD, ENABLE_THESIS_BREAK_EXIT,
     POLYMARKET_FUNDER, POLYMARKET_SIG_TYPE, EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN,
+    ONE_TRADE_PER_CITY_DATE,
 )
 
 
@@ -515,6 +516,24 @@ class Executor:
         if get_open_position(opp.market_id):
             logging.info(f"Already holding position in {opp.market_id} — skipping")
             return
+
+        # One trade per city per target day. Sibling buckets on the same city/date all
+        # settle on the SAME realized temperature, so a second entry there is stacked
+        # exposure to one weather outcome, not a new bet (two HK entries 07-26, two
+        # Shenzhen 07-27, two Sao Paulo 07-29 all did this live). Any prior trade for
+        # the pair blocks — open or closed — so a stop-out can't be re-entered through
+        # a different bucket of the same event either.
+        if ONE_TRADE_PER_CITY_DATE and opp.city and opp.date:
+            prior = fetch_query(
+                "SELECT id FROM trades WHERE city=? AND target_date=? LIMIT 1",
+                (opp.city, opp.date),
+            )
+            if prior:
+                logging.info(
+                    f"City/date already traded ({opp.city} {opp.date}, trade "
+                    f"{prior[0]['id']}) — one trade per city per day, skipping"
+                )
+                return
 
         # Re-entry cooldown: don't re-open a market we recently EXITED. Without this the
         # bot churns — a position force-closed on noise gets re-bought on the next scan,

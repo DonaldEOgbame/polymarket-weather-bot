@@ -38,7 +38,7 @@ from datetime import datetime, timezone
 from db import fetch_query
 from weather import WEIGHTS, get_station_coords
 from utils import get_session
-from metar import fetch_day_extremes, get_station, round_half_away
+from metar import day_extremes_f
 
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 
@@ -54,19 +54,14 @@ def _reconstruct_mean(raw_models: dict, region: str):
 
 
 def _fetch_actuals_metar(city_key, date_str, cache):
-    """Return (actual_max_F, actual_min_F) from the METAR observation feed — the SAME
-    source Polymarket resolves against — rounded to whole °C then converted to °F.
-    (None, None) if the station is unmapped or the day isn't published yet."""
+    """Return (actual_max_F, actual_min_F) from the SAME source and precision
+    semantics the market settles on — WU/METAR whole-°C for most cities, the HKO
+    Daily Extract with floor ("range contains") semantics for Hong Kong. (None, None)
+    if the station is unmapped or the day isn't complete/published yet."""
     key = ("metar", city_key, date_str)
     if key in cache:
         return cache[key]
-    icao, tz = get_station(city_key)
-    result = (None, None)
-    if icao:
-        mx_c, mn_c = fetch_day_extremes(icao, tz, date_str)
-        def to_f(c):
-            return round_half_away(c) * 9.0 / 5.0 + 32.0 if c is not None else None
-        result = (to_f(mx_c), to_f(mn_c))
+    result = day_extremes_f(city_key, date_str)
     cache[key] = result
     return result
 

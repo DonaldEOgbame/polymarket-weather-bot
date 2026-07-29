@@ -91,3 +91,71 @@ class TestDayComplete:
 
     def test_distant_past_is_complete(self):
         assert metar.day_complete("Asia/Shanghai", "2026-07-01") is True
+
+
+class TestHKOSettlement:
+    """Hong Kong settles on the HKO Daily Extract (one-decimal, 'range contains' =
+    floor), never on the airport METAR the other cities use."""
+
+    HKO_PAYLOAD = {"stn": {"data": [{"month": 7, "dayData": [
+        ["26", " 997.5", "28.3", "26.1", "24.6", "23.9", "87", "97", "109.2"],
+        ["27", "1005.7", "28.7", "26.8", "25.2", "24.4", "87", "87", " 14.9"],
+        ["Mean/Total", "1005.5", "31.5", "29.0", "26.9", "25.4", "82", "79", "616.0"],
+        ["Normal", "1005.6", "31.6", "28.9", "26.9", "25.2", "81", "72", "385.8"],
+    ]}]}}
+
+    def _mock_hko(self, monkeypatch):
+        class Resp:
+            status_code = 200
+            def json(self):
+                return TestHKOSettlement.HKO_PAYLOAD
+        monkeypatch.setattr(metar, "safe_get", lambda *a, **k: Resp())
+        metar._HKO_CACHE.clear()
+
+    def test_floor_not_round_half_away(self, monkeypatch):
+        """28.7°C is the 28 bucket ('range that contains'), not 29 — the one reading
+        where WU rounding and HKO semantics disagree."""
+        self._mock_hko(monkeypatch)
+        monkeypatch.setattr(metar, "day_complete", lambda tz, ds: True)
+        val = metar.final_extreme_f("Hong Kong", "2026-07-27", is_high=True)
+        assert val == 28 * 9.0 / 5.0 + 32.0  # floor(28.7)=28, NOT round_half_away=29
+
+    def test_summary_rows_skipped(self, monkeypatch):
+        self._mock_hko(monkeypatch)
+        assert metar.hko_day_extremes_c("2026-07-26") == (28.3, 24.6)
+        assert metar.hko_day_extremes_c("2026-07-31") == (None, None)
+
+    def test_settlement_waits_for_publication(self, monkeypatch):
+        """Day complete but HKO row not yet published -> final_extreme_f must return
+        None (the market itself cannot resolve yet), NEVER the airport METAR."""
+        self._mock_hko(monkeypatch)
+        monkeypatch.setattr(metar, "day_complete", lambda tz, ds: True)
+        monkeypatch.setattr(metar, "fetch_day_extremes",
+                            lambda *a: (25.0, 22.0))  # airport data exists
+        assert metar.final_extreme_f("Hong Kong", "2026-07-28", is_high=True) is None
+
+    def test_intraday_falls_back_to_airport(self, monkeypatch):
+        """Before publication, resolved_extreme_f (monitoring only) may use the
+        airport METAR as a rough running proxy."""
+        self._mock_hko(monkeypatch)
+        monkeypatch.setattr(metar, "fetch_day_extremes", lambda *a: (25.4, 22.0))
+        val = metar.resolved_extreme_f("Hong Kong", "2026-07-28", is_high=True)
+        assert val == 25 * 9.0 / 5.0 + 32.0
+
+    def test_day_extremes_f_other_cities_unchanged(self, monkeypatch):
+        """Non-HKO cities keep the WU round-half-away convention."""
+        monkeypatch.setattr(metar, "day_complete", lambda tz, ds: True)
+        monkeypatch.setattr(metar, "fetch_day_extremes", lambda *a: (30.5, 24.5))
+        mx, mn = metar.day_extremes_f("Tokyo", "2026-07-27")
+        assert mx == 31 * 9.0 / 5.0 + 32.0   # 30.5 rounds AWAY to 31
+        assert mn == 25 * 9.0 / 5.0 + 32.0
+
+    def test_current_month_not_cached(self, monkeypatch):
+        self._mock_hko(monkeypatch)
+        from datetime import datetime
+        from zoneinfo import ZoneInfo
+        now_hk = datetime.now(ZoneInfo("Asia/Hong_Kong"))
+        metar._fetch_hko_month(now_hk.year, now_hk.month)
+        assert f"{now_hk.year:04d}{now_hk.month:02d}" not in metar._HKO_CACHE
+        metar._fetch_hko_month(2025, 3)
+        assert "202503" in metar._HKO_CACHE
