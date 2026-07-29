@@ -433,107 +433,6 @@ function OpenPositions({ positions, maxPositions }) {
   );
 }
 
-// ---------- EquityCurve ----------
-function EquityCurve({ equity, startingBankroll, totalEquity }) {
-  const [W, setWidth] = useState(1000);
-  const containerRef = useRef(null);
-
-  useEffect(() => {
-    if (!containerRef.current) return;
-    const observer = new ResizeObserver(entries => {
-      for (let entry of entries) {
-        const w = entry.contentRect.width;
-        if (w > 0) setWidth(w);
-      }
-    });
-    observer.observe(containerRef.current);
-    const rect = containerRef.current.getBoundingClientRect();
-    if (rect.width > 0) setWidth(rect.width);
-    return () => observer.disconnect();
-  }, []);
-
-  const H = 200, padL = 38, padR = 12, padT = 18, padB = 28;
-
-  // Normalise: ensure Date objects
-  const pts = equity.map(p => ({
-    t: p.t instanceof Date ? p.t : new Date(p.t),
-    balance: p.balance,
-  }));
-
-  // Patch the last point to total equity (cash + locked) so open positions
-  // don't make the curve look like a loss when cash was simply deployed.
-  const nowDate = window.MOCK ? window.MOCK.now : new Date();
-  if (totalEquity != null && pts.length > 0) {
-    pts[pts.length - 1] = { t: nowDate, balance: totalEquity };
-  }
-
-  // Need at least 2 distinct points
-  if (pts.length < 2 || pts[0].t.getTime() === pts[pts.length - 1].t.getTime()) {
-    const seed = startingBankroll || 20;
-    pts.push({ t: nowDate, balance: pts.length > 0 ? pts[pts.length - 1].balance : seed });
-  }
-
-  const xs = pts.map(p => p.t.getTime());
-  const ys = pts.map(p => p.balance);
-  const xMin = xs[0], xMax = xs[xs.length - 1];
-  const yMin = Math.min(...ys) - 0.4;
-  const yMax = Math.max(...ys) + 0.4;
-  const xFn = t => padL + (xMax > xMin ? (t - xMin) / (xMax - xMin) : 0.5) * (W - padL - padR);
-  const yFn = v => padT + (1 - (yMax > yMin ? (v - yMin) / (yMax - yMin) : 0.5)) * (H - padT - padB);
-
-  const path = pts.map((p, i) => (i === 0 ? 'M' : 'L') + xFn(p.t.getTime()).toFixed(1) + ',' + yFn(p.balance).toFixed(1)).join(' ');
-  const areaPath = path + ' L' + xFn(xMax).toFixed(1) + ',' + (H - padB) + ' L' + xFn(xMin).toFixed(1) + ',' + (H - padB) + ' Z';
-
-  const seed = startingBankroll || 20;
-  const last = totalEquity != null ? totalEquity : ys[ys.length - 1];
-  const change = last - seed;
-  const changePct = seed > 0 ? change / seed : 0;
-  const yGrid = [yMin, (yMin + yMax) / 2, yMax];
-
-  return (
-    <section className="card">
-      <header className="card-head">
-        <div>
-          <h2>Equity curve</h2>
-          <p className="card-sub">cash + open positions · all time · initial bankroll {fmtUSD(seed)}</p>
-        </div>
-        <div className="equity-stat">
-          <div className={`mono lg ${change >= 0 ? 'pos' : 'neg'}`}>{fmtUSD(change, true)}</div>
-          <div className={`mono small ${change >= 0 ? 'pos' : 'neg'}`}>{fmtPctSigned(changePct)}</div>
-        </div>
-      </header>
-      <div className="equity-chart" ref={containerRef}>
-        <svg viewBox={`0 0 ${W} ${H}`} width="100%" height={H}>
-          <defs>
-            <linearGradient id="area-grad" x1="0" x2="0" y1="0" y2="1">
-              <stop offset="0%" stopColor="rgba(245,177,60,0.28)" />
-              <stop offset="100%" stopColor="rgba(245,177,60,0)" />
-            </linearGradient>
-          </defs>
-          {yGrid.map((g, i) => (
-            <g key={i}>
-              <line x1={padL} x2={W - padR} y1={yFn(g)} y2={yFn(g)} stroke="rgba(255,255,255,0.05)" />
-              <text x={padL - 6} y={yFn(g) + 3} fill="rgba(255,255,255,0.32)" fontSize="10" textAnchor="end" fontFamily="JetBrains Mono">${g.toFixed(1)}</text>
-            </g>
-          ))}
-          <line x1={padL} x2={W - padR} y1={yFn(seed)} y2={yFn(seed)} stroke="rgba(255,255,255,0.18)" strokeDasharray="2 3" />
-          <text x={W - padR} y={yFn(seed) - 4} fill="rgba(255,255,255,0.4)" fontSize="9.5" textAnchor="end" fontFamily="JetBrains Mono">SEED</text>
-          <path d={areaPath} fill="url(#area-grad)" />
-          <path d={path} stroke="#f5b13c" strokeWidth="1.4" fill="none" strokeLinejoin="round" />
-          {[0, 0.5, 1].map((f, i) => {
-            const t = xMin + (xMax - xMin) * f;
-            const d = new Date(t);
-            const label = d.toLocaleDateString('en-US', { month: 'short', day: 'numeric' });
-            return <text key={i} x={padL + f * (W - padL - padR)} y={H - 8} fill="rgba(255,255,255,0.32)" fontSize="10" textAnchor={i === 0 ? 'start' : (i === 1 ? 'middle' : 'end')} fontFamily="JetBrains Mono">{label}</text>;
-          })}
-          <circle cx={xFn(xMax)} cy={yFn(last)} r="3" fill="#f5b13c" />
-          <circle cx={xFn(xMax)} cy={yFn(last)} r="6" fill="rgba(245,177,60,0.2)" />
-        </svg>
-      </div>
-    </section>
-  );
-}
-
 // ---------- PerformanceStats ----------
 const PERF_PERIODS = ['30d', '6m', '1y'];
 const PERF_LABELS  = { '30d': '30 days', '6m': '6 months', '1y': '1 year' };
@@ -912,7 +811,6 @@ function App() {
         const d = await r.json();
         // Coerce ISO strings → Date objects so helpers work
         d.now = new Date(d.now);
-        d.equity = d.equity.map(e => ({ ...e, t: new Date(e.t) }));
         d.positions = d.positions.map(p => ({ ...p, entry_time: new Date(p.entry_time) }));
         d.trades = d.trades.map(t => ({ ...t, closed_at: new Date(t.closed_at) }));
         d.scanLog.last_scan_at = new Date(d.scanLog.last_scan_at);
@@ -966,7 +864,6 @@ function App() {
             />
             <OpenPositions positions={M.positions} maxPositions={M.portfolio?.max_concurrent_positions} />
           </div>
-          <EquityCurve equity={M.equity} startingBankroll={M.portfolio.starting_bankroll} totalEquity={M.portfolio.total_equity} />
         </>
       )}
       {activeTab === 'archive' && (

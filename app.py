@@ -282,15 +282,6 @@ def api_data():
             'edge': t.get('edge') or 0.0,
         })
 
-    # ---- equity curve ----
-    eq_rows = _q('SELECT timestamp, balance FROM bankroll ORDER BY id')
-    equity = [{'t': r['timestamp'], 'balance': r['balance']} for r in eq_rows]
-    if not equity:
-        equity = [
-            {'t': now.isoformat(), 'balance': STARTING_BANKROLL},
-            {'t': now.isoformat(), 'balance': total_equity},
-        ]
-
     # ---- performance stats (all periods) ----
     def _calc_stats(days):
         rows = _q(
@@ -570,7 +561,6 @@ def api_data():
         'portfolio': portfolio,
         'positions': positions,
         'trades': trades,
-        'equity': equity,
         'stats': stats,
         'models': models,
         'recentSignals': recent_signals,
