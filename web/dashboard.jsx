@@ -5,15 +5,15 @@ const { useState, useEffect, useRef } = React;
 
 // ---------- helpers ----------
 const fmtUSD = (n, signed = false) => {
-  const sign = signed && n > 0 ? '+' : '';
-  return sign + '$' + n.toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+  const v = Number(n) || 0;
+  const sign = signed && v > 0 ? '+' : v < 0 ? '-' : '';
+  return sign + '$' + Math.abs(v).toLocaleString('en-US', { minimumFractionDigits: 2, maximumFractionDigits: 2 });
 };
-const fmtPct = (n, digits = 1) => (n * 100).toFixed(digits) + '%';
-const fmtPctSigned = (n, digits = 1) => (n > 0 ? '+' : '') + (n * 100).toFixed(digits) + '%';
+const fmtPct = (n, digits = 1) => ((Number(n) || 0) * 100).toFixed(digits) + '%';
+const fmtPctSigned = (n, digits = 1) => (n > 0 ? '+' : '') + ((Number(n) || 0) * 100).toFixed(digits) + '%';
 const fmtAgo = (d) => {
   const now = window.MOCK ? window.MOCK.now : new Date();
-  const ms = now - d;
-  const s = ms / 1000;
+  const s = (now - d) / 1000;
   if (s < 60) return Math.round(s) + 's';
   const m = s / 60;
   if (m < 60) return Math.round(m) + 'm';
@@ -38,13 +38,79 @@ const fmtCountdown = (resolvesAt) => {
   const h = Math.floor(s / 3600);  s -= h * 3600;
   const m = Math.floor(s / 60);    s -= m * 60;
   const pad = n => String(n).padStart(2, '0');
-  if (d > 0) return `${d}d ${pad(h)}:${pad(m)}:${pad(s)}`;
+  if (d > 0) return `${d}d ${pad(h)}:${pad(m)}`;
   return `${pad(h)}:${pad(m)}:${pad(s)}`;
 };
 
+// Read a response body as JSON without assuming it IS JSON. A Flask 500, a
+// proxy 502, or a login redirect all return an HTML page, and calling
+// r.json() on one surfaces as `Unexpected token '<'` — which says nothing
+// about what broke. Report the status instead, and keep the body for the log.
+async function readJSON(r) {
+  const text = await r.text();
+  try {
+    return JSON.parse(text);
+  } catch (e) {
+    console.error('Non-JSON response', r.status, r.url, text.slice(0, 500));
+    const err = new Error(r.ok
+      ? 'The server sent a non-JSON response'
+      : `Server error (HTTP ${r.status}) — check the bot log`);
+    err.status = r.status;
+    throw err;
+  }
+}
+
+// Mobile breakpoint — the design switches layout below 860px wide, and the CSS
+// media queries in dashboard.html use the same cutover.
+const MOBILE_BP = 860;
+function useIsMobile() {
+  const [isMobile, setIsMobile] = useState(
+    () => typeof window !== 'undefined' && window.innerWidth < MOBILE_BP
+  );
+  useEffect(() => {
+    const mq = window.matchMedia(`(max-width: ${MOBILE_BP - 0.02}px)`);
+    const on = e => setIsMobile(e.matches);
+    setIsMobile(mq.matches);
+    // Safari <14 only has the deprecated listener API
+    mq.addEventListener ? mq.addEventListener('change', on) : mq.addListener(on);
+    return () => {
+      mq.removeEventListener ? mq.removeEventListener('change', on) : mq.removeListener(on);
+    };
+  }, []);
+  return isMobile;
+}
+
+const TABS = [
+  ['desk', 'Desk'],
+  ['archive', 'Archive'],
+  ['models', 'Signals'],
+  ['settings', 'Settings'],
+];
+
+// ---------- brand mark ----------
+// Cyclone eye: concentric arcs thinning outward around a lit centre.
+function Logo({ size = 28 }) {
+  return (
+    <svg className="mark" width={size} height={size} viewBox="0 0 32 32" fill="none" aria-hidden="true">
+      <defs>
+        <radialGradient id="eyeH" cx="50%" cy="50%" r="50%">
+          <stop offset="0" stopColor="#ffd694" />
+          <stop offset="1" stopColor="#e39c33" />
+        </radialGradient>
+      </defs>
+      <circle cx="16" cy="16" r="15" stroke="rgba(245,177,60,0.22)" strokeWidth="1" />
+      <path d="M16 3.4c7 0 12.6 5.6 12.6 12.6S23 28.6 16 28.6" stroke="rgba(245,177,60,0.42)" strokeWidth="1.6" strokeLinecap="round" />
+      <path d="M16 28.6c-7 0-12.6-5.6-12.6-12.6" stroke="rgba(245,177,60,0.18)" strokeWidth="1.6" strokeLinecap="round" />
+      <path d="M16 8.2c4.3 0 7.8 3.5 7.8 7.8s-3.5 7.8-7.8 7.8" stroke="rgba(245,177,60,0.72)" strokeWidth="1.8" strokeLinecap="round" />
+      <path d="M16 23.8c-4.3 0-7.8-3.5-7.8-7.8" stroke="rgba(245,177,60,0.3)" strokeWidth="1.8" strokeLinecap="round" />
+      <circle cx="16" cy="16" r="3.4" fill="url(#eyeH)" />
+    </svg>
+  );
+}
+
 // ---------- NotificationBell ----------
 // Self-contained: fetches /api/notifications on its own 30s cycle, independent
-// of the main /api/data loop. Bell icon + unread-error badge; click opens a popup.
+// of the main /api/data loop. Badge counts unread errors; click opens the list.
 function NotificationBell() {
   const [items, setItems] = useState([]);
   const [errorCount, setErrorCount] = useState(0);
@@ -56,7 +122,7 @@ function NotificationBell() {
       try {
         const r = await fetch('/api/notifications?limit=100');
         if (!r.ok) return;
-        const d = await r.json();
+        const d = await readJSON(r);
         setItems(d.notifications || []);
         setErrorCount(d.error_count || 0);
       } catch (e) { /* leave last-known list on a transient failure */ }
@@ -74,34 +140,26 @@ function NotificationBell() {
     return () => document.removeEventListener('mousedown', onDoc);
   }, [open]);
 
-  const sevIcon = { error: '⛔', warning: '⚠', info: 'ℹ' };
-
   return (
     <div className="notif" ref={ref}>
-      <button
-        className="notif-bell"
-        title="Notifications"
-        onClick={() => setOpen(o => !o)}
-      >
-        🔔
+      <button className="icon-btn" title="Alerts" aria-label="Alerts" onClick={() => setOpen(o => !o)}>
+        <span className="glyph">!</span>
         {errorCount > 0 && <span className="notif-badge">{errorCount > 99 ? '99+' : errorCount}</span>}
       </button>
       {open && (
         <div className="notif-popup">
           <div className="notif-popup-head">
-            <span>Notifications</span>
-            <span className="dim">{items.length}</span>
+            <span>Alerts</span>
+            <span>{items.length}</span>
           </div>
           <div className="notif-list">
-            {items.length === 0 && (
-              <div className="notif-empty">No notifications</div>
-            )}
+            {items.length === 0 && <div className="notif-empty">Nothing to report</div>}
             {items.map(n => (
               <div key={n.id} className={`notif-item notif-${n.severity || 'info'}`}>
-                <span className="notif-item-icon">{sevIcon[n.severity] || 'ℹ'}</span>
-                <div className="notif-item-body">
+                <span className="notif-dot" />
+                <div>
                   <div className="notif-item-msg">{n.message}</div>
-                  <div className="notif-item-meta mono">
+                  <div className="notif-item-meta">
                     {n.kind} · {fmtAgo(new Date(n.timestamp))} ago
                   </div>
                 </div>
@@ -116,93 +174,87 @@ function NotificationBell() {
 
 // ---------- TopBar ----------
 function TopBar({ portfolio, scanLog, activeTab, setActiveTab }) {
-  const [tick, setTick] = useState(0);
+  const [, setTick] = useState(0);
   useEffect(() => {
     const i = setInterval(() => setTick(t => t + 1), 1000);
     return () => clearInterval(i);
   }, []);
-  const lastScanAgo = fmtAgo(scanLog.last_scan_at);
+  const live = portfolio.mode === 'LIVE' && !portfolio.archive_view;
   return (
     <header className="topbar">
       <div className="brand">
-        <span className="brand-mark" aria-hidden="true" />
+        <Logo size={28} />
         <span className="brand-word">stormedge<em>.</em></span>
-        <span className="brand-tag">desk</span>
       </div>
+
       <div className="top-nav">
-        <div className={`nav-item ${activeTab === 'desk' ? 'active' : ''}`} onClick={() => setActiveTab('desk')}>Desk</div>
-        <div className={`nav-item ${activeTab === 'archive' ? 'active' : ''}`} onClick={() => setActiveTab('archive')}>Archive</div>
-        <div className={`nav-item ${activeTab === 'models' ? 'active' : ''}`} onClick={() => setActiveTab('models')}>Signals</div>
-        <div className={`nav-item ${activeTab === 'settings' ? 'active' : ''}`} onClick={() => setActiveTab('settings')}>Settings</div>
+        {TABS.map(([id, label]) => (
+          <button
+            key={id}
+            className={`nav-item ${activeTab === id ? 'active' : ''}`}
+            onClick={() => setActiveTab(id)}
+          >
+            {label}
+          </button>
+        ))}
       </div>
-      <div className="top-right">
-        <span
-          className={`mode-pill ${portfolio.archive_view ? 'mode-archive' : `mode-${portfolio.mode.toLowerCase()}`} ${portfolio.archive_available ? 'mode-toggleable' : ''}`}
-          title={portfolio.archive_available
-            ? (portfolio.archive_view ? 'Viewing saved paper era — click for live' : 'Click to view saved paper era')
-            : undefined}
-          onClick={async () => {
-            if (!portfolio.archive_available) return;
-            await fetch('/api/archive-view', {
-              method: 'POST', headers: {'Content-Type': 'application/json'},
-              body: JSON.stringify({on: !portfolio.archive_view}),
-            });
-            window.dispatchEvent(new Event('stormedge-refetch'));
-          }}
-        >
-          <span className="mode-dot" />
-          {portfolio.archive_view ? 'PAPER · SAVED' : portfolio.mode}
-        </span>
-        <div className="last-scan">
-          <span className="dim">last scan</span>
-          <span className="mono">{lastScanAgo} ago</span>
-          <span className="scan-pulse" />
-        </div>
-        <NotificationBell />
-        <a href="/api/logout" className="user-avatar" title="Sign out">↩</a>
+
+      <div className="spacer" />
+
+      <span
+        className={
+          `mode-pill ${live ? 'mode-live' : ''} ` +
+          `${portfolio.archive_view ? 'mode-archive' : ''} ` +
+          `${portfolio.archive_available ? 'mode-toggleable' : ''}`
+        }
+        // The pill reports the mode the bot booted in (PAPER_MODE) — it does not
+        // switch it. Its only click action is jumping between the live DB and a
+        // filed-away era, so with nothing filed it is a status chip, and the
+        // tooltip has to say so rather than leaving a dead-looking button.
+        title={portfolio.archive_available
+          ? (portfolio.archive_view
+              ? 'Viewing a filed-away era — click to return to live'
+              : 'Click to view the filed-away era')
+          : `Running in ${portfolio.mode} mode. Nothing filed away yet — ` +
+            'file an era from Settings › Start over to browse it here.'}
+        onClick={async () => {
+          if (!portfolio.archive_available) return;
+          await fetch('/api/archive-view', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ on: !portfolio.archive_view }),
+          });
+          window.dispatchEvent(new Event('stormedge-refetch'));
+        }}
+      >
+        <span className="mode-dot" />
+        {portfolio.archive_view ? 'PAPER · SAVED' : portfolio.mode}
+      </span>
+
+      <div className="last-scan">
+        <span>SCANNED</span>
+        <b>{fmtAgo(scanLog.last_scan_at)} ago</b>
+        <span className="scan-pulse" />
       </div>
+
+      <NotificationBell />
+      <a href="/api/logout" className="icon-btn" title="Sign out">↩</a>
     </header>
   );
 }
 
-// ---------- HeaderStrip (KPIs) ----------
-function KpiCard({ label, value, sub, tone, mono = true, children }) {
+// ---------- KPI strip ----------
+// Equity sparkline — 12 bars from the recent equity curve when the API
+// supplies one, otherwise nothing rather than a fake flat rail.
+function Sparkline({ series }) {
+  const pts = Array.isArray(series) && series.length >= 2 ? series.slice(-12) : null;
+  if (!pts) return null;
+  const lo = Math.min(...pts), hi = Math.max(...pts);
+  const span = hi - lo || 1;
   return (
-    <div className={`kpi kpi-${tone || 'neutral'}`}>
-      <div className="kpi-label">{label}</div>
-      <div className={`kpi-value ${mono ? 'mono' : ''}`}>{value}</div>
-      {sub && <div className="kpi-sub">{sub}</div>}
-      {children}
-    </div>
-  );
-}
-
-function CircuitMeter({ used, limit, pnl }) {
-  const pct = Math.max(0, Math.min(1, used));
-  const tripped = pct >= 1.0;
-  return (
-    <div className="circuit">
-      <div className="circuit-bar">
-        <div className="circuit-fill" style={{ width: (pct * 100).toFixed(1) + '%' }} />
-        {[0.25, 0.5, 0.75].map(t => (
-          <div key={t} className="circuit-tick" style={{ left: (t * 100) + '%' }} />
-        ))}
-      </div>
-      <div className="circuit-meta mono">
-        <span>{fmtUSD(pnl, true)}</span>
-        <span className="dim">limit {fmtUSD(limit)}</span>
-      </div>
-      {tripped && <span className="circuit-tripped">DAILY LIMIT EXCEEDED</span>}
-    </div>
-  );
-}
-
-function CircuitBreakerBanner({ portfolio }) {
-  if (!portfolio.circuit_tripped) return null;
-  return (
-    <div className="circuit-banner">
-      <span className="circuit-banner-icon">⚠</span>
-      <span>Daily loss limit of ${Math.abs(portfolio.daily_loss_limit).toFixed(2)} reached. Trading halted until midnight UTC.</span>
+    <div className="spark" aria-hidden="true">
+      {pts.map((v, i) => (
+        <span key={i} style={{ height: (6 + ((v - lo) / span) * 20).toFixed(1) + 'px' }} />
+      ))}
     </div>
   );
 }
@@ -215,51 +267,69 @@ function HeaderStrip({ portfolio }) {
   const capitalIn = portfolio.total_deposited || portfolio.starting_bankroll;
   const withdrawn = portfolio.total_withdrawn || 0;
   const equityChange = portfolio.total_equity + withdrawn - capitalIn;
-  const equityChangePct = capitalIn ? equityChange / capitalIn : 0;
+  const cap = portfolio.max_total_exposure_fraction ?? 0.70;
+  // The exposure rail reads as "how much of the cap is used", so a 35%
+  // exposure against a 70% cap fills the bar halfway — not to 35%.
+  const capUsed = cap ? Math.min(1, portfolio.exposure_pct / cap) : 0;
+  const halted = portfolio.circuit_tripped;
+
   return (
     <section className="header-strip">
-      <KpiCard
-        label="Total equity"
-        value={fmtUSD(portfolio.total_equity)}
-        sub={<span className={equityChange >= 0 ? 'pos' : 'neg'}>
-          {fmtUSD(equityChange, true)} <span className="dim">vs capital in</span>
-        </span>}
-        tone="hero"
-      />
-      <KpiCard
-        label="Available cash"
-        value={fmtUSD(portfolio.available_cash)}
-        sub={<span className="dim">{fmtPct(portfolio.available_cash / portfolio.total_equity)} of equity</span>}
-      />
-      <KpiCard
-        label="Locked in positions"
-        value={fmtUSD(portfolio.locked_cash)}
-        sub={<span className="dim">exposure {fmtPct(portfolio.exposure_pct)} <span className="sep">·</span> cap {fmtPct(portfolio.max_total_exposure_fraction ?? 0.70, 0)}</span>}
-      />
-      <KpiCard
-        label="Today's P&L"
-        value={fmtUSD(portfolio.daily_pnl, true)}
-        tone={portfolio.daily_pnl < 0 ? 'neg' : 'pos'}
-        mono={true}
-      >
-        <CircuitMeter used={portfolio.circuit_breaker_used} limit={portfolio.daily_loss_limit} pnl={portfolio.daily_pnl} />
-      </KpiCard>
+      <div className="kpi kpi-hero">
+        <div className="kpi-label">Total equity</div>
+        <div className="kpi-hero-row">
+          <div className="kpi-value">{fmtUSD(portfolio.total_equity)}</div>
+          <Sparkline series={portfolio.equity_series} />
+        </div>
+        <div className={`kpi-sub ${equityChange >= 0 ? 'pos' : 'neg'}`}>
+          {fmtUSD(equityChange, true)} <span className="dim">since first deposit</span>
+        </div>
+      </div>
+
+      <div className="kpi">
+        <div className="kpi-label">Cash free to trade</div>
+        <div className="kpi-value">{fmtUSD(portfolio.available_cash)}</div>
+        <div className="kpi-sub">
+          {portfolio.total_equity ? fmtPct(portfolio.available_cash / portfolio.total_equity) : '—'} of equity
+        </div>
+      </div>
+
+      <div className="kpi">
+        <div className="kpi-label">Tied up in trades</div>
+        <div className="kpi-value">{fmtUSD(portfolio.locked_cash)}</div>
+        <div className="kpi-rail"><i style={{ width: (capUsed * 100).toFixed(0) + '%' }} /></div>
+        <div className="kpi-sub">{fmtPct(portfolio.exposure_pct)} used of {fmtPct(cap, 0)} cap</div>
+      </div>
+
+      <div className="kpi kpi-today">
+        <div className="kpi-label">Today</div>
+        <div className={`kpi-value ${portfolio.daily_pnl < 0 ? 'neg' : 'pos'}`}>
+          {fmtUSD(portfolio.daily_pnl, true)}
+        </div>
+        <div className="kpi-rail neg">
+          <i style={{ width: (Math.max(0, Math.min(1, portfolio.circuit_breaker_used)) * 100).toFixed(0) + '%' }} />
+        </div>
+        <div className="kpi-sub">
+          {halted
+            ? <span className="neg">trading halted for today</span>
+            : <>stops trading at {fmtUSD(-Math.abs(portfolio.daily_loss_limit))}</>}
+        </div>
+      </div>
     </section>
   );
 }
 
-const CITY_PAGE_SIZE = 8;
-
 // ---------- GlobePanel ----------
-function GlobePanel({ cities, cityActivity, positions, scanLog }) {
+function GlobePanel({ cities, cityActivity, positions }) {
+  const isMobile = useIsMobile();
   const wrapRef = useRef(null);
   const [hover, setHover] = useState(null);
   const [hoverPos, setHoverPos] = useState({ x: 0, y: 0 });
-  const [selected, setSelected] = useState(null);
-  const [cityPage, setCityPage] = useState(0);
 
   useEffect(() => {
-    if (!wrapRef.current || !window.StormGlobe) return;
+    // Mobile hides the canvas via CSS; skip the globe entirely so its
+    // requestAnimationFrame loop isn't burning battery behind display:none.
+    if (isMobile || !wrapRef.current || !window.StormGlobe) return;
     const g = new window.StormGlobe(wrapRef.current, {
       cities,
       cityActivity,
@@ -267,34 +337,36 @@ function GlobePanel({ cities, cityActivity, positions, scanLog }) {
         setHover(c);
         if (m) setHoverPos({ x: m.x, y: m.y });
       },
-      onCityClick: (c) => setSelected(c),
+      onCityClick: () => {},
     });
     g.start();
     return () => g.stop();
-  }, []);
+  }, [isMobile]);
 
-  const activeCities = cities.filter(c => (cityActivity[c.key] || cityActivity[c.name]));
-  const counts = {
-    active: positions.length,
-    signal: Object.values(cityActivity).filter(a => a.state === 'signal').length,
-    scanned: Object.values(cityActivity).filter(a => a.state === 'scanned').length,
+  const watched = cities.filter(c => (cityActivity[c.key] || cityActivity[c.name]));
+  const hoverActivity = hover && (cityActivity[hover.key] || cityActivity[hover.name]);
+
+  const metaFor = (act) => {
+    if (act.state === 'active' && act.position) {
+      return `${act.position.side} ${fmtUSD(act.position.size_usdc)}`;
+    }
+    if (act.state === 'signal') return 'signal';
+    return (act.skip && act.skip.bucket) || 'no edge';
   };
 
-  const hoverActivity = hover && (cityActivity[hover.key] || cityActivity[hover.name]);
-  const totalCityPages = Math.max(1, Math.ceil(activeCities.length / CITY_PAGE_SIZE));
-  const citySlice = activeCities.slice(cityPage * CITY_PAGE_SIZE, (cityPage + 1) * CITY_PAGE_SIZE);
-
   return (
-    <section className="card globe-card">
-      <header className="card-head">
+    <section className="pane globe-pane">
+      <header className="pane-head">
         <div>
-          <h2>Live coverage</h2>
-          <p className="card-sub">{cities.length} weather stations · {counts.active} active · {counts.signal} shadow · {counts.scanned} scanned in last cycle</p>
+          <h2>Where the bot is watching</h2>
+          <p className="card-sub">
+            {cities.length} airports · {positions.length} holding a trade · {watched.length} checked this cycle
+          </p>
         </div>
         <div className="globe-legend">
-          <span className="lg lg-active"><i /> open position</span>
-          <span className="lg lg-signal"><i /> shadow signal (skipped)</span>
-          <span className="lg lg-scanned"><i /> scanned (no signal)</span>
+          <span className="lg lg-active"><i />open trade</span>
+          <span className="lg lg-signal"><i />signal, skipped</span>
+          <span className="lg lg-scanned"><i />scanned, nothing</span>
         </div>
       </header>
       <div className="globe-body">
@@ -317,123 +389,141 @@ function GlobePanel({ cities, cityActivity, positions, scanLog }) {
             </div>
           )}
         </div>
-        <aside className="globe-side">
-          <div className="side-head">
-            <span className="side-title">station activity</span>
-            <span className="side-count mono">{activeCities.length}</span>
-          </div>
-          <ul className="city-list">
-            {citySlice.map(c => {
-              const act = cityActivity[c.key] || cityActivity[c.name];
-              const isPos = act.state === 'active';
-              const pos = isPos ? act.position : null;
-              return (
-                <li
-                  key={c.key}
-                  className={`city-row state-${act.state} ${selected === c ? 'sel' : ''}`}
-                  onClick={() => setSelected(c)}
-                  onMouseEnter={() => setHover(c)}
-                  onMouseLeave={() => setHover(null)}
-                >
-                  <span className={`state-dot dot-${act.state}`} />
-                  <span className="city-name">{c.name}</span>
-                  {isPos && (
-                    <span className="city-meta mono">
-                      <span className={`side-tag side-${pos.side.toLowerCase()}`}>{pos.side}</span>
-                      <span className="dim">{fmtUSD(pos.size_usdc)}</span>
-                    </span>
-                  )}
-                  {act.state === 'signal' && <span className="city-meta dim">shadow</span>}
-                  {act.state === 'scanned' && act.skip && (
-                    <span className="city-meta dim trunc">{act.skip.bucket}</span>
-                  )}
-                </li>
-              );
-            })}
-          </ul>
-          <div className="side-foot">
-            {totalCityPages > 1 ? (
-              <Pagination page={cityPage} total={totalCityPages} onChange={setCityPage} />
-            ) : (
-              <span className="dim"></span>
-            )}
-            <span className="dim">{cityPage + 1} / {totalCityPages}</span>
-          </div>
-        </aside>
+        <ul className="city-list">
+          {watched.map(c => {
+            const act = cityActivity[c.key] || cityActivity[c.name];
+            return (
+              <li key={c.key} className={`city-row state-${act.state}`}>
+                <span className={`state-dot dot-${act.state}`} />
+                <span className="city-name">{c.name}</span>
+                <span className="city-meta">{metaFor(act)}</span>
+              </li>
+            );
+          })}
+        </ul>
       </div>
     </section>
   );
 }
 
 // ---------- OpenPositions ----------
-function OpenPositions({ positions, maxPositions }) {
+function OpenPositions({ positions, maxPositions, readOnly }) {
   const cap = maxPositions || 4;
   const [, setTick] = useState(0);
+  // Two-step close: the first click arms the row, the second actually sells.
+  // Selling is irreversible, so a single misclick must never fire an order.
+  const [armed, setArmed] = useState(null);   // position id awaiting confirmation
+  const [busyId, setBusyId] = useState(null);
+  const [note, setNote] = useState(null);     // {err, msg}
   useEffect(() => {
     const i = setInterval(() => setTick(t => t + 1), 1000);
     return () => clearInterval(i);
   }, []);
+
+  const closePosition = async (p) => {
+    setBusyId(p.id); setNote(null);
+    try {
+      const r = await fetch('/api/close-position', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ position_id: p.id, confirm: true }),
+      });
+      const d = await readJSON(r);
+      // ok=false with a real message (no_fill, busy) is an outcome, not a crash —
+      // show the server's wording rather than a generic failure.
+      if (!r.ok && !d.message) setNote({ err: true, msg: d.error || 'Close failed' });
+      else setNote({ err: !d.ok, msg: d.message });
+      if (d.ok) window.dispatchEvent(new Event('stormedge-refetch'));
+    } catch (e) { setNote({ err: true, msg: e.message }); }
+    setBusyId(null); setArmed(null);
+  };
+
+  // Soonest resolution across open positions — drives the header sub-line.
+  const nextResolve = (() => {
+    const stamps = positions
+      .map(p => p.resolves_at && new Date(p.resolves_at))
+      .filter(d => d && !isNaN(d));
+    if (!stamps.length) return null;
+    return fmtCountdown(new Date(Math.min(...stamps.map(d => d.getTime()))));
+  })();
+
   return (
-    <section className="card positions-card">
-      <header className="card-head">
+    <section className="pane positions-pane">
+      <header className="pane-head center">
         <div>
-          <h2>Open positions</h2>
-          <p className="card-sub">{positions.length} open · cap {cap}</p>
+          <h2>Trades open now</h2>
+          <p className="card-sub">
+            {nextResolve
+              ? <>next one settles in <span className="mono">{nextResolve}</span></>
+              : 'nothing open right now'}
+          </p>
         </div>
-        <span className="pill subtle">{positions.length} / {cap} cap</span>
+        <span className="pill">{positions.length} / {cap}</span>
       </header>
       {positions.length === 0 ? (
-        <div style={{ padding: '8px 4px' }} />
+        <div className="empty-note">Nothing open right now.</div>
       ) : (
-        <div className="table positions-table">
-          <div className="thead">
-            <div>City</div>
-            <div>Side</div>
-            <div className="r">Entry</div>
-            <div className="r">Mid</div>
-            <div className="r">Size</div>
-            <div className="r">P&L</div>
-            <div className="r">Resolves in</div>
-          </div>
-          <div className="positions-scroll-wrapper">
-            {positions.map(p => {
-            const countdown = fmtCountdown(p.resolves_at);
-            // entry_price and current_price are both the token's own price (YES or NO).
-            // PnL = (current - entry) / entry * size for both sides.
+        <div className="pane-body">
+          {positions.map(p => {
+            const live = p.price_status === 'live';
             const pnl = (p.current_price - p.entry_price) / p.entry_price * p.size_usdc;
             const pnlPct = p.size_usdc > 0 ? pnl / p.size_usdc : 0;
+            const tone = live ? (pnl >= 0 ? 'pos' : 'neg') : 'dim';
             return (
-              <div className="trow" key={p.id}>
-                <div className="cell-city">
-                  <div className="city-line">{p.city}</div>
-                  <div className="city-q">{p.question}</div>
-                </div>
-                <div>
+              <div className="tcard" key={p.id}>
+                <div className="tcard-top">
                   <span className={`side-tag side-${p.side.toLowerCase()}`}>{p.side}</span>
-                  {p.bucket && <div className="dim small">{p.bucket}</div>}
+                  <span className="tcard-city">{p.city}</span>
+                  <span className={`tcard-pnl ${tone}`}>{live ? fmtUSD(pnl, true) : '—'}</span>
                 </div>
-                <div className="r mono">{p.entry_price.toFixed(2)}</div>
-                <div className="r mono">
-                  {p.price_status === 'live'
-                    ? p.current_price.toFixed(2)
-                    : p.price_status !== 'unavailable' && p.current_price != null
-                      ? <span className="dim">{p.current_price.toFixed(2)}</span>
-                      : <span className="dim">—</span>}
+                <div className="tcard-q">{p.question}</div>
+                <div className="tcard-meta">
+                  <span>
+                    {p.entry_price.toFixed(2)} →{' '}
+                    <b>
+                      {p.current_price != null && p.price_status !== 'unavailable'
+                        ? p.current_price.toFixed(2) : '—'}
+                    </b>
+                  </span>
+                  <span>{fmtUSD(p.size_usdc)}</span>
+                  <span className="spacer" />
+                  <span className={tone}>{live ? fmtPctSigned(pnlPct) : ''}</span>
+                  <span className="chip">{fmtCountdown(p.resolves_at) || '—'}</span>
                 </div>
-                <div className="r mono">{fmtUSD(p.size_usdc)}</div>
-                <div className={`r mono ${p.price_status === 'live' ? (pnl >= 0 ? 'pos' : 'neg') : ''}`}>
-                  {p.price_status === 'live'
-                    ? <>{fmtUSD(pnl, true)}<div className="small">{fmtPctSigned(pnlPct)}</div></>
-                    : p.price_status === 'unavailable'
-                      ? <span className="dim small">Price unavailable</span>
-                      : <span className="dim small">Pending resolution</span>
-                  }
-                </div>
-                <div className="r mono dim">{countdown || '—'}</div>
+                {/* A stale or missing price must never look like a real P&L of $0. */}
+                {!live && (
+                  <div className="tcard-meta">
+                    <span>{p.price_status === 'unavailable' ? 'Price unavailable' : 'Pending resolution'}</span>
+                  </div>
+                )}
+                {!readOnly && (
+                  <div className="tcard-foot">
+                    {armed === p.id ? (
+                      <>
+                        <button className="btn-close-go" disabled={busyId === p.id} onClick={() => closePosition(p)}>
+                          {busyId === p.id ? 'Selling…' : 'Confirm sell'}
+                        </button>
+                        <button className="btn-close-cancel" disabled={busyId === p.id} onClick={() => setArmed(null)}>
+                          Cancel
+                        </button>
+                      </>
+                    ) : (
+                      <button
+                        className="btn-close"
+                        disabled={busyId != null}
+                        title={live && p.current_price != null
+                          ? `Sell at the current bid (~${p.current_price.toFixed(2)})`
+                          : 'No live price — the sell may not fill'}
+                        onClick={() => { setNote(null); setArmed(p.id); }}
+                      >
+                        Close
+                      </button>
+                    )}
+                  </div>
+                )}
               </div>
             );
           })}
-          </div>
+          {note && <div className={`settings-note ${note.err ? 'err' : ''}`}>{note.msg}</div>}
         </div>
       )}
     </section>
@@ -442,50 +532,40 @@ function OpenPositions({ positions, maxPositions }) {
 
 // ---------- PerformanceStats ----------
 const PERF_PERIODS = ['30d', '6m', '1y'];
-const PERF_LABELS  = { '30d': '30 days', '6m': '6 months', '1y': '1 year' };
 
 function PerformanceStats({ stats }) {
   const [period, setPeriod] = useState('30d');
   // Support both the new nested shape {30d:{…},6m:{…},1y:{…}} and the old flat shape
   const isNested = stats && typeof stats['30d'] === 'object';
   const s = isNested ? (stats[period] || stats['30d']) : (stats || {});
-  const periodLabel = PERF_LABELS[period];
 
   const items = [
-    { label: 'Win rate',          value: fmtPct(s.win_rate),            sub: `${s.total_trades} trades` },
-    { label: 'Realized P&L',      value: fmtUSD(s.realized_pnl, true),  sub: periodLabel,
-      tone: s.realized_pnl >= 0 ? 'pos' : 'neg' },
-    { label: 'Avg edge at entry',  value: fmtPct(s.avg_edge),            sub: 'threshold 8.0%' },
-    { label: 'Avg hold',           value: fmtHold(s.avg_hold_hours),     sub: 'time in position' },
-    { label: 'Best trade',         value: fmtUSD(s.best_trade, true),    sub: 'single trade', tone: 'pos' },
-    { label: 'Worst trade',        value: fmtUSD(s.worst_trade, true),   sub: 'single trade', tone: s.worst_trade >= 0 ? 'pos' : 'neg' },
+    { k: 'Hit rate',  v: fmtPct(s.win_rate),           s: `${s.total_trades} settled` },
+    { k: 'Cash made', v: fmtUSD(s.realized_pnl, true), s: `in ${period}`, tone: s.realized_pnl >= 0 ? 'pos' : 'neg' },
+    { k: 'Avg edge',  v: fmtPct(s.avg_edge),           s: 'floor 8.0%', color: 'var(--signal-hi)' },
+    { k: 'Avg hold',  v: fmtHold(s.avg_hold_hours),    s: 'entry to exit' },
+    { k: 'Best',      v: fmtUSD(s.best_trade, true),   s: 'one trade', tone: 'pos' },
+    { k: 'Worst',     v: fmtUSD(s.worst_trade, true),  s: 'one trade', tone: s.worst_trade >= 0 ? 'pos' : 'neg' },
   ];
 
   return (
-    <section className="card">
-      <header className="card-head">
-        <div>
-          <h2>Performance · {period}</h2>
-          <p className="card-sub">resolved trades only · realized cash</p>
+    <section className="perf-card">
+      <div className="perf-head">
+        <div className="perf-title">
+          How it has been doing <span className="dim">· settled trades only</span>
         </div>
-        <div className="period-tabs">
+        <div className="seg">
           {PERF_PERIODS.map(p => (
-            <button
-              key={p}
-              className={`period-tab ${p === period ? 'active' : ''}`}
-              onClick={() => setPeriod(p)}
-            >
-              {p}
-            </button>
+            <button key={p} className={p === period ? 'on' : ''} onClick={() => setPeriod(p)}>{p}</button>
           ))}
         </div>
-      </header>
+      </div>
       <div className="perf-grid">
         {items.map(it => (
-          <div key={it.label} className="perf-tile">
-            <div className="kpi-label">{it.label}</div>
-            <div className={`mono perf-val ${it.tone || ''}`}>{it.value}</div>
-            <div className="kpi-sub dim">{it.sub}</div>
+          <div key={it.k} className="perf-tile">
+            <div className="k">{it.k}</div>
+            <div className={`v ${it.tone || ''}`} style={it.color ? { color: it.color } : undefined}>{it.v}</div>
+            <div className="s">{it.s}</div>
           </div>
         ))}
       </div>
@@ -493,75 +573,145 @@ function PerformanceStats({ stats }) {
   );
 }
 
-const TRADES_PAGE_SIZE = 15;
-
 // ---------- Pagination ----------
 function Pagination({ page, total, onChange }) {
   if (total <= 1) return null;
   return (
     <div className="pagination">
       <button className="pg-btn" onClick={() => onChange(page - 1)} disabled={page === 0}>‹</button>
-      <span className="mono pg-info">{page + 1} / {total}</span>
+      <span className="pg-info">{page + 1} / {total}</span>
       <button className="pg-btn" onClick={() => onChange(page + 1)} disabled={page === total - 1}>›</button>
     </div>
   );
 }
 
-// ---------- RecentTrades ----------
+// ---------- RecentTrades (Archive) ----------
+// The executor writes machine-readable exit reasons ("RESOLVED_WIN (Yes)",
+// "Stop Loss (-50.0%)"). The archive states what happened in plain words and
+// keeps the raw string on the element's title so nothing is lost.
+const exitReason = (raw) => {
+  const r = String(raw || '');
+  if (/^RESOLVED_WIN/i.test(r))     return { label: 'Won the market', tone: 'won' };
+  if (/^RESOLVED_LOSS/i.test(r))    return { label: 'Lost the market', tone: 'lost' };
+  if (/^RESOLVED_UNKNOWN/i.test(r)) return { label: 'Settled, outcome unclear', tone: '' };
+  if (/take profit/i.test(r))       return { label: 'Hit the target', tone: 'won' };
+  if (/stop loss|sustained loss/i.test(r)) return { label: 'Cut early', tone: 'cut' };
+  if (/edge decayed/i.test(r))      return { label: 'Edge faded', tone: '' };
+  if (/^EXTERNAL_CLOSE/i.test(r))   return { label: 'Sold on Polymarket', tone: '' };
+  if (/^MANUAL_CLOSE/i.test(r))     return { label: 'Closed by hand', tone: '' };
+  if (/^EXPIRED_ON_RESTART/i.test(r)) return { label: 'Expired', tone: '' };
+  return { label: r || 'Unknown', tone: '' };
+};
+
+const TRADE_FILTERS = [
+  ['all', 'All'],
+  ['wins', 'Wins'],
+  ['losses', 'Losses'],
+  ['cut', 'Cut early'],
+];
+const TRADES_PAGE_SIZE = 40;
+
 function RecentTrades({ trades }) {
   const [page, setPage] = useState(0);
-  const totalPages = Math.max(1, Math.ceil(trades.length / TRADES_PAGE_SIZE));
+  const [filter, setFilter] = useState('all');
+  const isMobile = useIsMobile();
+
+  const shown = trades.filter(t =>
+    filter === 'all' ? true
+      : filter === 'wins' ? t.pnl > 0
+      : filter === 'losses' ? t.pnl < 0
+      : exitReason(t.exit_reason).tone === 'cut');
+  const net = shown.reduce((a, t) => a + t.pnl, 0);
+
+  const totalPages = Math.max(1, Math.ceil(shown.length / TRADES_PAGE_SIZE));
   const safePage = Math.min(page, totalPages - 1);
-  const slice = trades.slice(safePage * TRADES_PAGE_SIZE, (safePage + 1) * TRADES_PAGE_SIZE);
+  const slice = shown.slice(safePage * TRADES_PAGE_SIZE, (safePage + 1) * TRADES_PAGE_SIZE);
+
   return (
-    <section className="card">
-      <header className="card-head">
+    <section className="pane list-pane">
+      <header className="pane-head wrap">
         <div>
-          <h2>All trades</h2>
-          <p className="card-sub">{trades.length} closed · sorted by exit time · page {safePage + 1} of {totalPages}</p>
+          <h2>Finished trades</h2>
+          <p className="card-sub">
+            {shown.length} settled · newest first · net{' '}
+            <span className={net >= 0 ? 'pos' : 'neg'}>{fmtUSD(net, true)}</span>
+          </p>
         </div>
-        <Pagination page={safePage} total={totalPages} onChange={setPage} />
-      </header>
-      {trades.length === 0 ? (
-        <div style={{ padding: '8px 4px' }} />
-      ) : (
-        <div className="table trades-table">
-          <div className="thead">
-            <div>City</div>
-            <div>Side</div>
-            <div className="r">Entry → Exit</div>
-            <div className="r">Size</div>
-            <div className="r">P&L</div>
-            <div>Exit reason</div>
-            <div className="r">Held</div>
-            <div className="r">Ago</div>
+        <div className="head-controls">
+          <div className="seg text">
+            {TRADE_FILTERS.map(([id, label]) => (
+              <button
+                key={id}
+                className={filter === id ? 'on' : ''}
+                onClick={() => { setFilter(id); setPage(0); }}
+              >
+                {label}
+              </button>
+            ))}
           </div>
+          {/* Live history is unbounded, so the list pages rather than growing
+              without limit — the design's single scroll pane assumes 14 rows. */}
+          <Pagination page={safePage} total={totalPages} onChange={setPage} />
+        </div>
+      </header>
+
+      {!isMobile && (
+        <div className="arch-head arch-cols">
+          <div>City / market</div>
+          <div>Bet</div>
+          <div className="r">In → out</div>
+          <div className="r">Size</div>
+          <div className="r">Result</div>
+          <div>Why it closed</div>
+          <div className="r">Ago</div>
+        </div>
+      )}
+
+      {shown.length === 0 ? (
+        <div className="empty-note">No trades match this filter.</div>
+      ) : (
+        <div className="list-body">
           {slice.map(t => {
             const closedAt = t.closed_at instanceof Date ? t.closed_at : new Date(t.closed_at);
-            const reasonClass = t.exit_reason.includes('Stop') ? 'stop'
-              : t.exit_reason.includes('Edge') || t.exit_reason.includes('decay') ? 'decay'
-              : t.exit_reason.includes('YES') ? 'resyes'
-              : 'resno';
-            return (
-              <div className="trow" key={t.id}>
+            const reason = exitReason(t.exit_reason);
+            const tone = t.pnl >= 0 ? 'pos' : 'neg';
+            return isMobile ? (
+              <div className="tcard" key={t.id}>
+                <div className="tcard-top">
+                  <span className={`side-tag side-${t.side.toLowerCase()}`}>{t.side}</span>
+                  <span className="tcard-city">{t.city}</span>
+                  <span className={`tcard-pnl ${tone}`}>{fmtUSD(t.pnl, true)}</span>
+                </div>
+                <div className="tcard-q">{t.question}</div>
+                <div className="tcard-meta">
+                  <span>{t.entry_price.toFixed(2)} → {t.exit_price.toFixed(2)}</span>
+                  <span>{fmtUSD(t.size_usdc)}</span>
+                  <span className="spacer" />
+                  <span>{fmtAgo(closedAt)} ago</span>
+                </div>
+                <div className="tcard-foot">
+                  <span className={`reason-chip reason-${reason.tone}`} title={t.exit_reason}>{reason.label}</span>
+                </div>
+              </div>
+            ) : (
+              <div className="arch-row arch-cols" key={t.id}>
                 <div className="cell-city">
                   <div className="city-line">{t.city}</div>
-                  <div className="city-q trunc">{t.question}</div>
+                  <div className="city-q">{t.question}</div>
                 </div>
                 <div><span className={`side-tag side-${t.side.toLowerCase()}`}>{t.side}</span></div>
-                <div className="r mono">
-                  <span>{t.entry_price.toFixed(2)}</span>
-                  <span className="arrow">→</span>
-                  <span>{t.exit_price.toFixed(2)}</span>
-                </div>
-                <div className="r mono">{fmtUSD(t.size_usdc)}</div>
-                <div className={`r mono ${t.pnl >= 0 ? 'pos' : 'neg'}`}>
+                <div className="r arch-prices">{t.entry_price.toFixed(2)} → {t.exit_price.toFixed(2)}</div>
+                <div className="r arch-size">{fmtUSD(t.size_usdc)}</div>
+                <div className={`r arch-pnl ${tone}`}>
                   {fmtUSD(t.pnl, true)}
-                  <div className="small">{(t.pnl_pct > 0 ? '+' : '') + t.pnl_pct.toFixed(1) + '%'}</div>
+                  <div className="pct">
+                    {t.pnl_pct != null ? (t.pnl_pct > 0 ? '+' : '') + t.pnl_pct.toFixed(1) + '%' : ''}
+                  </div>
                 </div>
-                <div className={`reason reason-${reasonClass}`}>{t.exit_reason}</div>
-                <div className="r mono dim">{fmtHold(t.hold_hours)}</div>
-                <div className="r mono dim">{fmtAgo(closedAt)}</div>
+                <div>
+                  <span className={`reason-chip reason-${reason.tone}`} title={t.exit_reason}>{reason.label}</span>
+                </div>
+                <div className="r arch-ago">{fmtAgo(closedAt)}</div>
               </div>
             );
           })}
@@ -571,65 +721,61 @@ function RecentTrades({ trades }) {
   );
 }
 
-// ---------- RecentSignals ----------
-const GATE_TONE = {
-  'Taken':                    'pos',
-  'Models disagreed':         'neutral',
-  'Model spread too wide':    'neutral',
-  'Market spread too wide':   'neutral',
-  'Too close to bucket edge': 'neutral',
-  'Direction mismatch':       'neutral',
-  'YES disabled':             'dim',
-  'Edge below threshold':     'dim',
-  'Other skip':               'dim',
-};
-// Fixed draw order so the breakdown bar and legend read left-to-right by
-// severity/interest rather than shuffling with whatever the data happens to contain.
-const GATE_ORDER = [
-  'Taken', 'Models disagreed', 'Model spread too wide', 'Market spread too wide',
-  'Too close to bucket edge', 'Direction mismatch', 'YES disabled', 'Edge below threshold', 'Other skip',
-];
+// ---------- ScanFeed (funnel strip) ----------
+const FUNNEL_COLORS = { dim: '#4a4640', neutral: '#b4b0a6', signal: '#f5b13c', pos: '#6cbf85' };
 
-function OutcomeBreakdown({ rows, activeFilter, setActiveFilter }) {
-  const counts = {};
-  for (const r of rows) counts[r.gate_outcome] = (counts[r.gate_outcome] || 0) + 1;
-  const present = GATE_ORDER.filter(k => counts[k]);
-  const total = rows.length || 1;
+function ScanFeed({ scanLog }) {
+  const steps = [
+    { label: 'Markets seen',      v: scanLog.markets_seen,  tone: 'dim' },
+    { label: 'Worth a look',      v: scanLog.candidates,    tone: 'neutral' },
+    { label: 'Passed the models', v: scanLog.shadow_passed, tone: 'signal' },
+    { label: 'Actually bought',   v: scanLog.filled,        tone: 'pos' },
+  ];
+  const top = steps[0].v || 0;
   return (
-    <div className="outcome-panel">
-      <div className="outcome-title">Outcome breakdown — click a segment to filter</div>
-      <div className="outcome-bar">
-        {present.map(k => {
-          const pct = (counts[k] / total) * 100;
-          const tone = GATE_TONE[k] || 'dim';
+    <section className="funnel-card">
+      <div className="funnel-head">
+        Last scan, step by step{' '}
+        <span className="dim">
+          · {fmtAgo(scanLog.last_scan_at)} ago · {(scanLog.duration_ms || 0).toLocaleString()}ms
+        </span>
+      </div>
+      <div className="scan-funnel">
+        {steps.map((s, i, arr) => {
+          const prev = i > 0 ? arr[i - 1].v : null;
+          const conv = prev && prev > 0 ? (s.v / prev) * 100 : null;
+          const width = top > 0 ? Math.min(100, ((s.v || 0) / top) * 100) : 0;
           return (
-            <div
-              key={k}
-              className={`outcome-seg tone-${tone} ${activeFilter === k ? 'active' : ''}`}
-              style={{ width: pct + '%' }}
-              title={`${k}: ${counts[k]}`}
-              onClick={() => setActiveFilter(activeFilter === k ? null : k)}
-            >
-              {pct > 6 ? counts[k] : ''}
+            <div className="funnel-step" key={s.label}>
+              <div className="k">{s.label}</div>
+              <div className="v" style={{ color: FUNNEL_COLORS[s.tone] }}>{(s.v || 0).toLocaleString()}</div>
+              <div className="funnel-rail">
+                <i style={{ width: width.toFixed(2) + '%', background: FUNNEL_COLORS[s.tone] }} />
+              </div>
+              <div className="c">{conv !== null ? `${conv.toFixed(1)}% of previous` : 'start'}</div>
             </div>
           );
         })}
       </div>
-      <div className="outcome-legend">
-        {present.map(k => (
-          <span
-            key={k}
-            className={`outcome-legend-item ${activeFilter && activeFilter !== k ? 'disabled' : ''}`}
-            onClick={() => setActiveFilter(activeFilter === k ? null : k)}
-          >
-            <span className={`outcome-swatch tone-${GATE_TONE[k] || 'dim'}`} />
-            {k} <span className="mono dim">{counts[k]}</span>
-          </span>
-        ))}
-      </div>
-    </div>
+    </section>
   );
 }
+
+// ---------- RecentSignals ----------
+// Fixed draw order so the breakdown bar and legend read left-to-right by how
+// far a market got, rather than shuffling with whatever the data contains.
+const GATE_COLOR = {
+  'Taken':                    '#6cbf85',
+  'Models disagreed':         '#f5b13c',
+  'Model spread too wide':    '#e39c33',
+  'Too close to bucket edge': '#c1913f',
+  'Market spread too wide':   '#8a7a55',
+  'Direction mismatch':       '#6b6455',
+  'YES disabled':             '#4a5560',
+  'Edge below threshold':     '#3d4550',
+  'Other skip':               '#2f353d',
+};
+const GATE_ORDER = Object.keys(GATE_COLOR);
 
 function SignalDetail({ s }) {
   const models = Object.entries(s.raw_models || {});
@@ -638,33 +784,37 @@ function SignalDetail({ s }) {
     : s.bucket_low != null ? `> ${s.bucket_low.toFixed(1)}°F`
     : s.bucket_high != null ? `< ${s.bucket_high.toFixed(1)}°F`
     : '—';
+  const market = [
+    ['Bucket', bucketLabel],
+    ['Model probability', s.model_prob != null ? fmtPct(s.model_prob, 0) : '—'],
+    ['YES price', s.yes_price != null ? '$' + s.yes_price.toFixed(3) : '—'],
+    ['NO price', s.no_price != null ? '$' + s.no_price.toFixed(3) : '—'],
+    ['Model spread', s.model_spread != null ? s.model_spread.toFixed(2) + '°F'
+      : s.ensemble_std != null ? s.ensemble_std.toFixed(2) + '°F' : '—'],
+    ['Market spread', s.market_spread_frac != null ? fmtPct(s.market_spread_frac) : '—'],
+    ['Agreement', s.agreement != null ? fmtPct(s.agreement, 0) : '—'],
+    ['Mean gap', s.mean_gap != null ? s.mean_gap.toFixed(1) + '°F' : '—'],
+  ];
   return (
-    <div className="detail-row">
+    <div className="sig-detail">
       <div className="detail-block">
-        <h4>Model forecasts</h4>
-        <div className="model-grid">
-          {models.length === 0 && <div className="dim small">no data</div>}
-          {models.map(([name, temp]) => (
-            <div className="model-row" key={name}>
-              <span className="dim">{name}</span>
-              <span className="mono">{temp.toFixed(2)}°F</span>
-            </div>
-          ))}
-        </div>
+        <h4>Forecast models</h4>
+        {models.length === 0 && <div className="kv"><span>no data</span></div>}
+        {models.map(([name, temp]) => (
+          <div className="kv" key={name}>
+            <span>{name}</span>
+            <span>{typeof temp === 'number' ? temp.toFixed(1) + '°' : '—'}</span>
+          </div>
+        ))}
       </div>
       <div className="detail-block">
-        <h4>Market snapshot</h4>
-        <div className="kv-grid">
-          <div className="kv-row"><span className="dim">Bucket</span><span className="mono">{bucketLabel}</span></div>
-          <div className="kv-row"><span className="dim">Model probability</span><span className="mono">{s.model_prob != null ? fmtPct(s.model_prob, 0) : '—'}</span></div>
-          <div className="kv-row"><span className="dim">YES price</span><span className="mono">{s.yes_price != null ? '$' + s.yes_price.toFixed(3) : '—'}</span></div>
-          <div className="kv-row"><span className="dim">NO price</span><span className="mono">{s.no_price != null ? '$' + s.no_price.toFixed(3) : '—'}</span></div>
-          <div className="kv-row"><span className="dim">Ensemble σ</span><span className="mono">{s.ensemble_std != null ? s.ensemble_std.toFixed(2) + '°F' : '—'}</span></div>
-          <div className="kv-row"><span className="dim">Market spread</span><span className="mono">{s.market_spread_frac != null ? fmtPct(s.market_spread_frac) : '—'}</span></div>
-        </div>
+        <h4>Market at that moment</h4>
+        {market.map(([k, v]) => (
+          <div className="kv" key={k}><span>{k}</span><span>{v}</span></div>
+        ))}
       </div>
       <div className="detail-block">
-        <h4>{s.gate_outcome === 'Taken' ? 'Entry reason' : 'Skip reason'}</h4>
+        <h4>{s.gate_outcome === 'Taken' ? 'Why it bought' : 'Why it passed'}</h4>
         <div className="reason-full">{s.reason}</div>
       </div>
     </div>
@@ -673,12 +823,17 @@ function SignalDetail({ s }) {
 
 function RecentSignals({ signals }) {
   const rows = signals || [];
-  const [activeFilter, setActiveFilter] = useState(null);
+  const [filter, setFilter] = useState(null);
   const [search, setSearch] = useState('');
   const [expanded, setExpanded] = useState(null);
 
+  const counts = {};
+  for (const r of rows) counts[r.gate_outcome] = (counts[r.gate_outcome] || 0) + 1;
+  const present = GATE_ORDER.filter(k => counts[k])
+    .concat(Object.keys(counts).filter(k => !GATE_COLOR[k]));   // unknown gates last
+
   const filtered = rows.filter(s => {
-    if (activeFilter && s.gate_outcome !== activeFilter) return false;
+    if (filter && s.gate_outcome !== filter) return false;
     if (search) {
       const q = search.toLowerCase();
       if (!(s.city || '').toLowerCase().includes(q) && !(s.market_id || '').toLowerCase().includes(q)) return false;
@@ -686,117 +841,90 @@ function RecentSignals({ signals }) {
     return true;
   });
   const maxEdge = Math.max(...rows.map(s => Math.abs(s.edge || 0)), 0.01);
+  const total = rows.length || 1;
+  const toggleGate = (k) => setFilter(f => (f === k ? null : k));
 
   return (
-    <section className="card">
-      <header className="card-head">
-        <div>
-          <h2>Recently scanned signals</h2>
-          <p className="card-sub">{rows.length} candidates from the last scan cycle · every market the bot looked at, taken or skipped</p>
+    <section className="pane list-pane">
+      <header className="pane-head block">
+        <div className="sig-head-row">
+          <div>
+            <h2>Every market it looked at</h2>
+            <p className="card-sub">
+              {filtered.length} of {rows.length} shown · tap a row for the numbers behind it
+            </p>
+          </div>
+          <input
+            type="search"
+            className="signals-search"
+            placeholder="Filter by city…"
+            value={search}
+            onChange={e => setSearch(e.target.value)}
+          />
+        </div>
+        <div className="gate-bar">
+          {present.map(k => (
+            <div
+              key={k}
+              className="gate-seg"
+              title={`${k}: ${counts[k]}`}
+              onClick={() => toggleGate(k)}
+              style={{
+                width: ((counts[k] / total) * 100).toFixed(1) + '%',
+                background: GATE_COLOR[k] || '#3d4550',
+                opacity: !filter || filter === k ? 1 : 0.28,
+              }}
+            />
+          ))}
+        </div>
+        <div className="gate-legend">
+          {present.map(k => (
+            <span
+              key={k}
+              onClick={() => toggleGate(k)}
+              style={{ color: !filter || filter === k ? 'var(--text-soft)' : 'var(--dim)' }}
+            >
+              <i style={{ background: GATE_COLOR[k] || '#3d4550' }} />
+              {k} <span className="n">{counts[k]}</span>
+            </span>
+          ))}
         </div>
       </header>
-      <OutcomeBreakdown rows={rows} activeFilter={activeFilter} setActiveFilter={setActiveFilter} />
-      <div className="signals-controls">
-        <input
-          type="search"
-          className="signals-search"
-          placeholder="Search city or market ID…"
-          value={search}
-          onChange={e => setSearch(e.target.value)}
-        />
-        <span className="result-count mono dim">{filtered.length} of {rows.length} shown</span>
-      </div>
+
       {filtered.length === 0 ? (
-        <div style={{ padding: '8px 4px' }} className="dim small">No signals match.</div>
+        <div className="empty-note">No signals match.</div>
       ) : (
-        <div className="table signals-table">
-          <div className="thead">
-            <div>City</div>
-            <div>Target date</div>
-            <div className="r">Edge</div>
-            <div className="r">Agreement</div>
-            <div className="r">Model spread °F</div>
-            <div className="r">Mean gap °F</div>
-            <div>Gate outcome</div>
-            <div>Reason</div>
-          </div>
-          <div className="signals-scroll-wrapper">
-            {filtered.map((s, i) => {
-              const tone = GATE_TONE[s.gate_outcome] || 'dim';
-              const barPct = maxEdge > 0 ? Math.min(100, (Math.abs(s.edge || 0) / maxEdge) * 100) : 0;
-              const key = s.ts + '_' + s.market_id + '_' + i;
-              const isOpen = expanded === key;
-              return (
-                <React.Fragment key={key}>
-                  <div className={`trow clickable ${isOpen ? 'expanded' : ''}`} onClick={() => setExpanded(isOpen ? null : key)}>
-                    <div className="cell-city">
-                      <div className="city-line">{s.city || '—'}</div>
-                      <div className="city-q dim small">{fmtAgo(new Date(s.ts))} ago</div>
-                    </div>
-                    <div className="dim mono small">{s.target_date || '—'}</div>
-                    <div className="r">
-                      <div className="edge-bar-wrap">
-                        <div className="edge-bar-track"><div className="edge-bar-fill" style={{ width: barPct.toFixed(0) + '%' }} /></div>
-                        <span className="mono">{s.edge != null ? fmtPctSigned(s.edge) : '—'}</span>
-                      </div>
-                    </div>
-                    <div className="r mono dim">{s.agreement != null ? fmtPct(s.agreement, 0) : '—'}</div>
-                    <div className="r mono dim">{s.model_spread != null ? s.model_spread.toFixed(1) : '—'}</div>
-                    <div className="r mono dim">{s.mean_gap != null ? s.mean_gap.toFixed(1) : '—'}</div>
-                    <div><span className={`gate-pill gate-${tone}`}>{s.gate_outcome}</span></div>
-                    <div className="reason dim small trunc" title={s.reason}>{s.reason}</div>
+        <div className="list-body">
+          {filtered.map((s, i) => {
+            const key = s.ts + '_' + s.market_id + '_' + i;
+            const open = expanded === key;
+            const taken = s.gate_outcome === 'Taken';
+            const barPct = Math.min(100, (Math.abs(s.edge || 0) / maxEdge) * 100);
+            const edgeColor = taken ? 'var(--positive)' : 'var(--signal-deep)';
+            return (
+              <div className={`sig-row ${open ? 'open' : ''}`} key={key}>
+                <div className="sig-top" onClick={() => setExpanded(open ? null : key)}>
+                  <div>
+                    <div className="sig-city">{s.city || '—'}</div>
+                    <div className="sig-when">{s.target_date || '—'} · {fmtAgo(new Date(s.ts))} ago</div>
                   </div>
-                  {isOpen && <SignalDetail s={s} />}
-                </React.Fragment>
-              );
-            })}
-          </div>
-        </div>
-      )}
-    </section>
-  );
-}
-
-// ---------- ScanFeed ----------
-function ScanFeed({ scanLog }) {
-  const [open, setOpen] = useState(true);
-  return (
-    <section className={`card scan-feed ${open ? 'open' : 'closed'}`}>
-      <header className="card-head clickable" onClick={() => setOpen(o => !o)}>
-        <div>
-          <h2>Scan feed</h2>
-          <p className="card-sub">
-            {fmtAgo(scanLog.last_scan_at)} ago
-            <span className="sep">·</span>
-            {scanLog.duration_ms.toLocaleString()}ms
-            <span className="sep">·</span>
-            {scanLog.markets_seen.toLocaleString()} markets · {scanLog.candidates} candidates · <span className="pos">{scanLog.filled} filled</span>
-          </p>
-        </div>
-        <span className="chev">{open ? '▾' : '▸'}</span>
-      </header>
-      {open && (
-        <div className="scan-body">
-          <div className="scan-funnel">
-            {[
-              { label: 'Markets seen',  v: scanLog.markets_seen,  tone: 'dim' },
-              { label: 'Candidates',    v: scanLog.candidates,    tone: 'neutral' },
-              { label: 'Shadow passed', v: scanLog.shadow_passed, tone: 'signal' },
-              { label: 'Filled',        v: scanLog.filled,        tone: 'pos' },
-            ].map((s, i, arr) => {
-              const prev = i > 0 ? arr[i - 1].v : null;
-              const conv = prev && prev > 0 ? (s.v / prev) * 100 : null;
-              return (
-                <div className="funnel-step" key={s.label}>
-                  <div className="kpi-label">{s.label}</div>
-                  <div className={`mono funnel-val tone-${s.tone}`}>{s.v.toLocaleString()}</div>
-                  <div className="funnel-conv mono">
-                    {conv !== null ? `${conv.toFixed(1)}% of prev` : ' '}
+                  <div className="sig-edge">
+                    <div className="sig-edge-track">
+                      <i style={{ width: barPct.toFixed(0) + '%', background: edgeColor }} />
+                    </div>
+                    <span className="sig-edge-val" style={{ color: edgeColor }}>
+                      {s.edge != null ? fmtPctSigned(s.edge) : '—'}
+                    </span>
+                  </div>
+                  <div className="sig-gate">
+                    <span className={`gate-pill ${taken ? 'taken' : ''}`}>{s.gate_outcome}</span>
+                    <span className="sig-chev">{open ? '−' : '+'}</span>
                   </div>
                 </div>
-              );
-            })}
-          </div>
+                {open && <SignalDetail s={s} />}
+              </div>
+            );
+          })}
         </div>
       )}
     </section>
@@ -808,41 +936,64 @@ function ScanFeed({ scanLog }) {
 // typing "70" is natural, 0.70 is not.
 const PCT_FIELDS = { MAX_TOTAL_EXPOSURE_FRACTION: true, STOP_LOSS_PCT: true };
 
-function NumField({ id, label, help, value, onChange, prefix, suffix, step, error, warn, disabled }) {
+// Stepper — −/+ around a typed value. `dp` decimals keeps the money fields at
+// cents and the whole-dollar fields clean; clamping happens on commit so an
+// in-progress edit ("" or "1.") isn't fought by the input as it's typed.
+function Stepper({ label, value, onChange, prefix, step = 1, dp = 2,
+                   min = 0, max = Infinity, error, wide }) {
+  const clamp = n => Math.min(max, Math.max(min, n));
+  const bump = d => {
+    const base = Number(value);
+    onChange(clamp(+((isNaN(base) ? min : base) + d).toFixed(dp)).toFixed(dp));
+  };
+  const commit = () => {
+    const n = Number(value);
+    onChange((isNaN(n) ? min : clamp(n)).toFixed(dp));
+  };
   return (
-    <div className="field-row">
-      <div>
-        <div className="field-label">{label}</div>
-        {help && <div className="field-help">{help}</div>}
-        {error && <div className="field-error">{error}</div>}
-        {!error && warn && <div className="field-warn">{warn}</div>}
-      </div>
-      <div className={`input ${error ? 'has-error' : ''}`}>
-        {prefix && <span className="affix">{prefix}</span>}
-        <input
-          type="number" step={step || 'any'} value={value} disabled={disabled}
-          onChange={e => onChange(e.target.value)} aria-label={label} id={id}
-        />
-        {suffix && <span className="affix">{suffix}</span>}
-      </div>
+    <div className={`stepper ${error ? 'has-error' : ''}`}>
+      <button type="button" onClick={() => bump(-step)}
+              disabled={Number(value) <= min} aria-label={`Decrease ${label}`}>−</button>
+      <span className={`stepper-val ${wide ? 'wide' : ''}`}>
+        {prefix && <span className="stepper-affix">{prefix}</span>}
+        <input type="text" inputMode="decimal" value={value} aria-label={label}
+               onChange={e => onChange(e.target.value)} onBlur={commit} />
+      </span>
+      <button type="button" onClick={() => bump(step)}
+              disabled={Number(value) >= max} aria-label={`Increase ${label}`}>+</button>
     </div>
   );
 }
 
-function NumFieldText({ label, help, value, onChange, placeholder }) {
+// Slider block — the reading sits beside the label and the fill tracks the
+// thumb, so the current value is legible without dragging.
+function SliderField({ label, help, value, onChange, min, max, step = 1,
+                       readout, unit, disabled, error }) {
+  const span = max - min;
+  const fill = span ? Math.min(100, Math.max(0, ((Number(value) - min) / span) * 100)) : 0;
   return (
-    <div className="field-row">
-      <div>
+    <div className={disabled ? 'dependent-off' : ''}>
+      <div className="slider-head">
         <div className="field-label">{label}</div>
-        {help && <div className="field-help">{help}</div>}
+        <div className="slider-read">
+          {readout}{unit && <span className="unit"> {unit}</span>}
+        </div>
       </div>
-      <div className="input">
-        <input type="text" value={value} placeholder={placeholder}
-               onChange={e => onChange(e.target.value)} aria-label={label} />
-      </div>
+      <div className="slider-help">{help}</div>
+      <input
+        type="range" className="range" min={min} max={max} step={step}
+        value={value} disabled={disabled} aria-label={label}
+        onChange={e => onChange(e.target.value)}
+        style={{ background: `linear-gradient(90deg, #e39c33 ${fill}%, rgba(255,255,255,0.08) ${fill}%)` }}
+      />
+      {error && <div className="field-error">{error}</div>}
     </div>
   );
 }
+
+// The allowed concurrency values, offered as buttons. A typed number here would
+// hide the fact that only a handful of settings make sense.
+const POS_OPTIONS = [2, 3, 4, 6, 8];
 
 // What the bot will ACTUALLY do with a given set of values. Recomputed on every
 // keystroke — this is the "show me the value as I tweak it" part.
@@ -857,35 +1008,40 @@ function deriveImpact(v, ctx) {
   const slotsByCash = effective > 0 ? Math.floor((ctx.available_cash || 0) / effective) : 0;
   const maxConc = Number(v.MAX_CONCURRENT_POSITIONS) || 0;
   const slots = Math.max(0, Math.min(maxConc, slotsByExposure, slotsByCash));
-  let binding = 'max concurrent';
-  if (slots === slotsByCash && slotsByCash <= slotsByExposure && slotsByCash <= maxConc) binding = 'available cash';
-  else if (slots === slotsByExposure && slotsByExposure <= maxConc) binding = 'exposure cap';
   // The daily loss limit is DERIVED: a budget of N full-stake losses, so the
-  // dollar figure below rescales live as the stake or the budget is edited.
+  // dollar figure rescales live as the stake or the budget is edited.
   const lossStakes = Number(v.DAILY_LOSS_STAKES) || 0;
   return {
     effective,
     clamped: size > ceiling,
-    pctOfEquity: equity ? effective / equity : 0,
-    exposureCap, slots, binding,
+    exposureCap, slots,
     // On a binary $0/$1 market the max loss per position IS the whole stake,
     // so this is a real worst case, not a scare number.
     worstCase: slots * effective,
     dailyLossDollars: effective * lossStakes,
     lossesToHalt: Math.ceil(lossStakes),
     stopLossPerTrade: v.ENABLE_STOP_LOSS ? effective * (Number(v.STOP_LOSS_PCT) || 0) : effective,
+    // Upside if a trade runs from a typical entry to the take-profit price.
+    // The stake buys stake/entry shares; selling them at tp returns
+    // stake * (tp/entry), so the gain is stake * (tp/entry - 1). Measured
+    // against the average fill the bot has actually paid — pricing it off the
+    // take-profit price itself would imply buying at ~$0.98 and report a few
+    // cents of upside against a full-stake downside.
+    upside: (() => {
+      const tp = Number(v.TAKE_PROFIT_PRICE);
+      const entry = Number(ctx.avg_entry_price) || 0.45;
+      return tp > 0 && entry > 0 ? Math.max(0, effective * (tp / entry - 1)) : 0;
+    })(),
   };
 }
 
-function SettingsPanel({ portfolio }) {
+function SettingsPanel() {
   const [server, setServer] = useState(null);
   const [draft, setDraft] = useState(null);
   const [phase, setPhase] = useState('idle');   // idle|confirming|saving
   const [fieldErrors, setFieldErrors] = useState({});
   const [banner, setBanner] = useState(null);
-  const [depositAmt, setDepositAmt] = useState('');
-  const [depositConfirm, setDepositConfirm] = useState(false);
-  const [depositBusy, setDepositBusy] = useState(false);
+  const [saved, setSaved] = useState(false);
   const [eras, setEras] = useState(null);
   const [eraLabel, setEraLabel] = useState('');
   const [eraConfirm, setEraConfirm] = useState(false);
@@ -895,7 +1051,7 @@ function SettingsPanel({ portfolio }) {
     try {
       const r = await fetch('/api/settings');
       if (r.status === 401) { window.location.href = '/'; return; }
-      const d = await r.json();
+      const d = await readJSON(r);
       // Percent-style values are edited as whole numbers.
       const shown = { ...d.values };
       Object.keys(PCT_FIELDS).forEach(k => { if (shown[k] != null) shown[k] = +(shown[k] * 100).toFixed(4); });
@@ -903,24 +1059,23 @@ function SettingsPanel({ portfolio }) {
       setDraft(shown);
       try {
         const er = await fetch('/api/eras');
-        if (er.ok) setEras(await er.json());
+        if (er.ok) setEras(await readJSON(er));
       } catch (e) { /* era card just shows less */ }
     } catch (e) { setBanner({ err: true, msg: 'Could not load settings: ' + e.message }); }
   };
 
   useEffect(() => { load(); }, []);
 
-  if (!server || !draft) return <section className="card"><div className="dim small">Loading settings…</div></section>;
+  if (!server || !draft) {
+    return <div className="empty-note">Loading settings…</div>;
+  }
 
   if (server.archive_view) {
     return (
-      <section className="card">
-        <header className="card-head"><div><h2>Settings</h2></div></header>
-        <div className="settings-note">
-          Viewing the frozen paper-era archive. Switch back to live (the mode pill,
-          top right) to change settings.
-        </div>
-      </section>
+      <div className="settings-note">
+        Viewing the frozen paper-era archive. Switch back to live (the mode pill,
+        top right) to change settings.
+      </div>
     );
   }
 
@@ -930,10 +1085,23 @@ function SettingsPanel({ portfolio }) {
     Object.keys(PCT_FIELDS).forEach(k => { if (out[k] != null && out[k] !== '') out[k] = Number(out[k]) / 100; });
     return out;
   })();
-  const impact = deriveImpact(realValues, server.context);
+  const ctx = server.context;
+  const impact = deriveImpact(realValues, ctx);
 
-  const dirtyKeys = Object.keys(server.shownValues)
-    .filter(k => String(draft[k]) !== String(server.shownValues[k]));
+  // Compare numerically where both sides are numbers: the steppers normalise to
+  // two decimals, so a value nudged up and back down lands on "2.00" against a
+  // server "2" and a pure string compare would report a change that isn't one.
+  const sameValue = (a, b) => {
+    if (a === b) return true;
+    // Booleans stay an identity compare — Number(true) is 1, which would make
+    // the stop-loss flag look equal to a numeric 1.
+    if (typeof a === 'boolean' || typeof b === 'boolean') return false;
+    const na = Number(a), nb = Number(b);
+    if (a !== '' && b !== '' && a != null && b != null && !isNaN(na) && !isNaN(nb)) return na === nb;
+    return String(a) === String(b);
+  };
+  const dirtyKeys = Object.keys(server.shownValues).filter(k => !sameValue(draft[k], server.shownValues[k]));
+  const dirty = dirtyKeys.length;
 
   const set = (key, val) => {
     setDraft(d => {
@@ -946,6 +1114,7 @@ function SettingsPanel({ portfolio }) {
       return next;
     });
     setFieldErrors(fe => ({ ...fe, [key]: null }));
+    setSaved(false);
   };
 
   const save = async () => {
@@ -960,7 +1129,7 @@ function SettingsPanel({ portfolio }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ settings: payload }),
       });
-      const d = await r.json();
+      const d = await readJSON(r);
       setPhase('idle');
       if (!r.ok) {
         if (d.field_errors) setFieldErrors(d.field_errors);
@@ -970,6 +1139,7 @@ function SettingsPanel({ portfolio }) {
       // Applied live: the runtime store is already swapped, the next bot
       // decision uses the new values. Just re-sync the panel and the desk.
       await load();
+      setSaved(true);
       window.dispatchEvent(new Event('stormedge-refetch'));
       setBanner({ msg: d.changed && d.changed.length
         ? 'Applied immediately: ' + d.changed.join(', ')
@@ -980,25 +1150,6 @@ function SettingsPanel({ portfolio }) {
     }
   };
 
-  const doDeposit = async () => {
-    setDepositBusy(true); setBanner(null);
-    try {
-      const r = await fetch('/api/deposit', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ amount: Number(depositAmt), confirm: true }),
-      });
-      const d = await r.json();
-      if (!r.ok) setBanner({ err: true, msg: d.error || 'Deposit failed' });
-      else {
-        setBanner({ msg: `Deposit of ${fmtUSD(d.amount)} recorded — balance is now ${fmtUSD(d.new_balance)}.` });
-        setDepositAmt(''); setDepositConfirm(false);
-        await load();
-        window.dispatchEvent(new Event('stormedge-refetch'));
-      }
-    } catch (e) { setBanner({ err: true, msg: e.message }); }
-    setDepositBusy(false);
-  };
-
   const startNewEra = async () => {
     setEraBusy(true); setBanner(null);
     try {
@@ -1006,7 +1157,7 @@ function SettingsPanel({ portfolio }) {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ confirm: true, label: eraLabel.trim() || undefined }),
       });
-      const d = await r.json();
+      const d = await readJSON(r);
       if (!r.ok) setBanner({ err: true, msg: d.error || 'Era cutover failed' });
       else {
         setBanner({ msg: `Era '${d.new_label}' opened at ${fmtUSD(d.seed)} — ` +
@@ -1020,240 +1171,299 @@ function SettingsPanel({ portfolio }) {
     setEraBusy(false);
   };
 
-  const ctx = server.context;
-  const depositNum = Number(depositAmt);
-  const depositValid = depositNum > 0 && depositNum <= 10000;
-  const bigDeposit = depositNum > 10 * (ctx.available_cash || 1);
+  const eraBlocked = ctx.open_positions > 0;
 
   return (
-    <div className="col-stack">
+    <>
       {banner && <div className={`settings-note ${banner.err ? 'err' : ''}`}>{banner.msg}</div>}
+
       <div className="settings-grid">
         {/* ---- sizing ---- */}
-        <section className="card">
-          <header className="card-head">
-            <div>
-              <h2>Position sizing</h2>
-              <p className="card-sub">how much each trade stakes</p>
+        <section className="set-card">
+          <div className="set-title">
+            <h2>How much to bet</h2>
+            <span className="set-kicker">PER TRADE</span>
+          </div>
+
+          <div className="set-row pad-b">
+            <div className="grow">
+              <div className="field-label">Stake on every trade</div>
+              <div className="field-help">Polymarket won't take less than {fmtUSD(ctx.min_position_size)}</div>
+              {fieldErrors.FIXED_POSITION_SIZE && <div className="field-error">{fieldErrors.FIXED_POSITION_SIZE}</div>}
             </div>
-          </header>
-          <NumField
-            label="Stake per trade" prefix="$" step="0.25"
-            value={draft.FIXED_POSITION_SIZE}
-            onChange={v => set('FIXED_POSITION_SIZE', v)}
-            error={fieldErrors.FIXED_POSITION_SIZE}
-            help={`Every trade stakes exactly this. CLOB minimum is ${fmtUSD(ctx.min_position_size)}.`}
-          />
-          <NumField
-            label="Per-trade ceiling" prefix="$" step="0.25"
-            value={draft.HARD_MAX_POSITION_SIZE}
-            onChange={v => set('HARD_MAX_POSITION_SIZE', v)}
-            error={fieldErrors.HARD_MAX_POSITION_SIZE}
-            help="Absolute cap applied on top of the stake."
-            warn={Number(draft.HARD_MAX_POSITION_SIZE) === Number(draft.FIXED_POSITION_SIZE)
-              && dirtyKeys.includes('HARD_MAX_POSITION_SIZE')
-              ? 'Raised automatically to match the stake — the ceiling clamps it, so leaving it lower would keep every trade at the old size.'
-              : null}
-          />
-          <div className="impact-block">
-            <div className="impact-row">
-              <span className="k">Effective stake</span>
-              <span className={`v ${impact.clamped ? 'bad' : ''}`}>
-                {fmtUSD(impact.effective)}{impact.clamped ? ' — clamped by ceiling' : ''}
-              </span>
+            <Stepper
+              label="Stake on every trade" prefix="$" step={1} dp={2}
+              min={ctx.min_position_size || 1} max={500}
+              value={draft.FIXED_POSITION_SIZE}
+              onChange={v => set('FIXED_POSITION_SIZE', v)}
+              error={fieldErrors.FIXED_POSITION_SIZE}
+            />
+          </div>
+
+          <div className="set-div" />
+
+          <div className="set-row pad-y">
+            <div className="grow">
+              <div className="field-label">Never bet more than</div>
+              <div className="field-help">Hard ceiling on top of the stake</div>
+              {fieldErrors.HARD_MAX_POSITION_SIZE && <div className="field-error">{fieldErrors.HARD_MAX_POSITION_SIZE}</div>}
+              {!fieldErrors.HARD_MAX_POSITION_SIZE
+                && Number(draft.HARD_MAX_POSITION_SIZE) === Number(draft.FIXED_POSITION_SIZE)
+                && dirtyKeys.includes('HARD_MAX_POSITION_SIZE') && (
+                <div className="field-warn">
+                  Raised automatically to match the stake — the ceiling clamps it, so
+                  leaving it lower would keep every trade at the old size.
+                </div>
+              )}
             </div>
-            <div className="impact-row">
-              <span className="k">Share of equity</span>
-              <span className="v">{fmtPct(impact.pctOfEquity)} of {fmtUSD(ctx.total_equity)}</span>
+            <Stepper
+              label="Never bet more than" prefix="$" step={1} dp={2}
+              min={ctx.min_position_size || 1} max={500}
+              value={draft.HARD_MAX_POSITION_SIZE}
+              onChange={v => set('HARD_MAX_POSITION_SIZE', v)}
+              error={fieldErrors.HARD_MAX_POSITION_SIZE}
+            />
+          </div>
+
+          <div className="set-fill" />
+
+          {/* Headline consequence of the two knobs above: what one trade costs,
+              and what the rails around it work out to in dollars. */}
+          <div className="means-card">
+            <div className="means-label">WHAT THAT MEANS</div>
+            <div className="means-hero">
+              <div className="v">{fmtUSD(impact.effective)}</div>
+              <div className="s">
+                {ctx.available_cash ? fmtPct(impact.effective / ctx.available_cash) : '—'} of {fmtUSD(ctx.available_cash)} per trade
+                {impact.clamped ? ' · clamped by ceiling' : ''}
+              </div>
             </div>
-            <div className="impact-row">
-              <span className="k">Positions allowed</span>
-              <span className="v">{impact.slots} <span className="dim">— limited by {impact.binding}</span></span>
+            <div className="means-rail">
+              <i style={{ width: (ctx.available_cash
+                ? Math.min(100, (impact.effective / ctx.available_cash) * 100) : 0).toFixed(1) + '%' }} />
             </div>
-            <div className="impact-row">
-              <span className="k">Worst case open</span>
-              <span className="v">{fmtUSD(impact.worstCase)} if all resolve to zero</span>
-            </div>
-            <div className="impact-row">
-              <span className="k">Daily loss limit</span>
-              <span className={`v ${impact.lossesToHalt <= 2 ? 'warn' : ''}`}>
-                {fmtUSD(impact.dailyLossDollars)} — halts after {impact.lossesToHalt} loss{impact.lossesToHalt === 1 ? '' : 'es'}
-              </span>
+            <div className="means-grid">
+              <div><span className="k">trades at once</span><span className="v">{impact.slots}</span></div>
+              <div><span className="k">most at risk</span><span className="v">{fmtUSD(impact.worstCase)}</span></div>
+              <div>
+                <span className="k">stops at</span>
+                <span className={`v ${impact.lossesToHalt <= 2 ? 'warn' : ''}`}>{fmtUSD(impact.dailyLossDollars)}</span>
+              </div>
+              <div>
+                <span className="k">after</span>
+                <span className="v">{impact.lossesToHalt} loss{impact.lossesToHalt === 1 ? '' : 'es'}</span>
+              </div>
             </div>
           </div>
         </section>
 
         {/* ---- risk ---- */}
-        <section className="card">
-          <header className="card-head">
-            <div>
-              <h2>Risk limits</h2>
-              <p className="card-sub">portfolio-level guards</p>
+        <section className="set-card">
+          <div className="set-title">
+            <h2>When to stop</h2>
+            <span className="set-kicker">SAFETY RAILS</span>
+          </div>
+
+          <div className="set-row pad-b">
+            <div className="grow">
+              <div className="field-label">Trades open at once</div>
+              <div className="field-help">No new entries past this many</div>
+              {fieldErrors.MAX_CONCURRENT_POSITIONS && (
+                <div className="field-error">{fieldErrors.MAX_CONCURRENT_POSITIONS}</div>
+              )}
             </div>
-          </header>
-          <NumField
-            label="Max concurrent positions" step="1"
-            value={draft.MAX_CONCURRENT_POSITIONS}
-            onChange={v => set('MAX_CONCURRENT_POSITIONS', v)}
-            error={fieldErrors.MAX_CONCURRENT_POSITIONS}
-            help="Refuse new entries once this many are open."
-          />
-          <NumField
-            label="Daily loss budget" suffix="stakes" step="0.5"
-            value={draft.DAILY_LOSS_STAKES}
-            onChange={v => set('DAILY_LOSS_STAKES', v)}
-            error={fieldErrors.DAILY_LOSS_STAKES}
-            help={`Halts the day after this many full-stake losses — currently ${fmtUSD(impact.dailyLossDollars)}. Scales automatically when the stake changes.`}
-          />
-          <NumField
-            label="Total exposure cap" suffix="%" step="5"
-            value={draft.MAX_TOTAL_EXPOSURE_FRACTION}
-            onChange={v => set('MAX_TOTAL_EXPOSURE_FRACTION', v)}
-            error={fieldErrors.MAX_TOTAL_EXPOSURE_FRACTION}
-            help={`Share of equity allowed in open positions — ${fmtUSD(impact.exposureCap)} right now.`}
-          />
+            <div className="pos-options">
+              {POS_OPTIONS.map(n => (
+                <button
+                  key={n} type="button"
+                  className={Number(draft.MAX_CONCURRENT_POSITIONS) === n ? 'on' : ''}
+                  onClick={() => set('MAX_CONCURRENT_POSITIONS', n)}
+                  aria-pressed={Number(draft.MAX_CONCURRENT_POSITIONS) === n}
+                >{n}</button>
+              ))}
+            </div>
+          </div>
+
+          <div className="set-div" />
+          <div className="pad-y-lg">
+            <SliderField
+              label="Give up for the day after"
+              help="Counted in full-stake losses"
+              min={1} max={12} step={1}
+              value={draft.DAILY_LOSS_STAKES}
+              onChange={v => set('DAILY_LOSS_STAKES', v)}
+              readout={draft.DAILY_LOSS_STAKES}
+              unit={`losses · ${fmtUSD(impact.dailyLossDollars)}`}
+              error={fieldErrors.DAILY_LOSS_STAKES}
+            />
+          </div>
+
+          <div className="set-div" />
+          <div className="pad-y-lg">
+            <SliderField
+              label="Cash tied up at most"
+              help="Share of the bankroll allowed in open trades"
+              min={10} max={100} step={5}
+              value={draft.MAX_TOTAL_EXPOSURE_FRACTION}
+              onChange={v => set('MAX_TOTAL_EXPOSURE_FRACTION', v)}
+              readout={`${draft.MAX_TOTAL_EXPOSURE_FRACTION}%`}
+              unit={`· ${fmtUSD(impact.exposureCap)}`}
+              error={fieldErrors.MAX_TOTAL_EXPOSURE_FRACTION}
+            />
+          </div>
+
+          <div className="set-fill" />
+          <div className="note-row">
+            <span className="dot" />
+            <span>These rails re-scale on their own when you change the stake.</span>
+          </div>
         </section>
 
         {/* ---- exits ---- */}
-        <section className="card">
-          <header className="card-head">
-            <div>
-              <h2>Exits</h2>
-              <p className="card-sub">when a position is closed early</p>
-            </div>
-          </header>
-          <div className="field-row">
-            <div>
-              <div className="field-label">Stop loss</div>
-              <div className="field-help">Sell when the mid falls far enough below entry.</div>
-            </div>
-            <div className="seg">
-              <button className={draft.ENABLE_STOP_LOSS ? 'on' : ''} onClick={() => set('ENABLE_STOP_LOSS', true)}>ON</button>
-              <button className={!draft.ENABLE_STOP_LOSS ? 'on' : ''} onClick={() => set('ENABLE_STOP_LOSS', false)}>OFF</button>
-            </div>
+        <section className="set-card">
+          <div className="set-title">
+            <h2>When to get out</h2>
+            <span className="set-kicker">EARLY EXITS</span>
           </div>
-          <NumField
-            label="Stop loss level" suffix="%" step="5"
-            value={draft.STOP_LOSS_PCT}
-            disabled={!draft.ENABLE_STOP_LOSS}
-            onChange={v => set('STOP_LOSS_PCT', v)}
-            error={fieldErrors.STOP_LOSS_PCT}
-            help={draft.ENABLE_STOP_LOSS
-              ? `Cuts a loss at ${fmtUSD(impact.stopLossPerTrade)} instead of the full ${fmtUSD(impact.effective)}.`
-              : 'Stop loss is off — a losing position rides to settlement.'}
-          />
-          <NumField
-            label="Take profit price" prefix="$" step="0.01"
-            value={draft.TAKE_PROFIT_PRICE}
-            onChange={v => set('TAKE_PROFIT_PRICE', v)}
-            error={fieldErrors.TAKE_PROFIT_PRICE}
-            help="Sell the moment a real bid reaches this."
-          />
-        </section>
 
-        {/* ---- bankroll ---- */}
-        <section className="card">
-          <header className="card-head">
-            <div>
-              <h2>Bankroll</h2>
-              <p className="card-sub">record money paid into the account</p>
+          <div className="set-row" style={{ paddingBottom: 14 }}>
+            <div className="grow">
+              <div className="field-label">Cut losing trades early</div>
+              <div className="field-help">Sell when the price falls far enough</div>
             </div>
-          </header>
-          <div className="impact-block" style={{ marginTop: 0 }}>
-            <div className="impact-row"><span className="k">Available cash</span><span className="v">{fmtUSD(ctx.available_cash)}</span></div>
-            <div className="impact-row"><span className="k">In open positions</span><span className="v">{fmtUSD(ctx.locked_cash)}</span></div>
-            <div className="impact-row"><span className="k">Total capital in</span><span className="v">{fmtUSD(ctx.total_deposited)}</span></div>
+            <button
+              type="button"
+              className={`switch ${draft.ENABLE_STOP_LOSS ? 'on' : ''}`}
+              onClick={() => set('ENABLE_STOP_LOSS', !draft.ENABLE_STOP_LOSS)}
+              aria-pressed={!!draft.ENABLE_STOP_LOSS}
+              aria-label="Cut losing trades early"
+            >
+              <span className="switch-label">{draft.ENABLE_STOP_LOSS ? 'ON' : 'OFF'}</span>
+              <span className="switch-knob" />
+            </button>
           </div>
-          <NumField
-            label="Record a deposit" prefix="$" step="1"
-            value={depositAmt}
-            onChange={v => { setDepositAmt(v); setDepositConfirm(false); }}
-            help="Adds cash to the ledger. Does not count as profit and needs no restart."
-            warn={bigDeposit ? 'This is far larger than your current balance — is the figure in dollars, not naira?' : null}
-          />
-          {depositValid && (
-            <div className="impact-row" style={{ marginTop: 4 }}>
-              <span className="k">New balance would be</span>
-              <span className="v">{fmtUSD((ctx.available_cash || 0) + depositNum)}</span>
+
+          <div className="set-div" />
+          <div className="pad-y-lg">
+            <SliderField
+              label="Cut it when it drops"
+              help={draft.ENABLE_STOP_LOSS
+                ? `Instead of riding ${fmtUSD(impact.effective)} to zero`
+                : 'Stop loss is off — a losing position rides to settlement'}
+              min={10} max={90} step={5}
+              value={draft.STOP_LOSS_PCT}
+              disabled={!draft.ENABLE_STOP_LOSS}
+              onChange={v => set('STOP_LOSS_PCT', v)}
+              readout={`${draft.STOP_LOSS_PCT}%`}
+              unit={`· loses ${fmtUSD(impact.stopLossPerTrade)}`}
+              error={fieldErrors.STOP_LOSS_PCT}
+            />
+          </div>
+
+          <div className="set-div" />
+          <div className="set-row pad-t">
+            <div className="grow">
+              <div className="field-label">Take the win at</div>
+              <div className="field-help">Sell as soon as a real bid hits this</div>
+              {fieldErrors.TAKE_PROFIT_PRICE && <div className="field-error">{fieldErrors.TAKE_PROFIT_PRICE}</div>}
             </div>
-          )}
-          <div style={{ display: 'flex', gap: 9, marginTop: 10 }}>
-            {!depositConfirm ? (
-              <button className="btn btn-ghost" disabled={!depositValid} onClick={() => setDepositConfirm(true)}>
-                Record deposit
-              </button>
-            ) : (
-              <>
-                <button className="btn btn-primary" disabled={depositBusy} onClick={doDeposit}>
-                  {depositBusy ? 'Recording…' : `Confirm ${fmtUSD(depositNum)}`}
-                </button>
-                <button className="btn btn-ghost" onClick={() => setDepositConfirm(false)}>Cancel</button>
-              </>
-            )}
+            <Stepper
+              label="Take the win at" prefix="$" step={0.01} dp={2}
+              min={0.01} max={0.99} wide
+              value={draft.TAKE_PROFIT_PRICE}
+              onChange={v => set('TAKE_PROFIT_PRICE', v)}
+              error={fieldErrors.TAKE_PROFIT_PRICE}
+            />
           </div>
-          <div className="field-help" style={{ marginTop: 8 }}>
-            Deposits and withdrawals made on Polymarket itself are detected and booked
-            automatically within two monitor cycles (~10 min) — this field is only for
-            recording one before the bot notices.
+
+          <div className="set-fill" />
+          {/* Both tails of one trade, side by side — the pair is the point. */}
+          <div className="outcome-pair">
+            <div className="outcome-cell">
+              <div className="k">IF IT GOES WRONG</div>
+              <div className="v down">−{fmtUSD(impact.stopLossPerTrade)}</div>
+              <div className="n">{draft.ENABLE_STOP_LOSS ? `stop at ${draft.STOP_LOSS_PCT}%` : 'rides to zero'}</div>
+            </div>
+            <div className="outcome-cell">
+              <div className="k">IF IT GOES RIGHT</div>
+              <div className="v up">+{fmtUSD(impact.upside)}</div>
+              <div className="n">from a {fmtUSD(Number(ctx.avg_entry_price) || 0.45)} entry</div>
+            </div>
           </div>
         </section>
 
-        {/* ---- trading era ---- */}
-        <section className="card">
-          <header className="card-head">
+        {/* ---- trading era: one wide row under the three cards ---- */}
+        <section className="era-card">
+          <div className="era-left">
             <div>
-              <h2>Trading era</h2>
-              <p className="card-sub">archive this run and start fresh</p>
+              <div className="era-title">Start over</div>
+              <div>File this run away and re-read the wallet</div>
             </div>
-          </header>
-          <div className="impact-block" style={{ marginTop: 0 }}>
-            <div className="impact-row">
-              <span className="k">Current era</span>
-              <span className="v">{eras && eras.current ? `${eras.current.label} · since ${String(eras.current.started_at).slice(0, 10)}` : 'pre-era history'}</span>
-            </div>
-            <div className="impact-row">
-              <span className="k">Archived eras</span>
-              <span className="v">{eras ? (eras.archived || []).length + (eras.legacy_paper_archive ? 1 : 0) : '—'}</span>
+            <div className="era-stats">
+              <div>
+                <div className="k">RUNNING SINCE</div>
+                <div className="v">
+                  {eras && eras.current
+                    ? `${eras.current.label} · ${String(eras.current.started_at).slice(0, 10)}`
+                    : 'pre-era history'}
+                </div>
+              </div>
+              <div>
+                <div className="k">CASH</div>
+                <div className="v">{fmtUSD(ctx.available_cash)}</div>
+              </div>
+              <div>
+                <div className="k">FILED AWAY</div>
+                <div className="v">
+                  {eras ? (eras.archived || []).length + (eras.legacy_paper_archive ? 1 : 0) : '—'}
+                </div>
+              </div>
             </div>
           </div>
-          <NumFieldText
-            label="New era label" value={eraLabel} onChange={setEraLabel}
-            placeholder="live-2"
-            help="Closes the current era: every trade and the bankroll ledger are frozen into a browsable archive, then the ledger re-seeds from the REAL wallet balance. Signals and calibration data carry over. Settings keep their values."
-          />
-          {ctx.open_positions > 0 && (
-            <div className="field-warn">Blocked while {ctx.open_positions} position(s) are open — let them settle first.</div>
-          )}
-          <div style={{ display: 'flex', gap: 9, marginTop: 10 }}>
+          <div className="era-actions">
+            <input
+              className="era-input" type="text" value={eraLabel} placeholder="live-2"
+              onChange={e => setEraLabel(e.target.value)} aria-label="New era label"
+            />
             {!eraConfirm ? (
-              <button className="btn btn-ghost" disabled={ctx.open_positions > 0 || eraBusy}
-                      onClick={() => setEraConfirm(true)}>
-                Start new era
+              <button className="btn-era" disabled={eraBlocked || eraBusy} onClick={() => setEraConfirm(true)}
+                      title={eraBlocked ? `Blocked while ${ctx.open_positions} position(s) are open` : undefined}>
+                Start fresh
               </button>
             ) : (
               <>
-                <button className="btn btn-primary" disabled={eraBusy} onClick={startNewEra}>
-                  {eraBusy ? 'Archiving…' : 'Confirm — archive & start fresh'}
+                <button className="btn-save armed" disabled={eraBusy} onClick={startNewEra}>
+                  {eraBusy ? 'Archiving…' : 'Confirm'}
                 </button>
-                <button className="btn btn-ghost" disabled={eraBusy} onClick={() => setEraConfirm(false)}>Cancel</button>
+                <button className="btn-era" disabled={eraBusy} onClick={() => setEraConfirm(false)}>Cancel</button>
               </>
             )}
           </div>
+          {eraBlocked && (
+            <div className="field-warn" style={{ width: '100%' }}>
+              Blocked while {ctx.open_positions} position(s) are open — let them settle first.
+            </div>
+          )}
         </section>
       </div>
 
-      <div className="settings-bar">
-        <span className={dirtyKeys.length ? 'settings-dirty' : 'dim small'}>
-          {dirtyKeys.length ? `${dirtyKeys.length} unsaved change${dirtyKeys.length === 1 ? '' : 's'}` : 'No changes'}
+      <div className="save-bar">
+        <span className="dot" style={{ background: dirty ? 'var(--signal)' : '#3f3d38' }} />
+        <span className="label">
+          {saved && !dirty ? 'Saved'
+            : dirty ? `${dirty} change${dirty === 1 ? '' : 's'} not saved`
+            : 'Nothing changed'}
         </span>
         <span className="spacer" />
-        <button className="btn btn-ghost" disabled={!dirtyKeys.length} onClick={() => setDraft(server.shownValues)}>Revert</button>
+        <button className="btn-undo" disabled={!dirty} onClick={() => { setDraft(server.shownValues); setSaved(false); }}>
+          Undo
+        </button>
         <button
-          className="btn btn-primary"
-          disabled={!dirtyKeys.length || phase === 'saving'}
+          className={`btn-save ${dirty ? 'armed' : ''}`}
+          disabled={!dirty || phase === 'saving'}
           onClick={() => setPhase('confirming')}
         >
-          {phase === 'saving' ? 'Saving…' : 'Save changes'}
+          {phase === 'saving' ? 'Saving…' : dirty ? 'Save' : 'Saved'}
         </button>
       </div>
 
@@ -1278,13 +1488,13 @@ function SettingsPanel({ portfolio }) {
               next monitor cycle (within ~5 minutes).`}
             </div>
             <div className="modal-actions">
-              <button className="btn btn-ghost" onClick={() => setPhase('idle')}>Cancel</button>
-              <button className="btn btn-primary" onClick={save}>Apply now</button>
+              <button className="btn-undo" onClick={() => setPhase('idle')}>Cancel</button>
+              <button className="btn-save armed" onClick={save}>Apply now</button>
             </div>
           </div>
         </div>
       )}
-    </div>
+    </>
   );
 }
 
@@ -1300,8 +1510,8 @@ function App() {
         const r = await fetch('/api/data');
         if (r.status === 401) { window.location.href = '/'; return; }
         if (!r.ok) throw new Error(`HTTP ${r.status}`);
-        const d = await r.json();
-        // Coerce ISO strings → Date objects so helpers work
+        const d = await readJSON(r);
+        // Coerce ISO strings → Date objects so the helpers work
         d.now = new Date(d.now);
         d.positions = d.positions.map(p => ({ ...p, entry_time: new Date(p.entry_time) }));
         d.trades = d.trades.map(t => ({ ...t, closed_at: new Date(t.closed_at) }));
@@ -1309,6 +1519,7 @@ function App() {
         d.scanLog.recent_skips = d.scanLog.recent_skips.map(s => ({ ...s, ts: new Date(s.ts) }));
         window.MOCK = d;
         setData(d);
+        setErr(null);
       } catch (e) {
         setErr(e.message);
       }
@@ -1325,9 +1536,7 @@ function App() {
     return (
       <div className="loading-screen">
         <span>{err ? `⚠ ${err}` : '· loading ·'}</span>
-        {err && <span style={{ fontSize: 11, color: 'var(--dim)', marginTop: 4 }}>
-          <a href="/" style={{ color: 'var(--signal)' }}>← back to login</a>
-        </span>}
+        {err && <a href="/">← back to sign in</a>}
       </div>
     );
   }
@@ -1336,43 +1545,65 @@ function App() {
   return (
     <div className="app">
       <TopBar portfolio={M.portfolio} scanLog={M.scanLog} activeTab={activeTab} setActiveTab={setActiveTab} />
-      {M.portfolio.archive_view && (
-        <div className="archive-banner">
-          ◈ SAVED PAPER-ERA STATE — frozen snapshot, nothing here is running.
-          Click the mode pill to return to live.
-        </div>
-      )}
-      {activeTab === 'desk' && (
-        <>
-          <CircuitBreakerBanner portfolio={M.portfolio} />
-          <HeaderStrip portfolio={M.portfolio} />
-          <PerformanceStats stats={M.stats} />
-          <div className="row row-main">
-            <GlobePanel
-              cities={M.cities}
-              cityActivity={M.cityActivity}
-              positions={M.positions}
-              scanLog={M.scanLog}
-            />
-            <OpenPositions positions={M.positions} maxPositions={M.portfolio?.max_concurrent_positions} />
+
+      <main className="main">
+        {M.portfolio.archive_view && (
+          <div className="banner banner-archive">
+            ◈ SAVED PAPER-ERA STATE — frozen snapshot, nothing here is running.
+            Click the mode pill to return to live.
           </div>
-        </>
-      )}
-      {activeTab === 'archive' && (
-        <div>
-          <RecentTrades trades={M.trades} />
-        </div>
-      )}
-      {activeTab === 'settings' && <SettingsPanel portfolio={M.portfolio} />}
-      {activeTab === 'models' && (
-        <div>
-          <RecentSignals signals={M.recentSignals} />
-        </div>
-      )}
+        )}
+
+        {activeTab === 'desk' && (
+          <>
+            {M.portfolio.circuit_tripped && (
+              <div className="banner banner-circuit">
+                <span>⚠</span>
+                <span>
+                  Daily loss limit of {fmtUSD(Math.abs(M.portfolio.daily_loss_limit))} reached.
+                  Trading halted until midnight UTC.
+                </span>
+              </div>
+            )}
+            <HeaderStrip portfolio={M.portfolio} />
+            <div className="row-main">
+              <GlobePanel cities={M.cities} cityActivity={M.cityActivity} positions={M.positions} />
+              <OpenPositions
+                positions={M.positions}
+                maxPositions={M.portfolio.max_concurrent_positions}
+                readOnly={M.portfolio.archive_view}
+              />
+            </div>
+            <PerformanceStats stats={M.stats} />
+          </>
+        )}
+
+        {activeTab === 'archive' && <RecentTrades trades={M.trades} />}
+
+        {activeTab === 'models' && (
+          <>
+            <ScanFeed scanLog={M.scanLog} />
+            <RecentSignals signals={M.recentSignals} />
+          </>
+        )}
+
+        {activeTab === 'settings' && <SettingsPanel />}
+      </main>
+
       <footer className="page-foot">
-        <span className="dim">stormedge · {M.portfolio.mode.toLowerCase()}-mode · polymarket weather bot</span>
-        <span className="mono dim">UTC {M.now.toISOString().replace('T', ' ').slice(0, 19)}</span>
+        <span>stormedge · {M.portfolio.mode.toLowerCase()} mode · polymarket weather bot</span>
+        <span className="mono">UTC {M.now.toISOString().replace('T', ' ').slice(0, 19)}</span>
       </footer>
+
+      {/* Bottom tab bar — CSS reveals it below 860px and hides the top nav */}
+      <nav className="bottom-nav">
+        {TABS.map(([id, label]) => (
+          <button key={id} className={activeTab === id ? 'active' : ''} onClick={() => setActiveTab(id)}>
+            <span className="bar" aria-hidden="true" />
+            {label}
+          </button>
+        ))}
+      </nav>
     </div>
   );
 }

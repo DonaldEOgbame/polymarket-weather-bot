@@ -1,12 +1,13 @@
 import json
 import logging
+import threading
 from datetime import datetime, timezone
 from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import (
     MarketOrderArgsV2, OrderType, ApiCreds, BalanceAllowanceParams, AssetType,
 )
 from db import (execute_query, fetch_query, get_open_position, close_position_atomic,
-                open_position_atomic, reduce_position_atomic,
+                open_position_atomic, reduce_position_atomic, get_position_by_id,
                 update_bankroll, get_current_bankroll, add_notification)
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
 from scanner import (get_realtime_price, get_market_resolution, get_gamma_mid_price,
@@ -16,7 +17,7 @@ from utils import parse_utc_datetime
 from weather import get_signal_engine, get_bucket_probability, _norm_cdf
 from metar import get_station, fetch_day_extremes, round_half_away, final_extreme_f
 from config import (
-    PAPER_MODE, POLYMARKET_PK, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE,
+    POLYMARKET_PK, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE,
     EXIT_EDGE_FLOOR, CLOB_BASE_URL,
     MIN_MODEL_COUNT, TAKER_FEE_RATE,
     HOLD_WINNERS_TO_RESOLUTION, THESIS_BREAK_PROB_DELTA, SUSTAINED_LOSS_POLLS,
@@ -24,13 +25,18 @@ from config import (
     ENABLE_SUSTAINED_LOSS_GUARD, ENABLE_THESIS_BREAK_EXIT,
     POLYMARKET_FUNDER, POLYMARKET_SIG_TYPE, EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN,
     ONE_TRADE_PER_CITY_DATE,
-    setting,
+    setting, paper_mode,
 )
 # MAX_CONCURRENT_POSITIONS / ENABLE_STOP_LOSS / STOP_LOSS_PCT / TAKE_PROFIT_PRICE
 # are dashboard-tunable at runtime and read via config.setting() at each
 # decision point — a settings change applies to the next entry/exit check
 # without a restart, including exits on ALREADY-OPEN positions (intended:
 # tightening the stop loss should protect the positions you hold now).
+
+
+# Guards lazy creation of an Executor's per-position exit-lock table when the
+# instance was built without __init__ (see Executor._exit_lock).
+_LOCK_TABLE_INIT = threading.Lock()
 
 
 def get_wallet_collateral(client=None):
@@ -43,7 +49,7 @@ def get_wallet_collateral(client=None):
     'unknown', never 'zero', because callers book money moves off this number."""
     try:
         if client is None:
-            if PAPER_MODE or not POLYMARKET_PK:
+            if paper_mode() or not POLYMARKET_PK:
                 return None
             kwargs = {"key": POLYMARKET_PK, "chain_id": 137}
             if POLYMARKET_SIG_TYPE:
@@ -64,35 +70,7 @@ def get_wallet_collateral(client=None):
 class Executor:
     def __init__(self):
         self.client = None
-        if not PAPER_MODE:
-            # signature_type/funder are REQUIRED for accounts created through the
-            # Polymarket website (funds live in a proxy/deposit wallet, not the raw
-            # EOA of POLYMARKET_PK) — without them every order is rejected for
-            # balance. Type 3 (POLY_1271 deposit wallet) is the current default for
-            # website-created accounts and needs the V2 client's order signing.
-            client_kwargs = {"key": POLYMARKET_PK, "chain_id": 137}
-            if POLYMARKET_SIG_TYPE:
-                client_kwargs["signature_type"] = POLYMARKET_SIG_TYPE
-                client_kwargs["funder"] = POLYMARKET_FUNDER
-            self.client = ClobClient(CLOB_BASE_URL, **client_kwargs)
-            if CLOB_API_KEY and CLOB_SECRET and CLOB_PASS_PHRASE:
-                self.client.set_api_creds(ApiCreds(
-                    api_key=CLOB_API_KEY, api_secret=CLOB_SECRET,
-                    api_passphrase=CLOB_PASS_PHRASE,
-                ))
-            else:
-                # Derive L2 creds from the private key when none are supplied.
-                self.client.set_api_creds(self.client.create_or_derive_api_key())
-            # The CLOB's balance view is a CACHE that does not track on-chain
-            # deposits by itself — refresh it at boot so the first scan cycle
-            # sees the real collateral instead of a stale zero.
-            try:
-                self.client.update_balance_allowance(BalanceAllowanceParams(
-                    asset_type=AssetType.COLLATERAL,
-                    signature_type=POLYMARKET_SIG_TYPE,
-                ))
-            except Exception as e:
-                logging.warning(f"Balance-cache refresh failed at boot (non-fatal): {e}")
+        self._ensure_client()
         # Wallet-cash sync: last CLOB balance awaiting a second confirming read.
         self._pending_wallet_bal = None
         self.reconcile_positions()
@@ -107,6 +85,93 @@ class Executor:
         # Tracks consecutive below-entry mid-price polls per position id.
         # Reset on price recovery. Used by the sustained-loss guard in _check_exit_for_position.
         self._loss_streak: dict = {}
+        # Per-position exit locks. The dashboard's manual-close button runs on a
+        # Flask request thread while the monitor thread may be inside check_exits
+        # on the SAME position — two concurrent SELLs for one position means the
+        # second is rejected by the CLOB and the DB row is left inconsistent.
+        # close_position_atomic guards the DB write, but not the on-chain sell
+        # that precedes it, so the lock has to wrap the whole exit.
+        self._exit_locks: dict = {}
+        self._exit_locks_guard = threading.Lock()
+
+    def _ensure_client(self):
+        """Build the CLOB client if live trading needs one and none exists yet.
+
+        Lazy rather than boot-only because PAPER_MODE is now switchable at
+        runtime: a process that booted in paper mode has no client, and the
+        moment the dashboard flips it live the very next order would have
+        nothing to submit through. Called at boot, on every live-mode order
+        path, and by the mode switch itself so a failure surfaces THERE — while
+        someone is watching — instead of on the first real trade.
+
+        Returns the client, or None in paper mode / when credentials are absent.
+        Raises nothing: a failure leaves self.client None and is logged, and the
+        live-mode call sites already treat a missing client as "cannot trade".
+        """
+        if paper_mode():
+            return self.client
+        if self.client is not None:
+            return self.client
+        if not POLYMARKET_PK:
+            logging.error("Live mode with no POLYMARKET_PK — cannot build a CLOB client.")
+            return None
+        try:
+            # signature_type/funder are REQUIRED for accounts created through the
+            # Polymarket website (funds live in a proxy/deposit wallet, not the raw
+            # EOA of POLYMARKET_PK) — without them every order is rejected for
+            # balance. Type 3 (POLY_1271 deposit wallet) is the current default for
+            # website-created accounts and needs the V2 client's order signing.
+            client_kwargs = {"key": POLYMARKET_PK, "chain_id": 137}
+            if POLYMARKET_SIG_TYPE:
+                client_kwargs["signature_type"] = POLYMARKET_SIG_TYPE
+                client_kwargs["funder"] = POLYMARKET_FUNDER
+            client = ClobClient(CLOB_BASE_URL, **client_kwargs)
+            if CLOB_API_KEY and CLOB_SECRET and CLOB_PASS_PHRASE:
+                client.set_api_creds(ApiCreds(
+                    api_key=CLOB_API_KEY, api_secret=CLOB_SECRET,
+                    api_passphrase=CLOB_PASS_PHRASE,
+                ))
+            else:
+                # Derive L2 creds from the private key when none are supplied.
+                client.set_api_creds(client.create_or_derive_api_key())
+            self.client = client
+        except Exception as e:
+            logging.error(f"CLOB client init failed: {type(e).__name__}: {e}", exc_info=True)
+            return None
+        # The CLOB's balance view is a CACHE that does not track on-chain
+        # deposits by itself — refresh it now so the first cycle after going
+        # live sees the real collateral instead of a stale zero.
+        try:
+            self.client.update_balance_allowance(BalanceAllowanceParams(
+                asset_type=AssetType.COLLATERAL,
+                signature_type=POLYMARKET_SIG_TYPE,
+            ))
+        except Exception as e:
+            logging.warning(f"Balance-cache refresh failed (non-fatal): {e}")
+        return self.client
+
+    def _exit_lock(self, pos_id):
+        """Get-or-create the exit lock for one position id.
+
+        Tolerates an instance built via __new__ (tests, reconciliation helpers)
+        where __init__ never ran and the lock table doesn't exist yet.
+        """
+        guard = getattr(self, "_exit_locks_guard", None)
+        if guard is None:
+            # Lazy init under a process-wide lock — two threads racing here would
+            # otherwise each install a different guard and defeat the mutual
+            # exclusion this whole mechanism exists to provide.
+            with _LOCK_TABLE_INIT:
+                guard = getattr(self, "_exit_locks_guard", None)
+                if guard is None:
+                    self._exit_locks = {}
+                    guard = self._exit_locks_guard = threading.Lock()
+        with guard:
+            lock = self._exit_locks.get(pos_id)
+            if lock is None:
+                lock = threading.Lock()
+                self._exit_locks[pos_id] = lock
+            return lock
 
     def reconcile_positions(self):
         positions = fetch_query("SELECT * FROM positions")
@@ -178,7 +243,7 @@ class Executor:
         failure means "unknown", never "sold".
 
         Returns the number of positions closed or reduced."""
-        if PAPER_MODE or not POLYMARKET_FUNDER:
+        if paper_mode() or not POLYMARKET_FUNDER:
             return 0
         positions = fetch_query("SELECT * FROM positions")
         if not positions:
@@ -222,7 +287,7 @@ class Executor:
             redemption clears, and that must not be booked as a withdrawal.
             Deposits have no such ambiguity and are booked any time.
         """
-        if PAPER_MODE or self.client is None:
+        if paper_mode() or self._ensure_client() is None:
             return 0
         bal = get_wallet_collateral(self.client)
         if bal is None:
@@ -575,6 +640,14 @@ class Executor:
         client walks the book to price it, so it either takes immediately or is
         killed — never rests as a phantom open order. Returns {shares, price,
         fee_bps} on a real fill, or None if nothing filled. Live mode only."""
+        # A process that booted in paper mode has no client until the dashboard
+        # switches it live; build it here rather than raising AttributeError on
+        # the first real order.
+        if self._ensure_client() is None:
+            logging.error(
+                f"No CLOB client — refusing to {side} {token_id}. "
+                f"Live mode needs POLYMARKET_PK and working CLOB credentials.")
+            return None
         try:
             fee_bps = self.client.get_fee_rate_bps(token_id)
         except Exception:
@@ -690,7 +763,7 @@ class Executor:
         shares = round(size / price, 2)
         entry_fee = 0.0  # paper mode: fee is modeled inside transaction_cost, not the ledger
 
-        if not PAPER_MODE:
+        if not paper_mode():
             logging.info(
                 f"Executing LIVE trade: BUY ${size:.2f} of {opp.market_id} {side} "
                 f"(target=${signal_data['price']:.2f}, edge={signal_data['edge']:.3f})"
@@ -739,7 +812,83 @@ class Executor:
     def check_exits(self):
         positions = fetch_query("SELECT * FROM positions")
         for pos in positions:
-            self._check_exit_for_position(pos)
+            # Skip rather than block: if the dashboard is mid manual-close on this
+            # position, the monitor has nothing useful to add and shouldn't stall
+            # the whole cycle waiting on a CLOB round-trip.
+            lock = self._exit_lock(pos["id"])
+            if not lock.acquire(blocking=False):
+                logging.info(f"Position {pos['id']} is being closed elsewhere — skipping exit check this cycle")
+                continue
+            try:
+                if not get_position_by_id(pos["id"]):
+                    continue  # closed while we waited for the lock
+                self._check_exit_for_position(pos)
+            finally:
+                lock.release()
+
+    def close_position_manual(self, pos_id, note=None):
+        """Close one position on demand from the dashboard.
+
+        Returns a status dict rather than None-on-everything like
+        _close_position: a human pressing a button needs to be told the
+        difference between "sold", "partially sold" and "the bid wasn't there,
+        it's still open" — outcomes the monitor loop is happy to treat alike
+        because it simply retries next cycle.
+
+        Reuses _close_position for the actual sell so manual exits get the same
+        real-bid pricing, taker-fee accounting, partial-fill handling and
+        exit-depth logging as automatic ones.
+        """
+        lock = self._exit_lock(pos_id)
+        # Non-blocking: if the monitor thread is already exiting this position,
+        # say so instead of queueing a second sell behind it.
+        if not lock.acquire(blocking=False):
+            return {"ok": False, "status": "busy",
+                    "message": "This position is already being closed by the bot — try again in a moment."}
+        try:
+            pos = get_position_by_id(pos_id)
+            if not pos:
+                return {"ok": False, "status": "not_found",
+                        "message": "That position is already closed."}
+
+            shares_before = pos["shares"] or 0
+            reason = "MANUAL_CLOSE" + (f" ({note})" if note else "")
+            self._close_position(pos, pnl_dollars=None, exit_reason=reason)
+
+            after = get_position_by_id(pos_id)
+            if after is None:
+                # Read back the realized PnL the close actually booked (trades has
+                # no exit_price column — pnl is the ledger's record of the exit).
+                trades = fetch_query(
+                    "SELECT pnl FROM trades WHERE market_id=? AND side=? AND status='CLOSED' "
+                    "ORDER BY id DESC LIMIT 1",
+                    (pos["market_id"], pos["side"]))
+                pnl = trades[0]["pnl"] if trades else None
+                return {"ok": True, "status": "closed",
+                        "market_id": pos["market_id"],
+                        "question": pos.get("question"),
+                        "pnl": pnl,
+                        "message": (f"Position closed. Realized P&L ${pnl:+.2f}."
+                                    if pnl is not None else "Position closed.")}
+
+            # Still open: either a partial fill (shares reduced) or no fill at all.
+            shares_after = after["shares"] or 0
+            if shares_after < shares_before - 0.01:
+                return {"ok": True, "status": "partial",
+                        "market_id": pos["market_id"],
+                        "question": pos.get("question"),
+                        "shares_sold": round(shares_before - shares_after, 2),
+                        "shares_remaining": round(shares_after, 2),
+                        "message": (f"Partial fill: sold {shares_before - shares_after:.2f} of "
+                                    f"{shares_before:.2f} shares. The rest is still open and "
+                                    f"will be retried automatically.")}
+            return {"ok": False, "status": "no_fill",
+                    "market_id": pos["market_id"],
+                    "question": pos.get("question"),
+                    "message": ("No fill — there wasn't enough real bid depth to sell into. "
+                                "The position is still open.")}
+        finally:
+            lock.release()
 
     @staticmethod
     def _target_date_passed(target_date, now):
@@ -1068,7 +1217,7 @@ class Executor:
             fee = TAKER_FEE_RATE * exit_px * (1.0 - exit_px) * shares
             pnl_dollars = (exit_px - pos["entry_price"]) * shares - fee
         logging.info(
-            f"{'PAPER ' if PAPER_MODE else ''}EXIT: {pos['market_id']} ({pos['side']}) — "
+            f"{'PAPER ' if paper_mode() else ''}EXIT: {pos['market_id']} ({pos['side']}) — "
             f"{exit_reason} | PnL: ${pnl_dollars:.2f}"
         )
 
@@ -1091,7 +1240,7 @@ class Executor:
         skip_clob_exit = (exit_reason == "EXPIRED_ON_RESTART"
                           or exit_reason.startswith("RESOLVED_")
                           or exit_reason.startswith("EXTERNAL_"))
-        if not PAPER_MODE and not skip_clob_exit:
+        if not paper_mode() and not skip_clob_exit:
             # Prefer the share count actually filled at entry (positions.shares);
             # the historical fallback re-derives it from doubly-rounded values and
             # can exceed real holdings, making the CLOB reject the sell forever.

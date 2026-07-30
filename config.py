@@ -494,6 +494,11 @@ import threading as _threading
 
 _RUNTIME_LOCK = _threading.RLock()
 _RUNTIME = {
+    # Whether trades are simulated. Deliberately NOT in app.SETTING_SPECS: it is
+    # not an ordinary knob and must never ride along in a bulk settings save.
+    # The dashboard changes it only through /api/trading-mode, which gates
+    # paper -> live behind the readiness preflight.
+    "PAPER_MODE": PAPER_MODE,
     "FIXED_POSITION_SIZE": FIXED_POSITION_SIZE,
     "HARD_MAX_POSITION_SIZE": HARD_MAX_POSITION_SIZE,
     "MAX_CONCURRENT_POSITIONS": MAX_CONCURRENT_POSITIONS,
@@ -512,6 +517,19 @@ def setting(key):
     one — that is the intended semantics of a live-tunable knob."""
     with _RUNTIME_LOCK:
         return _RUNTIME[key]
+
+
+def paper_mode():
+    """Whether trades are simulated right now.
+
+    Every site that decides whether REAL money moves must read this, never
+    `from config import PAPER_MODE` — an import-time copy would keep a running
+    process trading live after the dashboard switched it back to paper (and
+    vice versa), which is the worst possible way for this particular flag to
+    go stale. The module-level PAPER_MODE constant survives only as the boot
+    default that seeds this store."""
+    with _RUNTIME_LOCK:
+        return _RUNTIME["PAPER_MODE"]
 
 
 def apply_runtime_overrides(values):

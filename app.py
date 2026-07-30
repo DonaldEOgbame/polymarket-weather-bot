@@ -21,6 +21,12 @@ app.secret_key = os.getenv('DASHBOARD_SECRET', 'stormedge-change-in-prod')
 # it stops the browser attaching this cookie to cross-origin POSTs at all.
 app.config['SESSION_COOKIE_SAMESITE'] = 'Lax'
 app.config['SESSION_COOKIE_HTTPONLY'] = True
+# "Keep me signed in" makes the session cookie permanent, so it survives a
+# browser restart instead of dying with the tab. Flask writes the expiry into
+# the signed cookie itself, so the lifetime is enforced server-side on read —
+# an edited cookie can't extend it. Without the checkbox the session stays a
+# browser-session cookie and disappears when the browser closes.
+app.permanent_session_lifetime = timedelta(days=30)
 
 DASHBOARD_PASSWORD = os.getenv('DASHBOARD_PASSWORD', 'stormedge')
 DASHBOARD_EMAIL    = os.getenv('DASHBOARD_EMAIL', 'donaldemmaogbame@gmail.com')
@@ -29,7 +35,7 @@ DASHBOARD_EMAIL    = os.getenv('DASHBOARD_EMAIL', 'donaldemmaogbame@gmail.com')
 # thread reads at every decision point. No restart, no downtime. Managed keys
 # are the money/risk knobs only; everything else still requires a deploy.
 import config as _config
-from config import (DB_PATH, PAPER_MODE, STARTING_BANKROLL, MIN_POSITION_SIZE,
+from config import (DB_PATH, STARTING_BANKROLL, MIN_POSITION_SIZE,
                     MANAGED_SETTINGS)
 DB_PATH = os.path.abspath(DB_PATH)
 # Frozen snapshot of the paper-trading era, written once at live cutover.
@@ -198,7 +204,13 @@ def require_auth(f):
 
 @app.route('/')
 def root():
-    return send_from_directory('web', 'login.html')
+    # The sign-in art carries a "<mode> MODE ENABLED" strip. Substituting it
+    # here (rather than fetching it) keeps the page honest without exposing an
+    # unauthenticated endpoint that reports what the bot is doing.
+    path = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'web', 'login.html')
+    with open(path, encoding='utf-8') as fh:
+        html = fh.read().replace('{{MODE}}', 'PAPER' if _config.paper_mode() else 'LIVE')
+    return html, 200, {'Content-Type': 'text/html; charset=utf-8'}
 
 
 @app.route('/dashboard')
@@ -212,7 +224,14 @@ def dash():
 def api_login():
     d = request.get_json(silent=True) or {}
     if d.get('email') == DASHBOARD_EMAIL and d.get('password') == DASHBOARD_PASSWORD:
+        # Re-issue a clean session on every login: a fresh id stops a
+        # pre-existing cookie from carrying stale view_era/view_archive state
+        # (or a fixated id) into the newly authenticated session.
+        session.clear()
         session['authed'] = True
+        # Opt-in only — default False keeps the old browser-session behaviour
+        # for anyone who leaves the box unchecked.
+        session.permanent = bool(d.get('remember'))
         return jsonify(ok=True)
     return jsonify(error='Invalid credentials'), 401
 
@@ -332,6 +351,15 @@ def api_settings_get():
     available_cash = cash_rows[0]['balance'] if cash_rows else STARTING_BANKROLL
     pos_rows = _q('SELECT size_usdc FROM positions')
     locked = sum(r['size_usdc'] for r in pos_rows)
+    # Typical entry price, so the settings panel can express the take-profit
+    # upside in dollars. Averaged over settled trades because that is what the
+    # bot has actually paid; the 0.45 fallback keeps a fresh era from showing a
+    # nonsense figure before any trade has closed.
+    entry_rows = _q(
+        'SELECT AVG(fill_price) AS avg_entry FROM trades '
+        'WHERE fill_price IS NOT NULL AND fill_price > 0'
+    )
+    avg_entry = (entry_rows[0]['avg_entry'] if entry_rows else None) or 0.45
     return jsonify({
         'values': _live_settings(),
         'meta': {k: {'type': t, 'min': lo, 'max': hi, 'label': label}
@@ -342,8 +370,9 @@ def api_settings_get():
             'total_equity': available_cash + locked,
             'open_positions': len(pos_rows),
             'min_position_size': MIN_POSITION_SIZE,
+            'avg_entry_price': avg_entry,
             'total_deposited': get_total_deposited(),
-            'paper_mode': PAPER_MODE,
+            'paper_mode': _config.paper_mode(),
             'daily_loss_limit': _config.daily_loss_limit(),
         },
         'archive_view': _viewing_archive(),
@@ -457,7 +486,7 @@ def api_new_era():
             n_existing = (_fq("SELECT COUNT(*) AS c FROM eras") or [{'c': 0}])[0]['c']
         except Exception:
             pass
-    new_mode = 'paper' if PAPER_MODE else 'live'
+    new_mode = 'paper' if _config.paper_mode() else 'live'
     label = (str(d.get('label') or '').strip() or f'{new_mode}-{n_existing + 1}')[:40]
 
     if d.get('seed') is not None:
@@ -467,15 +496,24 @@ def api_new_era():
             return jsonify(error='seed must be a number'), 400
         seed_source = 'manual'
     else:
-        from executor import get_wallet_collateral
+        # "Wallet unreadable" is already a supported outcome (seed $0 and let
+        # the cash-sync book the funding when it lands), so nothing in this
+        # read may 500 the cutover. executor imports the CLOB client at module
+        # scope, so even the import can fail — in paper mode, or anywhere the
+        # library isn't installed — and that must degrade, not raise.
+        seed, seed_source = 0.0, 'wallet unreadable — seeded $0'
         try:
-            import main as _main
-            client = _main.executor.client if _main.executor else None
-        except Exception:
-            client = None
-        bal = get_wallet_collateral(client)
-        seed = bal if bal is not None else 0.0
-        seed_source = 'wallet' if bal is not None else 'wallet unreadable — seeded $0'
+            from executor import get_wallet_collateral
+            try:
+                import main as _main
+                client = _main.executor.client if _main.executor else None
+            except Exception:
+                client = None
+            bal = get_wallet_collateral(client)
+            if bal is not None:
+                seed, seed_source = bal, 'wallet'
+        except Exception as e:
+            logging.warning(f"Wallet seed read unavailable: {type(e).__name__}: {e}")
 
     # Pause the scan loop for the duration: an entry landing between the
     # archive and the wipe would have a real CLOB fill but wiped DB rows.
@@ -529,6 +567,50 @@ def api_deposit():
                    total_deposited=get_total_deposited())
 
 
+@app.post('/api/close-position')
+@require_auth
+def api_close_position():
+    """Manually close one open position at the current market bid.
+
+    Irreversible (it sells on-chain in live mode), so it requires confirm=true
+    the way /api/deposit does. The actual sell runs through
+    Executor.close_position_manual, which holds the same per-position exit lock
+    the monitor thread uses — the button cannot race a bot-initiated exit into
+    a double sell.
+    """
+    import main as _main
+    from db import add_notification
+    if _viewing_archive():
+        return jsonify(error='cannot close a position while viewing the paper archive'), 409
+    d = request.get_json(silent=True) or {}
+    try:
+        pos_id = int(d.get('position_id'))
+    except (TypeError, ValueError):
+        return jsonify(error='position_id must be an integer'), 400
+    if not d.get('confirm'):
+        return jsonify(error='closing a position requires confirm=true'), 400
+
+    executor = getattr(_main, 'executor', None)
+    if executor is None:
+        # Bot thread still booting: no CLOB client, so a sell would be impossible.
+        return jsonify(error='bot is still starting up — try again in a moment'), 503
+
+    try:
+        result = executor.close_position_manual(pos_id, note=(d.get('note') or '')[:100] or None)
+    except Exception as e:
+        logging.error(f"Manual close failed for position {pos_id}: {e}", exc_info=True)
+        return jsonify(error=f'close failed: {e}'), 500
+
+    status_codes = {'not_found': 404, 'busy': 409, 'no_fill': 502}
+    code = 200 if result.get('ok') else status_codes.get(result.get('status'), 400)
+    if result.get('ok'):
+        add_notification('manual_close',
+                         f"Manual close: {result.get('question') or result.get('market_id')} — "
+                         f"{result.get('message')}",
+                         severity='info')
+    return jsonify(**result), code
+
+
 @app.get('/api/data')
 @require_auth
 def api_data():
@@ -561,7 +643,7 @@ def api_data():
     circuit_tripped = circuit_used >= 1.0
 
     portfolio = {
-        'mode': 'PAPER' if PAPER_MODE else 'LIVE',
+        'mode': 'PAPER' if _config.paper_mode() else 'LIVE',
         # Archive view: the dashboard is reading the frozen paper-era snapshot,
         # not the running bot's DB. The frontend renders this unmistakably.
         'archive_view': _viewing_archive(),
@@ -669,6 +751,13 @@ def api_data():
     trade_rows = _q(
         "SELECT * FROM trades WHERE status = 'CLOSED' ORDER BY exit_time DESC"
     )
+    # The archive shows the market question under the city. It is not stored on
+    # trades, so pull it from the immutable markets table in one keyed lookup
+    # rather than per-row (the list is unbounded).
+    question_by_market = {
+        r['market_id']: r['question']
+        for r in _q('SELECT market_id, question FROM markets')
+    }
     trades = []
     for t in trade_rows:
         city = t.get('city') or ''
@@ -683,7 +772,7 @@ def api_data():
             'id': t['id'],
             'city': city or t['market_id'][:12],
             'side': t['side'],
-            'question': '',
+            'question': question_by_market.get(t.get('market_id')) or '',
             'entry_price': fill,
             'exit_price': round(exit_price, 3),
             'size_usdc': size,
@@ -1060,6 +1149,10 @@ def _build_calibration(rows):
 
 @app.route('/<path:filename>')
 def static_fallback(filename):
+    # login.html carries a {{MODE}} placeholder that only the / route fills in;
+    # serving the raw file would render the braces to the user.
+    if filename == 'login.html':
+        return redirect('/')
     return send_from_directory('web', filename)
 
 

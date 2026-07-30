@@ -725,6 +725,18 @@ def get_open_position(market_id):
     return rows[0] if rows else None
 
 
+def get_position_by_id(pos_id):
+    """One open position by row id, or None if it is already closed.
+
+    Used by the manual-close path to re-read the row under the exit lock: the
+    monitor thread may have settled or exited it between the dashboard render
+    and the button press, and closing a stale snapshot would sell shares the
+    bot no longer holds.
+    """
+    rows = fetch_query("SELECT * FROM positions WHERE id=?", (pos_id,))
+    return rows[0] if rows else None
+
+
 def _iso_cutoff(keep_days):
     """UTC cutoff in the same isoformat() shape the tables store. SQLite's
     datetime('now') renders 'YYYY-MM-DD HH:MM:SS' (space separator) while stored

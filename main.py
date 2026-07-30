@@ -296,18 +296,18 @@ def daily_summary():
 
 def _print_startup_summary():
     from config import (
-        PAPER_MODE, STARTING_BANKROLL, EDGE_THRESHOLD, MIN_MODEL_AGREEMENT,
+        STARTING_BANKROLL, EDGE_THRESHOLD, MIN_MODEL_AGREEMENT,
         MAX_MODEL_SPREAD, KELLY_CAP, MIN_POSITION_SIZE,
         MAX_HOURS_TO_RESOLUTION,
         MIN_VOLUME, MARKET_DISCOVERY_MAX_PAGES, MARKET_DISCOVERY_LIMIT,
         SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD, SHADOW_MAX_SIZE_USDC,
         ENABLE_SHADOW_EXPLORATION, TAKER_FEE_RATE, SLIPPAGE_FRACTION,
-        setting, daily_loss_limit,
+        setting, daily_loss_limit, paper_mode,
     )
     portfolio = get_portfolio_state()
     open_pos = fetch_query("SELECT COUNT(*) as c FROM positions")[0]["c"]
 
-    mode = "PAPER" if PAPER_MODE else "LIVE"
+    mode = "PAPER" if paper_mode() else "LIVE"
     shadow_label = f"exploration ON (max ${SHADOW_MAX_SIZE_USDC:.2f})" if ENABLE_SHADOW_EXPLORATION else "log only"
     lines = [
         "",

@@ -6,76 +6,77 @@
 <title>stormedge — sign in</title>
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
-<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet" />
+<link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
 <style>
   :root {
     --bg: #07080a;
-    --panel: #0d0f12;
     --panel-2: #14171c;
     --line: rgba(255,255,255,0.08);
     --line-soft: rgba(255,255,255,0.04);
     --text: #e9e6df;
     --muted: #6e6a62;
     --dim: #43413c;
+    --placeholder: #4a4640;
     --signal: #f5b13c;
-    --positive: #6cbf85;
     --negative: #e07866;
-    --warn: #f0934f;
   }
   * { box-sizing: border-box; }
-  html, body { margin: 0; height: 100%; background: #000; color: var(--text); font-family: 'Manrope', ui-sans-serif, sans-serif; -webkit-font-smoothing: antialiased; }
-  body {
-    min-height: 100vh;
+  html, body {
+    margin: 0; padding: 0; height: 100%;
+    background: #000;
+    color: var(--text);
+    font-family: 'Manrope', ui-sans-serif, sans-serif;
+    -webkit-font-smoothing: antialiased;
+    -webkit-text-size-adjust: 100%;
+  }
+  a { color: var(--signal); text-decoration: none; }
+  a:hover { color: #ffca6b; }
+  ::-webkit-scrollbar { width: 8px; height: 8px; }
+  ::-webkit-scrollbar-thumb { background: rgba(255,255,255,0.12); border-radius: 99px; }
+  ::-webkit-scrollbar-track { background: transparent; }
+  input::placeholder { color: var(--placeholder); }
+
+  /* Full-viewport stage; the frame is centred inside it and may scroll on a
+     short window rather than clipping the form. */
+  .stage {
+    height: 100dvh;
     display: grid;
     place-items: center;
-    padding: 16px;
+    align-content: safe center;
+    padding: 20px;
+    background: #000;
+    overflow: auto;
   }
   .frame {
-    width: min(1240px, 100%);
-    height: min(820px, calc(100vh - 32px));
-    background: var(--bg);
-    border-radius: 4px;
+    width: min(1180px, 100%);
+    height: auto;
     display: grid;
-    grid-template-columns: minmax(360px, 480px) 1fr;
+    grid-template-columns: minmax(380px, 470px) 1fr;
+    border: 1px solid rgba(255,255,255,0.05);
+    border-radius: 6px;
     overflow: hidden;
-    position: relative;
-    border: 1px solid rgba(255,255,255,0.04);
+    background: var(--bg);
+    min-height: 0;
   }
+
   /* ===== LEFT — sign in ===== */
   .left {
-    padding: 56px 56px 40px;
+    order: 1;
+    min-height: 0;
+    overflow: auto;
     display: flex;
     flex-direction: column;
     justify-content: space-between;
-    position: relative;
+    gap: clamp(18px, 3.4vh, 28px);
+    padding: clamp(30px, 5vh, 52px) 52px clamp(24px, 4vh, 38px);
   }
-  .brand {
-    display: flex;
-    align-items: center;
-    gap: 12px;
-  }
-  .brand .mark {
-    width: 32px; height: 32px;
-    border-radius: 50%;
-    border: 1.5px solid var(--text);
-    position: relative;
-    display: inline-block;
-  }
-  .brand .mark::before {
-    content: '';
-    position: absolute;
-    inset: -1.5px;
-    border-radius: 50%;
-    background:
-      linear-gradient(124deg, transparent 47%, var(--text) 47%, var(--text) 53%, transparent 53%);
-    -webkit-mask: radial-gradient(circle, #000 60%, transparent 61%);
-            mask: radial-gradient(circle, #000 60%, transparent 61%);
-  }
+  .brand { display: flex; align-items: center; gap: 11px; }
+  .brand .mark { display: block; flex: 0 0 auto; }
   .brand .wordmark {
     font-family: 'Instrument Serif', serif;
     font-size: 26px;
-    letter-spacing: 0.5px;
     line-height: 1;
+    letter-spacing: 0.4px;
     color: var(--text);
   }
   .brand .wordmark em { font-style: italic; color: var(--signal); }
@@ -83,58 +84,58 @@
   .form-area {
     display: flex;
     flex-direction: column;
-    gap: 18px;
-    max-width: 360px;
+    gap: 16px;
+    max-width: 380px;
+    width: 100%;
   }
   .form-area h1 {
+    margin: 0 0 6px;
     font-family: 'Instrument Serif', serif;
     font-weight: 400;
-    font-size: 36px;
+    font-size: clamp(28px, 4.4vh, 36px);
     line-height: 1.05;
-    margin: 0 0 4px;
-    color: var(--text);
     letter-spacing: -0.01em;
+    color: var(--text);
   }
   .form-area h1 em { font-style: italic; color: var(--muted); }
   .form-area .sub {
-    color: var(--muted);
+    margin: 0;
     font-size: 13.5px;
-    margin: 0 0 8px;
-    letter-spacing: 0.01em;
+    color: var(--muted);
   }
 
   .field { display: flex; flex-direction: column; gap: 7px; }
-  .field label {
+  .field > span.label {
     font-size: 12px;
     font-weight: 600;
-    color: var(--text);
     letter-spacing: 0.02em;
+    color: var(--text);
   }
   .input {
-    position: relative;
     display: flex;
     align-items: center;
-    background: var(--panel-2);
-    border: 1px solid var(--line);
-    border-radius: 4px;
+    gap: 10px;
+    height: 42px;
     padding: 0 12px;
-    height: 40px;
+    border: 1px solid var(--line);
+    border-radius: 5px;
+    background: var(--panel-2);
     transition: border-color .15s ease, background .15s ease;
   }
+  .input.with-eye { padding: 0 4px 0 12px; }
   .input:focus-within { border-color: rgba(245,177,60,0.5); background: #181b21; }
-  .input svg { color: var(--dim); flex-shrink: 0; }
+  .input > svg { color: var(--dim); flex: 0 0 auto; }
   .input input {
-    background: transparent;
+    flex: 1;
+    min-width: 0;
     border: 0;
     outline: 0;
+    background: transparent;
     color: var(--text);
-    font: inherit;
+    font-family: 'Manrope', sans-serif;
     font-size: 14px;
-    width: 100%;
-    padding: 0 0 0 10px;
-    letter-spacing: 0.005em;
+    padding: 0;
   }
-  .input input::placeholder { color: var(--dim); }
   .input input:-webkit-autofill,
   .input input:-webkit-autofill:hover,
   .input input:-webkit-autofill:focus {
@@ -142,27 +143,68 @@
     -webkit-text-fill-color: var(--text);
     caret-color: var(--text);
   }
-
-  .btn {
-    height: 44px;
-    border-radius: 4px;
-    border: 1px solid transparent;
-    font: inherit;
-    font-weight: 600;
-    font-size: 14px;
-    letter-spacing: 0.01em;
+  #eyeBtn {
+    width: 36px; height: 36px;
+    flex: 0 0 auto;
+    display: grid; place-items: center;
+    border: 0;
+    border-radius: 5px;
+    background: transparent;
+    color: var(--dim);
     cursor: pointer;
+    padding: 0;
+  }
+  #eyeBtn:hover { color: var(--text); background: rgba(255,255,255,0.04); }
+  #eyeBtn.shown { color: var(--text); }
+
+  /* Remember-me / forgot row */
+  .opts {
     display: flex;
     align-items: center;
-    justify-content: center;
-    gap: 8px;
-    transition: transform .08s ease, background .15s ease, border-color .15s ease;
-    text-decoration: none;
+    justify-content: space-between;
+    gap: 12px;
   }
-  .btn:active { transform: translateY(1px); }
-  .btn-primary { background: var(--text); color: #07080a; }
-  .btn-primary:hover { background: #fff; }
-  .btn-primary:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+  .remember {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-height: 26px;
+    margin-left: -8px;
+    padding: 0 8px;
+    border: 0;
+    border-radius: 6px;
+    background: transparent;
+    font-family: 'Manrope', sans-serif;
+    font-size: 12.5px;
+    color: var(--muted);
+    cursor: pointer;
+    transition: color .15s ease;
+  }
+  .remember:hover { color: var(--text); }
+  .remember .box {
+    width: 16px; height: 16px;
+    flex: 0 0 auto;
+    display: grid;
+    place-items: center;
+    border-radius: 4px;
+    border: 1px solid rgba(255,255,255,0.16);
+    background: transparent;
+    color: #07080a;
+    font-size: 10px;
+    font-weight: 700;
+    transition: background .15s ease, border-color .15s ease;
+  }
+  .remember[aria-pressed="true"] .box {
+    background: var(--signal);
+    border-color: var(--signal);
+  }
+  .forgot {
+    display: flex;
+    align-items: center;
+    min-height: 26px;
+    padding: 0 4px;
+    font-size: 12.5px;
+  }
 
   .error-msg {
     font-size: 12.5px;
@@ -171,81 +213,106 @@
     margin-top: -8px;
   }
 
-  .footer {
-    color: var(--dim);
-    font-size: 11px;
-    display: flex;
-    justify-content: space-between;
-    letter-spacing: 0.04em;
+  .btn {
+    height: 46px;
+    margin-top: 2px;
+    border: 0;
+    border-radius: 5px;
+    background: var(--text);
+    color: #07080a;
+    font-family: 'Manrope', sans-serif;
+    font-size: 14px;
+    font-weight: 600;
+    letter-spacing: 0.01em;
+    cursor: pointer;
+    transition: background .15s ease, transform .08s ease;
   }
-  .footer .dot { color: var(--signal); }
+  .btn:hover:not(:disabled) { background: #fff; }
+  .btn:active:not(:disabled) { transform: translateY(1px); }
+  .btn:disabled { opacity: 0.6; cursor: not-allowed; transform: none; }
+
+  .mode-line {
+    font-family: 'JetBrains Mono', ui-monospace, monospace;
+    font-size: 10.5px;
+    letter-spacing: 0.06em;
+    color: var(--dim);
+  }
 
   /* ===== RIGHT — stippled cyclone ===== */
   .right {
+    order: 2;
     position: relative;
-    background:
-      radial-gradient(ellipse 80% 60% at 50% 50%, #0f1115 0%, #06070a 70%, #000 100%);
+    min-height: min(700px, calc(100dvh - 40px));
     overflow: hidden;
     border-left: 1px solid var(--line-soft);
+    background: radial-gradient(ellipse 80% 60% at 50% 50%, #0f1115 0%, #06070a 70%, #000 100%);
   }
   #cyclone { position: absolute; inset: 0; width: 100%; height: 100%; display: block; }
-
-  .corner {
-    position: absolute;
-    color: var(--muted);
-    font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 10.5px;
-    letter-spacing: 0.08em;
-    pointer-events: none;
-  }
-  .corner.tl { top: 24px; left: 28px; }
-  .corner.tr { top: 24px; right: 28px; text-align: right; }
-  .corner.bl { bottom: 22px; left: 28px; }
-  .corner.br { bottom: 22px; right: 28px; text-align: right; }
-  .corner b { color: var(--text); font-weight: 500; }
-  .corner .pill {
-    display: inline-flex;
-    align-items: center;
-    gap: 6px;
-    padding: 3px 8px;
-    border: 1px solid var(--line);
-    border-radius: 999px;
-    color: var(--signal);
-    margin-top: 4px;
-  }
-  .pill .live {
-    width: 6px; height: 6px; border-radius: 50%; background: var(--signal);
-    box-shadow: 0 0 8px var(--signal);
-    animation: pulse 1.6s ease-in-out infinite;
-  }
-  @keyframes pulse { 0%,100%{opacity:.4} 50%{opacity:1} }
-
   .caption {
     position: absolute;
     left: 28px;
-    bottom: 80px;
-    max-width: 360px;
-    color: var(--text);
+    right: 28px;
+    bottom: 76px;
+    max-width: 400px;
     font-family: 'Instrument Serif', serif;
     font-size: 22px;
-    line-height: 1.25;
-    letter-spacing: -0.005em;
+    line-height: 1.28;
+    color: var(--text);
   }
   .caption .gray { color: var(--muted); font-style: italic; }
 
-  @media (max-width: 880px) {
-    .frame { grid-template-columns: 1fr; height: auto; }
-    .right { min-height: 320px; }
-    .left { padding: 40px 32px; }
+  /* ===== Responsive — art stacks above the form below 860px ===== */
+  @media (max-width: 860px) {
+    .stage { padding: 0; height: auto; min-height: 100dvh; }
+    .frame {
+      grid-template-columns: 1fr;
+      width: 100%;
+      border: 0;
+      border-radius: 0;
+      min-height: 100dvh;
+    }
+    .right {
+      order: 1;
+      min-height: 210px;
+      border-left: 0;
+      border-left-color: transparent;
+    }
+    .left {
+      order: 2;
+      overflow: visible;
+      gap: 26px;
+      padding: 26px 22px calc(30px + env(safe-area-inset-bottom));
+    }
+    .form-area { max-width: none; }
+    .form-area h1 { font-size: 30px; }
+    .caption { left: 18px; right: 18px; bottom: 18px; font-size: 16px; max-width: none; }
+    /* 16px avoids iOS zooming the viewport on focus */
+    .input { height: 50px; }
+    .input input { font-size: 16px; }
+    .btn { height: 52px; }
+    /* Comfortable touch targets */
+    .remember, .forgot { min-height: 44px; }
+    #eyeBtn { width: 44px; height: 44px; }
   }
 </style>
 </head>
 <body>
+<div class="stage">
 <div class="frame">
-  <!-- LEFT -->
+  <!-- LEFT — form -->
   <div class="left">
     <div class="brand">
-      <span class="mark" aria-hidden="true"></span>
+      <svg class="mark" width="30" height="30" viewBox="0 0 32 32" fill="none" aria-hidden="true">
+        <defs><radialGradient id="eyeF" cx="50%" cy="50%" r="50%">
+          <stop offset="0" stop-color="#ffd694"></stop><stop offset="1" stop-color="#e39c33"></stop>
+        </radialGradient></defs>
+        <circle cx="16" cy="16" r="15" stroke="rgba(245,177,60,0.22)" stroke-width="1"></circle>
+        <path d="M16 3.4c7 0 12.6 5.6 12.6 12.6S23 28.6 16 28.6" stroke="rgba(245,177,60,0.42)" stroke-width="1.6" stroke-linecap="round"></path>
+        <path d="M16 28.6c-7 0-12.6-5.6-12.6-12.6" stroke="rgba(245,177,60,0.18)" stroke-width="1.6" stroke-linecap="round"></path>
+        <path d="M16 8.2c4.3 0 7.8 3.5 7.8 7.8s-3.5 7.8-7.8 7.8" stroke="rgba(245,177,60,0.72)" stroke-width="1.8" stroke-linecap="round"></path>
+        <path d="M16 23.8c-4.3 0-7.8-3.5-7.8-7.8" stroke="rgba(245,177,60,0.3)" stroke-width="1.8" stroke-linecap="round"></path>
+        <circle cx="16" cy="16" r="3.4" fill="url(#eyeF)"></circle>
+      </svg>
       <span class="wordmark">stormedge<em>.</em></span>
     </div>
 
@@ -255,63 +322,93 @@
         <p class="sub">Weather-edge trading on Polymarket. Paper or live.</p>
       </div>
 
-      <div class="field">
-        <label for="email">Email</label>
-        <div class="input">
+      <label class="field">
+        <span class="label">Email</span>
+        <span class="input">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="2" y="4" width="20" height="16" rx="2"/><path d="m2 7 10 7 10-7"/></svg>
           <input id="email" type="email" placeholder="hello@stormedge.io" autocomplete="email" />
-        </div>
-      </div>
+        </span>
+      </label>
 
-      <div class="field">
-        <label for="password">Password</label>
-        <div class="input">
+      <label class="field">
+        <span class="label">Password</span>
+        <span class="input with-eye">
           <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><rect x="3" y="11" width="18" height="11" rx="2"/><path d="M7 11V7a5 5 0 0 1 10 0v4"/></svg>
           <input id="password" type="password" placeholder="Your password" autocomplete="current-password" />
-          <button type="button" id="eyeBtn" onclick="togglePassword()" style="background:none;border:0;padding:0;cursor:pointer;color:var(--dim);display:grid;place-items:center;flex-shrink:0;" tabindex="-1">
-            <svg id="eyeIcon" width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/></svg>
+          <button type="button" id="eyeBtn" aria-label="Show password" tabindex="-1">
+            <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+              <path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>
+              <line id="eyeSlash" x1="2" y1="22" x2="22" y2="2" style="display:none"/>
+            </svg>
           </button>
-        </div>
+        </span>
+      </label>
+
+      <div class="opts">
+        <button type="button" class="remember" id="rememberBtn" aria-pressed="true">
+          <span class="box" aria-hidden="true">✓</span>
+          Keep me signed in
+        </button>
+        <a class="forgot" href="#" id="forgotLink">Forgot password?</a>
       </div>
 
       <div class="error-msg" id="errorMsg"></div>
 
-      <button type="submit" class="btn btn-primary" id="submitBtn">Sign in</button>
+      <button type="submit" class="btn" id="submitBtn">Sign in</button>
     </form>
 
+    <!-- Substituted by the / route so the strip states the mode the bot is
+         actually running in, rather than a hardcoded label. -->
+    <div class="mode-line" id="modeLine">{{MODE}} MODE ENABLED</div>
   </div>
 
-  <!-- RIGHT -->
+  <!-- RIGHT — art -->
   <div class="right">
-    <canvas id="cyclone"></canvas>
-
-    <div class="corner tr">
-      <div class="pill">
-        <span class="live"></span>
-        monitoring
-      </div>
-    </div>
-
+    <canvas id="cyclone" data-cyclone="1"></canvas>
     <div class="caption">
-      &ldquo;Scans every weather market<br/>
-      on Polymarket. Finds the<br/>
-      <span class="gray">mispricings before the crowd does.</span>&rdquo;
+      Scans every weather market on Polymarket.
+      <span class="gray">Finds the mispricings before the crowd does.</span>
     </div>
   </div>
 </div>
+</div>
 
 <script>
-function togglePassword() {
+// Password reveal — the design keeps one eye glyph and strikes it through,
+// rather than swapping in a second icon.
+const eyeBtn = document.getElementById('eyeBtn');
+eyeBtn.addEventListener('click', () => {
   const input = document.getElementById('password');
-  const icon = document.getElementById('eyeIcon');
-  const btn = document.getElementById('eyeBtn');
+  const slash = document.getElementById('eyeSlash');
   const show = input.type === 'password';
   input.type = show ? 'text' : 'password';
-  btn.style.color = show ? 'var(--text-soft)' : 'var(--dim)';
-  icon.innerHTML = show
-    ? '<path d="M17.94 17.94A10.07 10.07 0 0 1 12 20c-7 0-11-8-11-8a18.45 18.45 0 0 1 5.06-5.94"/><path d="M9.9 4.24A9.12 9.12 0 0 1 12 4c7 0 11 8 11 8a18.5 18.5 0 0 1-2.16 3.19"/><line x1="1" y1="1" x2="23" y2="23"/>'
-    : '<path d="M1 12s4-8 11-8 11 8 11 8-4 8-11 8-11-8-11-8z"/><circle cx="12" cy="12" r="3"/>';
-}
+  slash.style.display = show ? '' : 'none';
+  eyeBtn.classList.toggle('shown', show);
+  eyeBtn.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
+});
+
+// Keep me signed in — defaults on, and the choice itself is remembered
+// locally so a returning user sees the state they last picked.
+const rememberBtn = document.getElementById('rememberBtn');
+let remember = localStorage.getItem('stormedge-remember') !== '0';
+const paintRemember = () => {
+  rememberBtn.setAttribute('aria-pressed', String(remember));
+  rememberBtn.querySelector('.box').textContent = remember ? '✓' : '';
+};
+paintRemember();
+rememberBtn.addEventListener('click', () => {
+  remember = !remember;
+  try { localStorage.setItem('stormedge-remember', remember ? '1' : '0'); } catch (e) {}
+  paintRemember();
+});
+
+// There is no self-serve reset — the password is an env var on the server, so
+// say that plainly instead of linking to a flow that does not exist.
+document.getElementById('forgotLink').addEventListener('click', (e) => {
+  e.preventDefault();
+  document.getElementById('errorMsg').textContent =
+    'The desk password is set on the server (DASHBOARD_PASSWORD) — change it there.';
+});
 
 document.getElementById('loginForm').addEventListener('submit', async function(e) {
   e.preventDefault();
@@ -326,7 +423,7 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
     const r = await fetch('/api/login', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password })
+      body: JSON.stringify({ email, password, remember })
     });
     if (r.ok) {
       window.location.href = '/dashboard';
@@ -344,99 +441,6 @@ document.getElementById('loginForm').addEventListener('submit', async function(e
 });
 </script>
 
-<script>
-// Stippled cyclone — fibonacci spiral with hash-noise dropout.
-const canvas = document.getElementById('cyclone');
-const ctx = canvas.getContext('2d');
-let DPR = Math.min(window.devicePixelRatio || 1, 2);
-let W = 0, H = 0;
-
-function resize() {
-  const r = canvas.getBoundingClientRect();
-  W = r.width; H = r.height;
-  canvas.width = W * DPR;
-  canvas.height = H * DPR;
-  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
-}
-resize();
-window.addEventListener('resize', resize);
-
-function hash(x, y) {
-  let h = Math.sin(x * 12.9898 + y * 78.233) * 43758.5453;
-  return h - Math.floor(h);
-}
-
-let t = 0;
-function draw() {
-  ctx.clearRect(0, 0, W, H);
-  const cx = W * 0.5, cy = H * 0.5;
-  const R = Math.min(W, H) * 0.46;
-
-  for (let i = 0; i < 380; i++) {
-    const a = hash(i, 11) * Math.PI * 2;
-    const r = R * (1.05 + hash(i, 41) * 0.6);
-    const x = cx + Math.cos(a) * r;
-    const y = cy + Math.sin(a) * r * 0.92;
-    if (x < 0 || x > W || y < 0 || y > H) continue;
-    const op = 0.06 + hash(i, 71) * 0.12;
-    ctx.fillStyle = `rgba(220,215,200,${op})`;
-    ctx.fillRect(x, y, 1, 1);
-  }
-
-  const arms = 2;
-  const POINTS = 4200;
-  for (let i = 0; i < POINTS; i++) {
-    const u = i / POINTS;
-    const r = Math.pow(u, 0.55) * R;
-    const arm = i % arms;
-    const baseAngle = (arm / arms) * Math.PI * 2;
-    const wrap = 3.6;
-    const ang = baseAngle + u * wrap * Math.PI * 2 + t * 0.0008;
-    const armWidth = 12 + (1 - u) * 26;
-    const j1 = (hash(i, 3) - 0.5) * armWidth;
-    const j2 = (hash(i, 7) - 0.5) * armWidth * 0.6;
-    const px = cx + Math.cos(ang) * r + Math.cos(ang + Math.PI / 2) * j1;
-    const py = cy + Math.sin(ang) * r * 0.96 + Math.sin(ang + Math.PI / 2) * j2;
-    if (px < 0 || px > W || py < 0 || py > H) continue;
-
-    const eye = u < 0.06;
-    if (eye && hash(i, 13) > 0.05) continue;
-    const noise = hash(i, 17);
-    if (noise > 0.78) continue;
-
-    const bright = 0.18 + (1 - u) * 0.7;
-    const flicker = 0.85 + hash(i + Math.floor(t / 8), 23) * 0.3;
-    const op = Math.min(0.95, bright * flicker);
-    const warm = u < 0.18 ? 1 : 0;
-    const rgb = warm ? `245,200,140` : `220,215,200`;
-    ctx.fillStyle = `rgba(${rgb},${op})`;
-    const sz = u < 0.04 ? 1.4 : (u < 0.2 ? 1.1 : 1);
-    ctx.fillRect(px, py, sz, sz);
-  }
-
-  ctx.beginPath();
-  ctx.arc(cx, cy, R * 0.04, 0, Math.PI * 2);
-  ctx.fillStyle = '#06070a';
-  ctx.fill();
-  ctx.strokeStyle = 'rgba(245,177,60,0.55)';
-  ctx.lineWidth = 0.6;
-  ctx.beginPath();
-  ctx.arc(cx, cy, R * 0.045, 0, Math.PI * 2);
-  ctx.stroke();
-
-  ctx.strokeStyle = 'rgba(245,177,60,0.3)';
-  ctx.lineWidth = 0.5;
-  ctx.beginPath();
-  ctx.moveTo(cx - R * 0.08, cy); ctx.lineTo(cx - R * 0.05, cy);
-  ctx.moveTo(cx + R * 0.05, cy); ctx.lineTo(cx + R * 0.08, cy);
-  ctx.moveTo(cx, cy - R * 0.08); ctx.lineTo(cx, cy - R * 0.05);
-  ctx.moveTo(cx, cy + R * 0.05); ctx.lineTo(cx, cy + R * 0.08);
-  ctx.stroke();
-
-  t += 16;
-  requestAnimationFrame(draw);
-}
-draw();
-</script>
+<script src="/cyclone.js"></script>
 </body>
 </html>

@@ -890,3 +890,107 @@ class TestOneTradePerCityDate:
                             lambda **kw: opened.append(kw))
         self._exec().execute_trade(self._signal())
         assert opened == []  # blocked at max-concurrent, i.e. restriction passed
+
+
+class TestManualClose:
+    """Dashboard 'Close' button — Executor.close_position_manual.
+
+    The monitor loop treats every non-close outcome the same (log, retry next
+    cycle); a human pressing a button must instead be told which one happened,
+    and must never be able to fire a second sell while the bot is mid-exit on
+    the same position.
+    """
+
+    def _exec(self):
+        return Executor.__new__(Executor)
+
+    def _pos(self):
+        return {"id": 7, "market_id": "mkt-7", "side": "NO", "shares": 10.0,
+                "question": "Will it be hot?", "entry_price": 0.40,
+                "size_usdc": 4.0, "token_id": "tok-7"}
+
+    def test_closed_reports_realized_pnl(self, monkeypatch):
+        import executor as ex
+        pos = self._pos()
+        monkeypatch.setattr(ex, "get_position_by_id",
+                            lambda pid: pos if not closed else None)
+        closed = False
+        def fake_close(self, p, pnl_dollars, exit_reason):
+            nonlocal closed
+            closed = True
+            assert exit_reason.startswith("MANUAL_CLOSE")
+        monkeypatch.setattr(Executor, "_close_position", fake_close)
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [{"pnl": 1.25}])
+        r = self._exec().close_position_manual(7)
+        assert r["ok"] is True and r["status"] == "closed"
+        assert r["pnl"] == 1.25 and "+1.25" in r["message"]
+
+    def test_no_fill_leaves_position_open_and_says_so(self, monkeypatch):
+        """_close_position returns silently when the sell doesn't fill; the row
+        is still there and share count is unchanged → report no_fill, not success."""
+        import executor as ex
+        pos = self._pos()
+        monkeypatch.setattr(ex, "get_position_by_id", lambda pid: pos)
+        monkeypatch.setattr(Executor, "_close_position",
+                            lambda self, p, pnl_dollars, exit_reason: None)
+        r = self._exec().close_position_manual(7)
+        assert r["ok"] is False and r["status"] == "no_fill"
+        assert "still open" in r["message"]
+
+    def test_partial_fill_reports_remaining_shares(self, monkeypatch):
+        import executor as ex
+        pos = self._pos()
+        after = dict(pos, shares=4.0)          # 6 of 10 sold
+        monkeypatch.setattr(ex, "get_position_by_id", lambda pid: after if sold else pos)
+        sold = False
+        def fake_close(self, p, pnl_dollars, exit_reason):
+            nonlocal sold
+            sold = True
+        monkeypatch.setattr(Executor, "_close_position", fake_close)
+        r = self._exec().close_position_manual(7)
+        assert r["ok"] is True and r["status"] == "partial"
+        assert r["shares_sold"] == 6.0 and r["shares_remaining"] == 4.0
+
+    def test_already_closed_is_not_found(self, monkeypatch):
+        import executor as ex
+        monkeypatch.setattr(ex, "get_position_by_id", lambda pid: None)
+        calls = []
+        monkeypatch.setattr(Executor, "_close_position",
+                            lambda self, p, pnl_dollars, exit_reason: calls.append(p))
+        r = self._exec().close_position_manual(7)
+        assert r["ok"] is False and r["status"] == "not_found"
+        assert calls == []          # no sell attempted on a vanished position
+
+    def test_lock_held_elsewhere_refuses_second_sell(self, monkeypatch):
+        """The core race: monitor thread is mid-exit on this position, user
+        clicks Close. Must refuse rather than submit a concurrent SELL."""
+        import executor as ex
+        e = self._exec()
+        e._exit_lock(7).acquire()           # simulate the monitor holding it
+        calls = []
+        monkeypatch.setattr(Executor, "_close_position",
+                            lambda self, p, pnl_dollars, exit_reason: calls.append(p))
+        monkeypatch.setattr(ex, "get_position_by_id", lambda pid: self._pos())
+        r = e.close_position_manual(7)
+        assert r["ok"] is False and r["status"] == "busy"
+        assert calls == []                  # no second order submitted
+
+    def test_lock_released_after_close(self, monkeypatch):
+        """A completed manual close must not leave the position permanently
+        locked — that would silently disable the bot's own exits for it."""
+        import executor as ex
+        monkeypatch.setattr(ex, "get_position_by_id", lambda pid: None)
+        e = self._exec()
+        e.close_position_manual(7)
+        assert e._exit_lock(7).acquire(blocking=False) is True
+
+    def test_lock_released_when_close_raises(self, monkeypatch):
+        import executor as ex
+        monkeypatch.setattr(ex, "get_position_by_id", lambda pid: self._pos())
+        def boom(self, p, pnl_dollars, exit_reason):
+            raise RuntimeError("CLOB down")
+        monkeypatch.setattr(Executor, "_close_position", boom)
+        e = self._exec()
+        with pytest.raises(RuntimeError):
+            e.close_position_manual(7)
+        assert e._exit_lock(7).acquire(blocking=False) is True

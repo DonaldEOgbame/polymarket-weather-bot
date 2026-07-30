@@ -9,7 +9,7 @@ from config import (
     KELLY_CAP, MIN_POSITION_SIZE,
     MAX_POSITION_FRACTION, BASE_POSITION_FRACTION,
     SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD, SHADOW_MAX_SIZE_USDC,
-    ENABLE_SHADOW_EXPLORATION, PAPER_MODE,
+    ENABLE_SHADOW_EXPLORATION, paper_mode,
     NARROW_BUCKET_WIDTH_F, NARROW_BUCKET_EDGE_THRESHOLD, NARROW_BUCKET_STD_INFLATION,
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION,
     TAKER_FEE_RATE, SLIPPAGE_FRACTION, MAX_ENTRY_SPREAD_FRACTION,
@@ -298,7 +298,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                 f"shadow={shadow_verdict}"
             )
 
-            if shadow_passes and ENABLE_SHADOW_EXPLORATION and PAPER_MODE and not shadow_signal_created:
+            if shadow_passes and ENABLE_SHADOW_EXPLORATION and paper_mode() and not shadow_signal_created:
                 signal = f"EXPLORE_{s_side}"
                 side = s_side
                 kelly = calculate_kelly(s_edge, s_price)
