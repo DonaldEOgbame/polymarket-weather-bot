@@ -204,7 +204,7 @@ class TestLiveExitFeeDeduction:
         import executor as ex
         e = Executor.__new__(Executor)
 
-        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(ex, "paper_mode", lambda: False)
         monkeypatch.setattr(e, "_submit_taker",
                             lambda token_id, side, amount, fallback_price=None: {"shares": 10.0, "price": 0.70, "fee_bps": 500})
         monkeypatch.setattr(ex, "close_position_atomic", lambda **kwargs: kwargs)
@@ -249,7 +249,7 @@ class TestPartialExitFill:
         import executor as ex
         e = Executor.__new__(Executor)
 
-        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(ex, "paper_mode", lambda: False)
         # Hold 10 shares; the bid only absorbs 4.
         monkeypatch.setattr(e, "_submit_taker",
                             lambda token_id, side, amount, fallback_price=None: {"shares": 4.0, "price": 0.70, "fee_bps": 500})
@@ -286,7 +286,7 @@ class TestPartialExitFill:
     def test_full_fill_closes(self, monkeypatch):
         import executor as ex
         e = Executor.__new__(Executor)
-        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(ex, "paper_mode", lambda: False)
         monkeypatch.setattr(e, "_submit_taker",
                             lambda token_id, side, amount, fallback_price=None: {"shares": 10.0, "price": 0.70, "fee_bps": 500})
         monkeypatch.setattr(ex, "send_trade_exit", lambda *a, **k: None)
@@ -318,7 +318,7 @@ class TestExitDepthLogging:
         import executor as ex
         e = Executor.__new__(Executor)
 
-        monkeypatch.setattr(ex, "PAPER_MODE", True)
+        monkeypatch.setattr(ex, "paper_mode", lambda: True)
         monkeypatch.setattr(ex, "get_orderbook_depth_usd", lambda tid: (123.45, 678.90))
         monkeypatch.setattr(ex, "send_trade_exit", lambda *a, **k: None)
 
@@ -341,7 +341,7 @@ class TestExitDepthLogging:
         import executor as ex
         e = Executor.__new__(Executor)
 
-        monkeypatch.setattr(ex, "PAPER_MODE", True)
+        monkeypatch.setattr(ex, "paper_mode", lambda: True)
         def boom(tid):
             raise ConnectionError("network down")
         monkeypatch.setattr(ex, "get_orderbook_depth_usd", boom)
@@ -697,7 +697,7 @@ class TestExternalCloseSync:
 
     def _wire(self, monkeypatch, pos, wallet, sells):
         import executor as ex
-        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(ex, "paper_mode", lambda: False)
         monkeypatch.setattr(ex, "POLYMARKET_FUNDER", "0xdead")
         monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [pos])
         monkeypatch.setattr(ex, "get_wallet_token_sizes", lambda user: wallet)
@@ -768,7 +768,7 @@ class TestExternalCloseSync:
         import executor as ex
         pos = self._pos()
         e, closes, reduces = self._wire(monkeypatch, pos, wallet={}, sells=[(0.87, 3.38)])
-        monkeypatch.setattr(ex, "PAPER_MODE", True)
+        monkeypatch.setattr(ex, "paper_mode", lambda: True)
         assert e.sync_external_closes() == 0
         assert not closes
 
@@ -788,7 +788,7 @@ class TestExternalCloseSync:
         # The shares are already gone — a CLOB SELL would be rejected forever.
         import executor as ex
         e = self._exec()
-        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(ex, "paper_mode", lambda: False)
         monkeypatch.setattr(e, "_submit_taker",
                             lambda *a, **k: pytest.fail("EXTERNAL_ close must not hit the CLOB"))
         monkeypatch.setattr(ex, "send_trade_exit", lambda *a, **k: None)

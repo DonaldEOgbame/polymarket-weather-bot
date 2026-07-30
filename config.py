@@ -16,7 +16,9 @@ from dotenv import load_dotenv
 load_dotenv()
 
 # --- Mode ---
-PAPER_MODE = os.getenv("PAPER_MODE", "true").lower() == "true"
+# Resolved below, after _tunable() exists: the dashboard can switch this at
+# runtime and persists the choice, so the stored value has to beat the env var
+# the same way every other managed setting does. See PAPER_MODE further down.
 
 # --- Database ---
 DB_PATH = os.getenv("DB_PATH", "data/bot.db")
@@ -26,6 +28,10 @@ DB_PATH = os.getenv("DB_PATH", "data/bot.db")
 # code/env controlled — calibration constants and station tables in particular
 # are documented, version-tracked, and must not be editable from a web form.
 MANAGED_SETTINGS = (
+    # Persisted by /api/trading-mode only — deliberately absent from
+    # app.SETTING_SPECS, which is what the bulk Settings save validates against,
+    # so this can never ride along in an ordinary save.
+    "PAPER_MODE",
     "FIXED_POSITION_SIZE",
     "HARD_MAX_POSITION_SIZE",
     "MAX_CONCURRENT_POSITIONS",
@@ -78,6 +84,14 @@ def _tunable(key, default):
     if key in _DB_OVERRIDES:
         return _DB_OVERRIDES[key]
     return os.getenv(key, default)
+
+
+# --- Mode ---
+# Boot default for the runtime store below. A dashboard switch persists here, so
+# the mode survives a restart or a deploy: without that, every redeploy would
+# silently drop a live bot back to paper. Defaults to paper whenever it has
+# never been set — the safe direction for the one flag that spends real money.
+PAPER_MODE = str(_tunable("PAPER_MODE", "true")).strip().lower() == "true"
 
 # --- Bankroll ---
 STARTING_BANKROLL = float(os.getenv("STARTING_BANKROLL", "40.0"))

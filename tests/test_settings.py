@@ -563,7 +563,7 @@ class TestWalletCashSync:
     def test_deposit_booked_after_two_stable_reads(self, tmp_path, monkeypatch):
         db, _, _ = _fresh_db(tmp_path, monkeypatch)
         e, ex = self._executor(db)
-        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(ex, "paper_mode", lambda: False)
         monkeypatch.setattr(ex, "get_wallet_collateral", lambda c=None: 150.0)
         start = db.get_current_bankroll()          # 40.0 seed
         assert e.sync_wallet_cash() == 0           # first read: pending only
@@ -576,7 +576,7 @@ class TestWalletCashSync:
     def test_flaky_single_read_never_books(self, tmp_path, monkeypatch):
         db, _, _ = _fresh_db(tmp_path, monkeypatch)
         e, ex = self._executor(db)
-        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(ex, "paper_mode", lambda: False)
         readings = iter([150.0, None, 150.0, 150.0])
         monkeypatch.setattr(ex, "get_wallet_collateral", lambda c=None: next(readings))
         assert e.sync_wallet_cash() == 0    # 150 pending
@@ -591,7 +591,7 @@ class TestWalletCashSync:
         believing $20.91. With the sync, the ledger follows the wallet down."""
         db, _, _ = _fresh_db(tmp_path, monkeypatch)
         e, ex = self._executor(db)
-        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(ex, "paper_mode", lambda: False)
         monkeypatch.setattr(ex, "get_wallet_collateral", lambda c=None: 0.0)
         e.sync_wallet_cash()
         assert e.sync_wallet_cash() == 1
@@ -609,7 +609,7 @@ class TestWalletCashSync:
                          "VALUES ('0xa','t','NO',0.6,2.0,'t','q')")
             conn.commit()
         e, ex = self._executor(db)
-        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(ex, "paper_mode", lambda: False)
         monkeypatch.setattr(ex, "get_wallet_collateral", lambda c=None: 5.0)
         e.sync_wallet_cash()
         assert e.sync_wallet_cash() == 0
@@ -618,7 +618,7 @@ class TestWalletCashSync:
     def test_dust_difference_ignored(self, tmp_path, monkeypatch):
         db, _, _ = _fresh_db(tmp_path, monkeypatch)
         e, ex = self._executor(db)
-        monkeypatch.setattr(ex, "PAPER_MODE", False)
+        monkeypatch.setattr(ex, "paper_mode", lambda: False)
         monkeypatch.setattr(ex, "get_wallet_collateral", lambda c=None: 40.60)
         assert e.sync_wallet_cash() == 0
         assert e.sync_wallet_cash() == 0
@@ -680,11 +680,171 @@ class TestNewEraAPI:
         assert r.status_code == 409
         assert db.get_current_era() is None     # nothing happened
 
-    def test_unreadable_wallet_seeds_zero(self, client, monkeypatch):
+    def test_unreadable_wallet_refuses_zero_seed(self, client, monkeypatch):
+        """A $0 era is a wiped ledger the bot can never trade out of — in paper
+        mode nothing ever books cash into it. Refuse instead of zeroing."""
         c, _, db, _ = client
         import executor as ex
         monkeypatch.setattr(ex, "get_wallet_collateral", lambda c=None: None)
         r = c.post("/api/new-era", json={"confirm": True})
+        assert r.status_code == 409
+        body = r.get_json()
+        assert body["needs_seed"] is True
+        assert db.get_current_era() is None          # nothing happened
+
+    def test_explicit_seed_overrides_unreadable_wallet(self, client, monkeypatch):
+        """The refusal is not a dead end: an explicit seed still opens the era."""
+        c, _, db, _ = client
+        import executor as ex
+        monkeypatch.setattr(ex, "get_wallet_collateral", lambda c=None: None)
+        r = c.post("/api/new-era", json={"confirm": True, "seed": 25.0})
         assert r.status_code == 200
-        assert r.get_json()["seed"] == 0.0
-        assert db.get_current_bankroll() == 0.0
+        assert r.get_json()["seed"] == 25.0
+        assert db.get_current_bankroll() == 25.0
+
+    def test_explicit_zero_seed_still_refused(self, client, monkeypatch):
+        """Even asked for directly, $0 is refused — it is never a useful era."""
+        c, _, db, _ = client
+        import executor as ex
+        monkeypatch.setattr(ex, "get_wallet_collateral", lambda c=None: None)
+        r = c.post("/api/new-era", json={"confirm": True, "seed": 0})
+        assert r.status_code == 409
+        assert db.get_current_era() is None
+
+
+class TestTradingModeAPI:
+    """The paper <-> live switch. This is the only control in the app that
+    starts real money moving, so every gate on it is pinned here."""
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        db, config, db_file = _fresh_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("DASHBOARD_EMAIL", "t@t.com")
+        import app as app_mod
+        importlib.reload(app_mod)
+        app_mod.app.config["TESTING"] = True
+        c = app_mod.app.test_client()
+        with c.session_transaction() as s:
+            s["authed"] = True
+        return c, app_mod, db, config, db_file
+
+    @staticmethod
+    def _preflight(monkeypatch, ok, checks=None):
+        """Stand in for the credential/funding preflight."""
+        import check_live_readiness as clr
+        checks = checks if checks is not None else [
+            {"id": "auth", "label": "CLOB authentication", "ok": ok,
+             "blocking": True, "detail": "stub"}]
+        monkeypatch.setattr(clr, "preflight",
+                            lambda: {"ok": ok, "balance": 50.0, "signer": "0x1",
+                                     "checks": list(checks)})
+
+    @staticmethod
+    def _open_position(db_file):
+        with sqlite3.connect(str(db_file)) as conn:
+            conn.execute("INSERT INTO positions (market_id, token_id, side, entry_price, "
+                         "size_usdc, entry_time) VALUES ('0xa','t1','NO',0.6,2.0,'2026-07-30T00:00:00')")
+            conn.commit()
+
+    def test_requires_auth(self, client):
+        c, app_mod, _, _, _ = client
+        anon = app_mod.app.test_client()
+        assert anon.post("/api/trading-mode", json={"paper": False, "confirm": True}).status_code == 401
+        assert anon.get("/api/live-preflight").status_code == 401
+
+    def test_requires_confirm(self, client, monkeypatch):
+        c, _, _, config, _ = client
+        self._preflight(monkeypatch, True)
+        assert c.post("/api/trading-mode", json={"paper": False}).status_code == 400
+        assert config.paper_mode() is True       # untouched
+
+    def test_going_live_blocked_when_preflight_fails(self, client, monkeypatch):
+        c, _, _, config, _ = client
+        self._preflight(monkeypatch, False, [
+            {"id": "collateral", "label": "Wallet collateral", "ok": False,
+             "blocking": True, "detail": "no collateral"}])
+        r = c.post("/api/trading-mode", json={"paper": False, "confirm": True})
+        assert r.status_code == 409
+        assert r.get_json()["blocked"][0]["label"] == "Wallet collateral"
+        assert config.paper_mode() is True       # still paper — the whole point
+
+    def test_going_live_blocked_with_open_paper_positions(self, client, monkeypatch, tmp_path):
+        """A paper position has no on-chain shares; live mode would try to sell
+        something the wallet has never owned."""
+        c, _, _, config, db_file = client
+        self._preflight(monkeypatch, True)
+        self._open_position(db_file)
+        r = c.post("/api/trading-mode", json={"paper": False, "confirm": True})
+        assert r.status_code == 409
+        assert config.paper_mode() is True
+
+    def test_going_live_applies_and_persists(self, client, monkeypatch):
+        c, _, db, config, db_file = client
+        self._preflight(monkeypatch, True)
+        r = c.post("/api/trading-mode", json={"paper": False, "confirm": True})
+        assert r.status_code == 200
+        assert r.get_json()["paper_mode"] is False
+        assert config.paper_mode() is False
+        # Persisted, so a restart does not silently drop back to paper.
+        with sqlite3.connect(str(db_file)) as conn:
+            stored = dict(conn.execute("SELECT key, value FROM settings").fetchall())
+        assert stored["PAPER_MODE"] == "false"
+
+    def test_persisted_mode_survives_reload(self, client, monkeypatch):
+        c, _, _, config, db_file = client
+        self._preflight(monkeypatch, True)
+        c.post("/api/trading-mode", json={"paper": False, "confirm": True})
+        reloaded = _reload_config(monkeypatch, db_file)
+        assert reloaded.PAPER_MODE is False
+        assert reloaded.paper_mode() is False
+
+    def test_back_to_paper_blocked_while_live_positions_open(self, client, monkeypatch, tmp_path):
+        c, _, _, config, db_file = client
+        self._preflight(monkeypatch, True)
+        c.post("/api/trading-mode", json={"paper": False, "confirm": True})
+        self._open_position(db_file)
+        r = c.post("/api/trading-mode", json={"paper": True, "confirm": True})
+        assert r.status_code == 409
+        assert config.paper_mode() is False      # still live — exits stay real
+
+    def test_back_to_paper_allowed_when_flat(self, client, monkeypatch):
+        c, _, _, config, _ = client
+        self._preflight(monkeypatch, True)
+        c.post("/api/trading-mode", json={"paper": False, "confirm": True})
+        r = c.post("/api/trading-mode", json={"paper": True, "confirm": True})
+        assert r.status_code == 200
+        assert config.paper_mode() is True
+
+    def test_same_mode_is_a_noop(self, client):
+        c, _, _, _, _ = client
+        r = c.post("/api/trading-mode", json={"paper": True, "confirm": True})
+        assert r.status_code == 200
+        assert r.get_json()["changed"] is False
+
+    def test_cannot_be_smuggled_through_bulk_settings_save(self, client):
+        """PAPER_MODE is runtime-tunable but absent from SETTING_SPECS, so the
+        ordinary Settings save must reject it rather than flip it."""
+        c, app_mod, _, config, _ = client
+        assert "PAPER_MODE" not in app_mod.SETTING_SPECS
+        r = c.post("/api/settings", json={"settings": {"PAPER_MODE": False}})
+        assert r.status_code == 400
+        assert "PAPER_MODE" in r.get_json()["field_errors"]
+        assert config.paper_mode() is True
+
+    def test_preflight_reports_open_positions(self, client, monkeypatch):
+        c, _, _, _, db_file = client
+        self._preflight(monkeypatch, True)
+        self._open_position(db_file)
+        d = c.get("/api/live-preflight").get_json()
+        assert d["ok"] is False
+        flat = [c_ for c_ in d["checks"] if c_["id"] == "flat_book"][0]
+        assert flat["ok"] is False
+
+    def test_executor_reads_the_flag_live(self, client, monkeypatch):
+        """The reason this works at all: no module holds an import-time copy."""
+        c, _, _, config, _ = client
+        import executor as ex
+        assert ex.paper_mode() is True
+        self._preflight(monkeypatch, True)
+        c.post("/api/trading-mode", json={"paper": False, "confirm": True})
+        assert ex.paper_mode() is False

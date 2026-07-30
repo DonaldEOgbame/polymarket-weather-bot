@@ -456,6 +456,119 @@ def api_settings_post():
                    daily_loss_limit=_config.daily_loss_limit())
 
 
+@app.get('/api/live-preflight')
+@require_auth
+def api_live_preflight():
+    """Everything that must be true before real money may move. Read-only."""
+    from check_live_readiness import preflight
+    try:
+        result = preflight()
+    except Exception as e:
+        logging.error(f"Preflight failed: {e}", exc_info=True)
+        return jsonify(ok=False, checks=[{
+            'id': 'preflight', 'label': 'Readiness check', 'ok': False,
+            'blocking': True, 'detail': f'{type(e).__name__}: {e}'}]), 200
+    open_positions = len(_q('SELECT id FROM positions'))
+    # A paper position is a row with no on-chain counterpart. Going live while
+    # holding one would have the executor manage it as if it were real: it would
+    # try to SELL shares the wallet has never owned.
+    result['checks'].append({
+        'id': 'flat_book', 'label': 'No open paper positions',
+        'ok': open_positions == 0, 'blocking': True,
+        'detail': 'book is flat' if open_positions == 0 else
+                  f'{open_positions} position(s) open — let them settle first, '
+                  f'or close them from the Desk',
+    })
+    result['ok'] = all(c['ok'] for c in result['checks'] if c.get('blocking'))
+    result['paper_mode'] = _config.paper_mode()
+    return jsonify(result)
+
+
+@app.post('/api/trading-mode')
+@require_auth
+def api_trading_mode():
+    """Switch between simulated and real trading, live, with no restart.
+
+    Deliberately NOT part of the bulk settings save: this is the only control in
+    the app that starts spending real money, so it has its own endpoint, its own
+    explicit confirm, and its own gate.
+
+    paper -> live  requires every blocking preflight check to pass.
+    live  -> paper is allowed unless real positions are open: dropping to paper
+             would leave the executor managing them as simulations and it would
+             never place the real exit orders.
+    """
+    from db import add_notification, save_settings
+    if _viewing_archive():
+        return jsonify(error='cannot change trading mode while viewing an archive'), 409
+
+    d = request.get_json(silent=True) or {}
+    if 'paper' not in d:
+        return jsonify(error='send {"paper": true|false, "confirm": true}'), 400
+    want_paper = bool(d['paper'])
+    if not d.get('confirm'):
+        return jsonify(error='changing trading mode requires confirm=true'), 400
+
+    current_paper = _config.paper_mode()
+    if want_paper == current_paper:
+        return jsonify(ok=True, paper_mode=current_paper, changed=False,
+                       message=f'already in {"paper" if current_paper else "live"} mode')
+
+    open_positions = len(_q('SELECT id FROM positions'))
+
+    if not want_paper:
+        # ---- paper -> live: the hard gate ----
+        from check_live_readiness import preflight
+        try:
+            result = preflight()
+        except Exception as e:
+            logging.error(f"Preflight failed during mode switch: {e}", exc_info=True)
+            return jsonify(error=f'readiness check failed: {type(e).__name__}: {e}'), 409
+        blocked = [c for c in result['checks'] if c.get('blocking') and not c['ok']]
+        if open_positions:
+            blocked.append({'label': 'No open paper positions',
+                            'detail': f'{open_positions} position(s) open'})
+        if blocked:
+            return jsonify(
+                error='not ready for live trading',
+                blocked=[{'label': c['label'], 'detail': c['detail']} for c in blocked],
+            ), 409
+    elif open_positions:
+        # ---- live -> paper with real money on the table ----
+        return jsonify(
+            error=f'{open_positions} live position(s) are open. Switching to paper would '
+                  f'stop the bot placing their real exit orders — close them from the Desk '
+                  f'or let them settle first.'), 409
+
+    # Persist first, then swap into the live store — the same order as the bulk
+    # settings save, so memory can never claim a mode disk never recorded.
+    # Persisting is what makes the switch survive a deploy; without it every
+    # restart would silently drop a live bot back to paper.
+    save_settings({'PAPER_MODE': want_paper})
+    _config.apply_runtime_overrides({'PAPER_MODE': want_paper})
+
+    # Build the CLOB client NOW, while someone is watching, rather than letting
+    # the first real trade discover that it cannot be built.
+    client_note = None
+    if not want_paper:
+        try:
+            import main as _main
+            if _main.executor is not None and _main.executor._ensure_client() is None:
+                client_note = ('CLOB client could not be built — orders will not be '
+                               'placed. Check the bot log.')
+        except Exception as e:
+            client_note = f'CLOB client init raised: {type(e).__name__}: {e}'
+
+    mode = 'paper' if want_paper else 'live'
+    add_notification('mode', f'Trading mode switched to {mode.upper()}.',
+                     severity='warning' if not want_paper else 'info')
+    logging.warning(f'TRADING MODE -> {mode.upper()} (via dashboard)')
+    return jsonify(ok=True, paper_mode=want_paper, changed=True,
+                   warning=client_note,
+                   message=f'Now trading in {mode} mode. This applies to the very next '
+                           f'decision the bot makes.')
+
+
 @app.post('/api/new-era')
 @require_auth
 def api_new_era():
@@ -514,6 +627,18 @@ def api_new_era():
                 seed, seed_source = bal, 'wallet'
         except Exception as e:
             logging.warning(f"Wallet seed read unavailable: {type(e).__name__}: {e}")
+
+    # A $0 era is a wiped ledger the bot cannot trade its way out of: sizing
+    # needs cash, and in paper mode the wallet cash-sync never runs at all, so
+    # nothing would ever put money back. Refuse rather than silently zero a
+    # working bankroll — whatever the seed came from.
+    if seed <= 0:
+        hint = ('Paper mode never reads a wallet — pass an explicit seed.'
+                if _config.paper_mode() else
+                'Fund the wallet, or pass an explicit seed.')
+        return jsonify(
+            error=f'Refusing to open an era at $0.00 ({seed_source}). {hint}',
+            seed_source=seed_source, needs_seed=True), 409
 
     # Pause the scan loop for the duration: an entry landing between the
     # archive and the wipe would have a real CLOB fill but wiped DB rows.

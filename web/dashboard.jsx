@@ -172,14 +172,137 @@ function NotificationBell() {
   );
 }
 
+// ---------- Trading-mode dialog ----------
+// The one control in the app that starts real money moving, so it never fires
+// from a single click: opening it runs the readiness preflight, and Go live
+// stays disabled until every blocking check passes.
+function TradingModeDialog({ portfolio, onClose }) {
+  const [pre, setPre] = useState(null);
+  const [busy, setBusy] = useState(false);
+  const [note, setNote] = useState(null);
+  const live = !portfolio.archive_view && portfolio.mode === 'LIVE';
+
+  useEffect(() => {
+    (async () => {
+      try {
+        const r = await fetch('/api/live-preflight');
+        setPre(await readJSON(r));
+      } catch (e) { setPre({ ok: false, checks: [], error: e.message }); }
+    })();
+  }, []);
+
+  const switchTo = async (paper) => {
+    setBusy(true); setNote(null);
+    try {
+      const r = await fetch('/api/trading-mode', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ paper, confirm: true }),
+      });
+      const d = await readJSON(r);
+      if (!r.ok) {
+        setNote({ err: true, msg: d.error, blocked: d.blocked });
+      } else {
+        setNote({ msg: d.warning ? `${d.message} ${d.warning}` : d.message, err: !!d.warning });
+        window.dispatchEvent(new Event('stormedge-refetch'));
+      }
+    } catch (e) { setNote({ err: true, msg: e.message }); }
+    setBusy(false);
+  };
+
+  return (
+    <div className="modal-backdrop" onClick={e => { if (e.target === e.currentTarget) onClose(); }}>
+      <div className="modal">
+        <h3>Trading mode</h3>
+        <div className="mode-now">
+          Right now the bot is trading in <b className={live ? 'neg' : ''}>{live ? 'LIVE' : 'PAPER'}</b> mode
+          {live ? ' — orders are real and cost real money.' : ' — every fill is simulated.'}
+        </div>
+
+        {!live && (
+          <>
+            <div className="preflight-title">Before going live</div>
+            {!pre && <div className="dim small">Checking credentials and funding…</div>}
+            {pre && pre.checks.map(c => (
+              <div key={c.id} className={`preflight-row ${c.ok ? 'ok' : (c.blocking ? 'bad' : 'warn')}`}>
+                <span className="glyph">{c.ok ? '✓' : (c.blocking ? '✕' : '!')}</span>
+                <div>
+                  <div className="preflight-label">{c.label}</div>
+                  <div className="preflight-detail">{c.detail}</div>
+                </div>
+              </div>
+            ))}
+            {pre && pre.error && <div className="preflight-detail">{pre.error}</div>}
+          </>
+        )}
+
+        {note && (
+          <div className={`settings-note ${note.err ? 'err' : ''}`}>
+            <div>
+              {note.msg}
+              {note.blocked && note.blocked.map((b, i) => (
+                <div key={i} className="small">· {b.label}: {b.detail}</div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* The archive is reached from here too — it is the same "which numbers
+            am I looking at" question, and the pill only has one click. */}
+        {portfolio.archive_available && !portfolio.archive_view && (
+          <div className="mode-archive-row">
+            <span className="dim">A filed-away era is available to browse.</span>
+            <button className="btn-era" disabled={busy} onClick={async () => {
+              await fetch('/api/archive-view', {
+                method: 'POST', headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ on: true }),
+              });
+              window.dispatchEvent(new Event('stormedge-refetch'));
+              onClose();
+            }}>View it</button>
+          </div>
+        )}
+
+        <div className="modal-actions">
+          <button className="btn-undo" onClick={onClose}>Close</button>
+          {live ? (
+            <button className="btn-save armed" disabled={busy} onClick={() => switchTo(true)}>
+              {busy ? 'Switching…' : 'Back to paper'}
+            </button>
+          ) : (
+            <button
+              className={`btn-save ${pre && pre.ok ? 'armed danger' : ''}`}
+              disabled={busy || !pre || !pre.ok}
+              title={pre && !pre.ok ? 'Every check above must pass first' : undefined}
+              onClick={() => switchTo(false)}
+            >
+              {busy ? 'Switching…' : 'Go live with real money'}
+            </button>
+          )}
+        </div>
+      </div>
+    </div>
+  );
+}
+
 // ---------- TopBar ----------
 function TopBar({ portfolio, scanLog, activeTab, setActiveTab }) {
   const [, setTick] = useState(0);
+  const [modeOpen, setModeOpen] = useState(false);
   useEffect(() => {
     const i = setInterval(() => setTick(t => t + 1), 1000);
     return () => clearInterval(i);
   }, []);
   const live = portfolio.mode === 'LIVE' && !portfolio.archive_view;
+
+  // While viewing a filed-away era the pill's job is getting back to live data,
+  // not changing how the bot trades — an archive is a frozen exhibit.
+  const leaveArchive = async () => {
+    await fetch('/api/archive-view', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ on: false }),
+    });
+    window.dispatchEvent(new Event('stormedge-refetch'));
+  };
   return (
     <header className="topbar">
       <div className="brand">
@@ -201,34 +324,22 @@ function TopBar({ portfolio, scanLog, activeTab, setActiveTab }) {
 
       <div className="spacer" />
 
-      <span
+      <button
         className={
-          `mode-pill ${live ? 'mode-live' : ''} ` +
-          `${portfolio.archive_view ? 'mode-archive' : ''} ` +
-          `${portfolio.archive_available ? 'mode-toggleable' : ''}`
+          `mode-pill mode-toggleable ${live ? 'mode-live' : ''} ` +
+          `${portfolio.archive_view ? 'mode-archive' : ''}`
         }
-        // The pill reports the mode the bot booted in (PAPER_MODE) — it does not
-        // switch it. Its only click action is jumping between the live DB and a
-        // filed-away era, so with nothing filed it is a status chip, and the
-        // tooltip has to say so rather than leaving a dead-looking button.
-        title={portfolio.archive_available
-          ? (portfolio.archive_view
-              ? 'Viewing a filed-away era — click to return to live'
-              : 'Click to view the filed-away era')
-          : `Running in ${portfolio.mode} mode. Nothing filed away yet — ` +
-            'file an era from Settings › Start over to browse it here.'}
-        onClick={async () => {
-          if (!portfolio.archive_available) return;
-          await fetch('/api/archive-view', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ on: !portfolio.archive_view }),
-          });
-          window.dispatchEvent(new Event('stormedge-refetch'));
-        }}
+        title={portfolio.archive_view
+          ? 'Viewing a filed-away era — click to return to live data'
+          : `Trading in ${portfolio.mode} mode — click to change`}
+        onClick={() => (portfolio.archive_view ? leaveArchive() : setModeOpen(true))}
       >
         <span className="mode-dot" />
         {portfolio.archive_view ? 'PAPER · SAVED' : portfolio.mode}
-      </span>
+      </button>
+      {modeOpen && (
+        <TradingModeDialog portfolio={portfolio} onClose={() => setModeOpen(false)} />
+      )}
 
       <div className="last-scan">
         <span>SCANNED</span>
