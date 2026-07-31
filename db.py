@@ -360,33 +360,6 @@ def save_settings(values):
 set_settings = save_settings
 
 
-def start_era(label, mode, seed_amount, note=None):
-    """Open a new era. Called by start_new_era.py after the money tables have
-    been wiped and re-seeded, so era N+1 begins with a clean ledger."""
-    now = datetime.now(timezone.utc).isoformat()
-    with _write_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            cur = conn.execute(
-                "INSERT INTO eras (label, mode, started_at, seed_amount, note) "
-                "VALUES (?, ?, ?, ?, ?)",
-                (label, mode, now, float(seed_amount), note),
-            )
-            conn.commit()
-            return cur.lastrowid
-
-
-def close_era(era_id, final_balance, archive_path):
-    """Mark an era finished and point it at its frozen snapshot."""
-    now = datetime.now(timezone.utc).isoformat()
-    with _write_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute(
-                "UPDATE eras SET ended_at=?, final_balance=?, archive_path=? WHERE id=?",
-                (now, float(final_balance), archive_path, era_id),
-            )
-            conn.commit()
-
-
 def record_deposit(amount, note=None):
     """Append a DEPOSIT row: adds cash WITHOUT touching the P&L baseline.
 
@@ -422,9 +395,9 @@ def get_total_deposited():
         "WHERE event='DEPOSIT' AND mode = ?", (mode,)
     )
     deposited = rows[0]["deposited"] if rows else 0.0
-    # Two seed spellings exist: _seed_bankroll writes 'SEED', cutover_to_live.py
-    # writes 'LIVE_SEED'. The live ledger opened with LIVE_SEED, so matching only
-    # 'SEED' would omit the original capital and overstate the return.
+    # Two seed spellings exist: _seed_bankroll writes 'SEED', older live ledgers
+    # opened with 'LIVE_SEED'. Matching only 'SEED' would omit the original
+    # capital and overstate the return.
     seed_rows = fetch_query(
         "SELECT amount FROM bankroll WHERE event IN ('SEED','LIVE_SEED') AND mode = ? "
         "ORDER BY id LIMIT 1", (mode,)

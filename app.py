@@ -58,7 +58,6 @@ MODEL_META = {
 # comments, so editing them from a web form would divorce value from evidence.
 SETTING_SPECS = {
     'FIXED_POSITION_SIZE':        ('float', 1.0,     100.0, 'Stake per trade'),
-    'HARD_MAX_POSITION_SIZE':     ('float', 1.0,     100.0, 'Per-trade ceiling'),
     'MAX_CONCURRENT_POSITIONS':   ('int',   1,       50,    'Max concurrent positions'),
     # The daily loss limit is DYNAMIC: expressed as a budget of full-stake
     # losses, so the dollar threshold (-(stake × this)) scales automatically
@@ -285,11 +284,7 @@ def api_settings_post():
     def eff(key):
         return typed.get(key, live[key])
 
-    size, ceiling = eff('FIXED_POSITION_SIZE'), eff('HARD_MAX_POSITION_SIZE')
-    if size > ceiling:
-        field_errors['HARD_MAX_POSITION_SIZE'] = (
-            f'Ceiling ${ceiling:.2f} is below the ${size:.2f} stake — strategy.py takes '
-            f'min() of the two, so every trade would silently clamp to ${ceiling:.2f}.')
+    size = eff('FIXED_POSITION_SIZE')
     if size < MIN_POSITION_SIZE:
         field_errors['FIXED_POSITION_SIZE'] = (
             f'${size:.2f} is below the ${MIN_POSITION_SIZE:.2f} CLOB minimum — '
@@ -369,7 +364,7 @@ def api_trading_mode():
              would leave the executor managing them as simulations and it would
              never place the real exit orders.
     """
-    from db import add_notification, save_settings
+    from db import add_notification, save_settings, ensure_bankroll_seeded
 
     d = request.get_json(silent=True) or {}
     if 'paper' not in d:
@@ -416,6 +411,14 @@ def api_trading_mode():
     save_settings({'PAPER_MODE': want_paper})
     _config.apply_runtime_overrides({'PAPER_MODE': want_paper})
 
+    # Open the target book's ledger if this is the first time it has been used.
+    # Paper opens at STARTING_BANKROLL so a demo has something to trade with;
+    # live opens at $0 and the wallet sync books real cash when it lands —
+    # inventing a live balance would have the bot size orders it cannot pay for.
+    # An existing ledger is left exactly as it was, which is what makes
+    # switching back resume where you left off rather than starting over.
+    seeded = ensure_bankroll_seeded()
+
     # Build the CLOB client NOW, while someone is watching, rather than letting
     # the first real trade discover that it cannot be built.
     client_note = None
@@ -432,10 +435,12 @@ def api_trading_mode():
     add_notification('mode', f'Trading mode switched to {mode.upper()}.',
                      severity='warning' if not want_paper else 'info')
     logging.warning(f'TRADING MODE -> {mode.upper()} (via dashboard)')
+    opened = (f' Opened a fresh {mode} ledger at {seeded:,.2f}.'
+              if seeded is not None else f' Your {mode} ledger resumes where it left off.')
     return jsonify(ok=True, paper_mode=want_paper, changed=True,
-                   warning=client_note,
+                   warning=client_note, seeded=seeded,
                    message=f'Now trading in {mode} mode. This applies to the very next '
-                           f'decision the bot makes.')
+                           f'decision the bot makes.' + opened)
 
 @app.post('/api/deposit')
 @require_auth

@@ -50,7 +50,6 @@ class TestOverridePrecedence:
         """The property that makes this safe to deploy: no rows == no change."""
         _, config, _ = _fresh_db(tmp_path, monkeypatch)
         assert config.FIXED_POSITION_SIZE == 2.0
-        assert config.HARD_MAX_POSITION_SIZE == 2.0
         assert config.MAX_CONCURRENT_POSITIONS == 4
         assert config.DAILY_LOSS_STAKES == 4.0
         # the DOLLAR limit is derived: 4 stakes x $2 default = -$8, identical to
@@ -85,7 +84,7 @@ class TestOverridePrecedence:
         """Stored overrides must seed the runtime store the bot reads at each
         decision (config.setting), which is what strategy/executor consume."""
         db, _, db_file = _fresh_db(tmp_path, monkeypatch)
-        db.save_settings({"FIXED_POSITION_SIZE": 7.0, "HARD_MAX_POSITION_SIZE": 7.0})
+        db.save_settings({"FIXED_POSITION_SIZE": 7.0})
         config = _reload_config(monkeypatch, db_file)
         assert config.setting("FIXED_POSITION_SIZE") == 7.0
         assert config.effective_stake() == 7.0
@@ -96,7 +95,6 @@ class TestOverridePrecedence:
         _, config, _ = _fresh_db(tmp_path, monkeypatch)
         assert config.setting("FIXED_POSITION_SIZE") == 2.0
         config.apply_runtime_overrides({"FIXED_POSITION_SIZE": 5.0,
-                                        "HARD_MAX_POSITION_SIZE": 5.0,
                                         "DAILY_LOSS_STAKES": 3.0})
         assert config.effective_stake() == 5.0
         assert config.daily_loss_limit() == -15.0     # scales with the stake
@@ -107,8 +105,7 @@ class TestOverridePrecedence:
         """The user's requirement verbatim: the daily limit is dynamic, based
         off the position size — change the stake, the dollar limit follows."""
         _, config, _ = _fresh_db(tmp_path, monkeypatch)
-        config.apply_runtime_overrides({"FIXED_POSITION_SIZE": 6.0,
-                                        "HARD_MAX_POSITION_SIZE": 6.0})
+        config.apply_runtime_overrides({"FIXED_POSITION_SIZE": 6.0})
         assert config.daily_loss_limit() == -24.0     # 4 stakes x $6
         config.apply_runtime_overrides({"DAILY_LOSS_STAKES": 2.0})
         assert config.daily_loss_limit() == -12.0     # 2 stakes x $6
@@ -289,12 +286,19 @@ class TestSettingsAPI:
         assert "total_equity" in d["context"]
         assert d["context"]["daily_loss_limit"] == -8.0
 
-    def test_stake_above_ceiling_rejected(self, client):
-        """The silent-no-op trap: strategy.py takes min() of the two."""
-        c, _, _ = client
+    def test_stake_is_the_only_size_authority(self, client):
+        """There is no second knob that can silently shrink the stake: raising
+        it alone is a complete, valid change."""
+        c, app_mod, _ = client
+        import config
+        assert "HARD_MAX_POSITION_SIZE" not in app_mod.SETTING_SPECS
         r = c.post("/api/settings", json={"settings": {"FIXED_POSITION_SIZE": 6.0}})
-        assert r.status_code == 400
-        assert "HARD_MAX_POSITION_SIZE" in r.get_json()["field_errors"]
+        assert r.status_code == 200
+        assert config.setting("FIXED_POSITION_SIZE") == 6.0
+        assert config.effective_stake() == 6.0        # exactly what was typed
+        # and it is no longer accepted as a setting at all
+        bad = c.post("/api/settings", json={"settings": {"HARD_MAX_POSITION_SIZE": 9.0}})
+        assert bad.status_code == 400
 
     def test_daily_loss_stakes_bounds(self, client):
         """The budget is in stakes and positive by construction — the old
@@ -313,18 +317,14 @@ class TestSettingsAPI:
 
     def test_stake_below_clob_minimum_rejected(self, client):
         c, _, _ = client
-        r = c.post("/api/settings", json={"settings": {"FIXED_POSITION_SIZE": 0.5,
-                                                      "HARD_MAX_POSITION_SIZE": 0.5}})
+        r = c.post("/api/settings", json={"settings": {"FIXED_POSITION_SIZE": 0.5}})
         assert r.status_code == 400
 
-    def test_valid_save_persists_both_size_keys(self, client):
+    def test_valid_save_persists_the_stake(self, client):
         c, _, db = client
-        r = c.post("/api/settings", json={"settings": {"FIXED_POSITION_SIZE": 4.0,
-                                                       "HARD_MAX_POSITION_SIZE": 4.0}})
+        r = c.post("/api/settings", json={"settings": {"FIXED_POSITION_SIZE": 4.0}})
         assert r.status_code == 200
-        stored = db.get_settings()
-        assert stored["FIXED_POSITION_SIZE"] == "4.0"
-        assert stored["HARD_MAX_POSITION_SIZE"] == "4.0"
+        assert db.get_settings()["FIXED_POSITION_SIZE"] == "4.0"
 
     def test_save_applies_live_without_restart(self, client):
         """The whole point of the redesign: POST returns, and the runtime store
@@ -333,7 +333,6 @@ class TestSettingsAPI:
         import config
         assert config.setting("FIXED_POSITION_SIZE") == 2.0
         r = c.post("/api/settings", json={"settings": {"FIXED_POSITION_SIZE": 4.0,
-                                                       "HARD_MAX_POSITION_SIZE": 4.0,
                                                        "DAILY_LOSS_STAKES": 3.0}})
         assert r.status_code == 200
         d = r.get_json()
@@ -698,3 +697,71 @@ class TestModeIsolation:
         assert db.get_current_bankroll() == 12.0      # live book, independent
         config.apply_runtime_overrides({"PAPER_MODE": True})
         assert db.get_current_bankroll() == 47.5      # paper exactly as left
+
+
+class TestStakeIsFunctional:
+    """The stake is now the ONLY per-trade size control, so its whole path has
+    to hold: what you type is validated, persisted, applied live, and is the
+    exact dollar amount strategy.py sizes the next trade at."""
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        db, config, db_file = _fresh_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("DASHBOARD_EMAIL", "t@t.com")
+        import app as app_mod
+        importlib.reload(app_mod)
+        app_mod.app.config["TESTING"] = True
+        c = app_mod.app.test_client()
+        with c.session_transaction() as s:
+            s["authed"] = True
+        return c, app_mod, db, config, db_file
+
+    def test_typed_value_is_the_exact_trade_size(self, client):
+        """No clamp, no rounding, no second knob: $7 typed is $7 staked."""
+        c, _, _, config, _ = client
+        # Fund the book so the cash guard cannot mask the sizing result.
+        import db as dbmod
+        dbmod.update_bankroll("DEPOSIT", 100.0)
+        assert c.post("/api/settings",
+                      json={"settings": {"FIXED_POSITION_SIZE": 7.0}}).status_code == 200
+        assert config.effective_stake() == 7.0
+        assert config.setting("FIXED_POSITION_SIZE") == 7.0
+
+    def test_bounds_match_between_ui_and_server(self, client):
+        """The UI reads its stepper bounds from meta, so the two cannot drift
+        into a state where a typeable value is server-rejected."""
+        c, app_mod, _, _, _ = client
+        meta = c.get("/api/settings").get_json()["meta"]["FIXED_POSITION_SIZE"]
+        lo, hi = meta["min"], meta["max"]
+        assert (lo, hi) == app_mod.SETTING_SPECS["FIXED_POSITION_SIZE"][1:3]
+        assert c.post("/api/settings",
+                      json={"settings": {"FIXED_POSITION_SIZE": hi + 1}}).status_code == 400
+        assert c.post("/api/settings",
+                      json={"settings": {"FIXED_POSITION_SIZE": lo - 0.5}}).status_code == 400
+
+    def test_rejects_a_stake_the_book_cannot_fund(self, client):
+        """Sized above available cash, every signal would be skipped — refuse
+        the save rather than silently stopping the bot from trading."""
+        c, _, _, _, _ = client
+        r = c.post("/api/settings", json={"settings": {"FIXED_POSITION_SIZE": 90.0}})
+        assert r.status_code == 400
+        assert "FIXED_POSITION_SIZE" in r.get_json()["field_errors"]
+
+    def test_daily_loss_limit_follows_the_stake_alone(self, client):
+        c, _, _, config, _ = client
+        import db as dbmod
+        dbmod.update_bankroll("DEPOSIT", 100.0)
+        c.post("/api/settings", json={"settings": {"FIXED_POSITION_SIZE": 5.0}})
+        assert config.daily_loss_limit() == -20.0        # 4 stakes x $5
+
+    def test_strategy_sizes_a_trade_at_exactly_the_stake(self, client, monkeypatch):
+        """The end of the chain: the number strategy.py would stake."""
+        c, _, _, config, _ = client
+        import db as dbmod
+        dbmod.update_bankroll("DEPOSIT", 100.0)
+        c.post("/api/settings", json={"settings": {"FIXED_POSITION_SIZE": 6.0}})
+        import strategy
+        fixed_stake = strategy.setting("FIXED_POSITION_SIZE")
+        assert fixed_stake > 0                            # flat-stake mode is on
+        final_size = fixed_stake                          # strategy.py's flat branch
+        assert final_size == 6.0

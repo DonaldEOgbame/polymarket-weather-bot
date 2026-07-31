@@ -180,7 +180,7 @@ function TradingModeDialog({ portfolio, onClose }) {
   const [pre, setPre] = useState(null);
   const [busy, setBusy] = useState(false);
   const [note, setNote] = useState(null);
-  const live = !portfolio.archive_view && portfolio.mode === 'LIVE';
+  const live = portfolio.mode === 'LIVE';
 
   useEffect(() => {
     (async () => {
@@ -246,21 +246,6 @@ function TradingModeDialog({ portfolio, onClose }) {
           </div>
         )}
 
-        {/* The archive is reached from here too — it is the same "which numbers
-            am I looking at" question, and the pill only has one click. */}
-        {portfolio.archive_available && !portfolio.archive_view && (
-          <div className="mode-archive-row">
-            <span className="dim">A filed-away era is available to browse.</span>
-            <button className="btn-era" disabled={busy} onClick={async () => {
-              await fetch('/api/archive-view', {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ on: true }),
-              });
-              window.dispatchEvent(new Event('stormedge-refetch'));
-              onClose();
-            }}>View it</button>
-          </div>
-        )}
 
         <div className="modal-actions">
           <button className="btn-undo" onClick={onClose}>Close</button>
@@ -292,17 +277,8 @@ function TopBar({ portfolio, scanLog, activeTab, setActiveTab }) {
     const i = setInterval(() => setTick(t => t + 1), 1000);
     return () => clearInterval(i);
   }, []);
-  const live = portfolio.mode === 'LIVE' && !portfolio.archive_view;
+  const live = portfolio.mode === 'LIVE';
 
-  // While viewing a filed-away era the pill's job is getting back to live data,
-  // not changing how the bot trades — an archive is a frozen exhibit.
-  const leaveArchive = async () => {
-    await fetch('/api/archive-view', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ on: false }),
-    });
-    window.dispatchEvent(new Event('stormedge-refetch'));
-  };
   return (
     <header className="topbar">
       <div className="brand">
@@ -325,17 +301,12 @@ function TopBar({ portfolio, scanLog, activeTab, setActiveTab }) {
       <div className="spacer" />
 
       <button
-        className={
-          `mode-pill mode-toggleable ${live ? 'mode-live' : ''} ` +
-          `${portfolio.archive_view ? 'mode-archive' : ''}`
-        }
-        title={portfolio.archive_view
-          ? 'Viewing a filed-away era — click to return to live data'
-          : `Trading in ${portfolio.mode} mode — click to change`}
-        onClick={() => (portfolio.archive_view ? leaveArchive() : setModeOpen(true))}
+        className={`mode-pill mode-toggleable ${live ? 'mode-live' : ''}`}
+        title={`Trading in ${portfolio.mode} mode — click to change`}
+        onClick={() => setModeOpen(true)}
       >
         <span className="mode-dot" />
-        {portfolio.archive_view ? 'PAPER · SAVED' : portfolio.mode}
+        {portfolio.mode}
       </button>
       {modeOpen && (
         <TradingModeDialog portfolio={portfolio} onClose={() => setModeOpen(false)} />
@@ -1110,10 +1081,9 @@ const POS_OPTIONS = [2, 3, 4, 6, 8];
 // keystroke — this is the "show me the value as I tweak it" part.
 function deriveImpact(v, ctx) {
   const equity = ctx.total_equity || 0;
-  const size = Number(v.FIXED_POSITION_SIZE) || 0;
-  const ceiling = Number(v.HARD_MAX_POSITION_SIZE) || 0;
-  // strategy.py takes min() of the two, so the ceiling silently wins when lower.
-  const effective = Math.min(size, ceiling);
+  // The stake IS the per-trade size: strategy.py has no second knob that can
+  // reduce it, so what the user types is what every trade costs.
+  const effective = Number(v.FIXED_POSITION_SIZE) || 0;
   const exposureCap = equity * (Number(v.MAX_TOTAL_EXPOSURE_FRACTION) || 0);
   const slotsByExposure = effective > 0 ? Math.floor(exposureCap / effective) : 0;
   const slotsByCash = effective > 0 ? Math.floor((ctx.available_cash || 0) / effective) : 0;
@@ -1124,7 +1094,6 @@ function deriveImpact(v, ctx) {
   const lossStakes = Number(v.DAILY_LOSS_STAKES) || 0;
   return {
     effective,
-    clamped: size > ceiling,
     exposureCap, slots,
     // On a binary $0/$1 market the max loss per position IS the whole stake,
     // so this is a real worst case, not a scare number.
@@ -1153,10 +1122,6 @@ function SettingsPanel() {
   const [fieldErrors, setFieldErrors] = useState({});
   const [banner, setBanner] = useState(null);
   const [saved, setSaved] = useState(false);
-  const [eras, setEras] = useState(null);
-  const [eraLabel, setEraLabel] = useState('');
-  const [eraConfirm, setEraConfirm] = useState(false);
-  const [eraBusy, setEraBusy] = useState(false);
 
   const load = async () => {
     try {
@@ -1168,10 +1133,6 @@ function SettingsPanel() {
       Object.keys(PCT_FIELDS).forEach(k => { if (shown[k] != null) shown[k] = +(shown[k] * 100).toFixed(4); });
       setServer({ ...d, shownValues: shown });
       setDraft(shown);
-      try {
-        const er = await fetch('/api/eras');
-        if (er.ok) setEras(await readJSON(er));
-      } catch (e) { /* era card just shows less */ }
     } catch (e) { setBanner({ err: true, msg: 'Could not load settings: ' + e.message }); }
   };
 
@@ -1179,15 +1140,6 @@ function SettingsPanel() {
 
   if (!server || !draft) {
     return <div className="empty-note">Loading settings…</div>;
-  }
-
-  if (server.archive_view) {
-    return (
-      <div className="settings-note">
-        Viewing the frozen paper-era archive. Switch back to live (the mode pill,
-        top right) to change settings.
-      </div>
-    );
   }
 
   // Values in real units (fractions, not percents) for impact + save.
@@ -1216,13 +1168,7 @@ function SettingsPanel() {
 
   const set = (key, val) => {
     setDraft(d => {
-      const next = { ...d, [key]: val };
-      // The ceiling clamps the stake (strategy.py min()), so raising the stake
-      // above it must raise it too — otherwise the change is a silent no-op.
-      if (key === 'FIXED_POSITION_SIZE' && Number(val) > Number(d.HARD_MAX_POSITION_SIZE || 0)) {
-        next.HARD_MAX_POSITION_SIZE = val;
-      }
-      return next;
+      return { ...d, [key]: val };
     });
     setFieldErrors(fe => ({ ...fe, [key]: null }));
     setSaved(false);
@@ -1232,9 +1178,6 @@ function SettingsPanel() {
     setPhase('saving'); setBanner(null); setFieldErrors({});
     const payload = {};
     dirtyKeys.forEach(k => { payload[k] = realValues[k]; });
-    // A stake raise auto-raises the ceiling; include it even if the user never
-    // touched the field directly.
-    if (payload.FIXED_POSITION_SIZE != null) payload.HARD_MAX_POSITION_SIZE = realValues.HARD_MAX_POSITION_SIZE;
     try {
       const r = await fetch('/api/settings', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
@@ -1261,28 +1204,6 @@ function SettingsPanel() {
     }
   };
 
-  const startNewEra = async () => {
-    setEraBusy(true); setBanner(null);
-    try {
-      const r = await fetch('/api/new-era', {
-        method: 'POST', headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ confirm: true, label: eraLabel.trim() || undefined }),
-      });
-      const d = await readJSON(r);
-      if (!r.ok) setBanner({ err: true, msg: d.error || 'Era cutover failed' });
-      else {
-        setBanner({ msg: `Era '${d.new_label}' opened at ${fmtUSD(d.seed)} — ` +
-          `${d.archived_trades} trade(s) archived. ` +
-          (d.seed === 0 ? 'Fund the wallet and the bot will book it automatically.' : '') });
-        setEraLabel(''); setEraConfirm(false);
-        await load();
-        window.dispatchEvent(new Event('stormedge-refetch'));
-      }
-    } catch (e) { setBanner({ err: true, msg: e.message }); }
-    setEraBusy(false);
-  };
-
-  const eraBlocked = ctx.open_positions > 0;
 
   return (
     <>
@@ -1304,35 +1225,11 @@ function SettingsPanel() {
             </div>
             <Stepper
               label="Stake on every trade" prefix="$" step={1} dp={2}
-              min={ctx.min_position_size || 1} max={500}
+              min={Math.max(ctx.min_position_size || 1, server.meta.FIXED_POSITION_SIZE.min)}
+              max={server.meta.FIXED_POSITION_SIZE.max}
               value={draft.FIXED_POSITION_SIZE}
               onChange={v => set('FIXED_POSITION_SIZE', v)}
               error={fieldErrors.FIXED_POSITION_SIZE}
-            />
-          </div>
-
-          <div className="set-div" />
-
-          <div className="set-row pad-y">
-            <div className="grow">
-              <div className="field-label">Never bet more than</div>
-              <div className="field-help">Hard ceiling on top of the stake</div>
-              {fieldErrors.HARD_MAX_POSITION_SIZE && <div className="field-error">{fieldErrors.HARD_MAX_POSITION_SIZE}</div>}
-              {!fieldErrors.HARD_MAX_POSITION_SIZE
-                && Number(draft.HARD_MAX_POSITION_SIZE) === Number(draft.FIXED_POSITION_SIZE)
-                && dirtyKeys.includes('HARD_MAX_POSITION_SIZE') && (
-                <div className="field-warn">
-                  Raised automatically to match the stake — the ceiling clamps it, so
-                  leaving it lower would keep every trade at the old size.
-                </div>
-              )}
-            </div>
-            <Stepper
-              label="Never bet more than" prefix="$" step={1} dp={2}
-              min={ctx.min_position_size || 1} max={500}
-              value={draft.HARD_MAX_POSITION_SIZE}
-              onChange={v => set('HARD_MAX_POSITION_SIZE', v)}
-              error={fieldErrors.HARD_MAX_POSITION_SIZE}
             />
           </div>
 
@@ -1346,7 +1243,6 @@ function SettingsPanel() {
               <div className="v">{fmtUSD(impact.effective)}</div>
               <div className="s">
                 {ctx.available_cash ? fmtPct(impact.effective / ctx.available_cash) : '—'} of {fmtUSD(ctx.available_cash)} per trade
-                {impact.clamped ? ' · clamped by ceiling' : ''}
               </div>
             </div>
             <div className="means-rail">
@@ -1503,59 +1399,6 @@ function SettingsPanel() {
           </div>
         </section>
 
-        {/* ---- trading era: one wide row under the three cards ---- */}
-        <section className="era-card">
-          <div className="era-left">
-            <div>
-              <div className="era-title">Start over</div>
-              <div>File this run away and re-read the wallet</div>
-            </div>
-            <div className="era-stats">
-              <div>
-                <div className="k">RUNNING SINCE</div>
-                <div className="v">
-                  {eras && eras.current
-                    ? `${eras.current.label} · ${String(eras.current.started_at).slice(0, 10)}`
-                    : 'pre-era history'}
-                </div>
-              </div>
-              <div>
-                <div className="k">CASH</div>
-                <div className="v">{fmtUSD(ctx.available_cash)}</div>
-              </div>
-              <div>
-                <div className="k">FILED AWAY</div>
-                <div className="v">
-                  {eras ? (eras.archived || []).length + (eras.legacy_paper_archive ? 1 : 0) : '—'}
-                </div>
-              </div>
-            </div>
-          </div>
-          <div className="era-actions">
-            <input
-              className="era-input" type="text" value={eraLabel} placeholder="live-2"
-              onChange={e => setEraLabel(e.target.value)} aria-label="New era label"
-            />
-            {!eraConfirm ? (
-              <button className="btn-era" disabled={eraBlocked || eraBusy} onClick={() => setEraConfirm(true)}
-                      title={eraBlocked ? `Blocked while ${ctx.open_positions} position(s) are open` : undefined}>
-                Start fresh
-              </button>
-            ) : (
-              <>
-                <button className="btn-save armed" disabled={eraBusy} onClick={startNewEra}>
-                  {eraBusy ? 'Archiving…' : 'Confirm'}
-                </button>
-                <button className="btn-era" disabled={eraBusy} onClick={() => setEraConfirm(false)}>Cancel</button>
-              </>
-            )}
-          </div>
-          {eraBlocked && (
-            <div className="field-warn" style={{ width: '100%' }}>
-              Blocked while {ctx.open_positions} position(s) are open — let them settle first.
-            </div>
-          )}
-        </section>
       </div>
 
       <div className="save-bar">
@@ -1637,7 +1480,7 @@ function App() {
     };
     load();
     const iv = setInterval(load, 30_000);
-    // Immediate refetch when the archive/live toggle flips — waiting up to 30s
+    // Immediate refetch when the trading mode flips — waiting up to 30s
     // for the next poll would make the switch feel broken.
     window.addEventListener('stormedge-refetch', load);
     return () => { clearInterval(iv); window.removeEventListener('stormedge-refetch', load); };
@@ -1658,12 +1501,6 @@ function App() {
       <TopBar portfolio={M.portfolio} scanLog={M.scanLog} activeTab={activeTab} setActiveTab={setActiveTab} />
 
       <main className="main">
-        {M.portfolio.archive_view && (
-          <div className="banner banner-archive">
-            ◈ SAVED PAPER-ERA STATE — frozen snapshot, nothing here is running.
-            Click the mode pill to return to live.
-          </div>
-        )}
 
         {activeTab === 'desk' && (
           <>
@@ -1682,7 +1519,6 @@ function App() {
               <OpenPositions
                 positions={M.positions}
                 maxPositions={M.portfolio.max_concurrent_positions}
-                readOnly={M.portfolio.archive_view}
               />
             </div>
             <PerformanceStats stats={M.stats} />

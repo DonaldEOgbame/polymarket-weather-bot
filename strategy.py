@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from config import (
     EDGE_THRESHOLD, MIN_MODEL_AGREEMENT, MAX_MODEL_SPREAD,
     KELLY_CAP, MIN_POSITION_SIZE,
-    MAX_POSITION_FRACTION, BASE_POSITION_FRACTION,
+    MAX_POSITION_FRACTION, BASE_POSITION_FRACTION, HARD_MAX_POSITION_SIZE,
     SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD, SHADOW_MAX_SIZE_USDC,
     ENABLE_SHADOW_EXPLORATION, paper_mode,
     NARROW_BUCKET_WIDTH_F, NARROW_BUCKET_EDGE_THRESHOLD, NARROW_BUCKET_STD_INFLATION,
@@ -16,7 +16,7 @@ from config import (
     FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION, MAX_ENTRY_PRICE,
     setting,
 )
-# FIXED_POSITION_SIZE / HARD_MAX_POSITION_SIZE / MAX_TOTAL_EXPOSURE_FRACTION are
+# FIXED_POSITION_SIZE / MAX_TOTAL_EXPOSURE_FRACTION are
 # deliberately NOT imported as constants: they are dashboard-tunable at runtime
 # and read via config.setting() at the moment of each sizing decision, so a
 # settings change applies to the next trade with no restart.
@@ -327,14 +327,15 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             # dashboard save landing mid-evaluation cannot mix old and new
             # values inside a single sizing computation.
             fixed_stake = setting("FIXED_POSITION_SIZE")
-            hard_max = setting("HARD_MAX_POSITION_SIZE")
             exposure_fraction = setting("MAX_TOTAL_EXPOSURE_FRACTION")
 
             if fixed_stake > 0:
-                # Flat-stake mode: every trade is the same size or it does not happen.
-                # The hard ceiling still applies so the dollar cap remains the
-                # single place that bounds per-trade risk.
-                final_size = min(fixed_stake, hard_max)
+                # Flat-stake mode: every trade is the same size or it does not
+                # happen. The stake is the ONLY per-trade size authority — there
+                # is deliberately no second knob that can silently shrink it.
+                # Portfolio-level risk is bounded by MAX_CONCURRENT_POSITIONS,
+                # MAX_TOTAL_EXPOSURE_FRACTION and the daily loss budget below.
+                final_size = fixed_stake
                 # Strict: no partial fills of the stake. Shrinking to fit available
                 # cash would reintroduce uneven sizes, which is what flat staking
                 # exists to avoid — so an underfunded signal is skipped instead.
@@ -350,10 +351,13 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                 suggested_size = total_equity * fraction_to_use
 
                 # Apply limits: fraction of bankroll and hard dollar cap
+                # HARD_MAX_POSITION_SIZE is the dollar cap on THIS path only.
+                # It is a code/env constant rather than a dashboard setting: in
+                # flat-stake mode nothing reads it.
                 final_size = min(
                     suggested_size,
                     total_equity * MAX_POSITION_FRACTION,
-                    hard_max
+                    HARD_MAX_POSITION_SIZE
                 )
 
             # Enforce minimum position size. The micro-account rescue below is a

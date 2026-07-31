@@ -153,9 +153,6 @@
   .mode-toggleable { cursor: pointer; user-select: none; }
   .mode-toggleable:hover { background: rgba(245,177,60,0.14); }
   .mode-live.mode-toggleable:hover { background: rgba(108,191,133,0.14); }
-  /* Frozen paper-era snapshot: amber like paper, but dashed = "exhibit". */
-  .mode-archive { border-style: dashed; }
-  .mode-archive .mode-dot { opacity: 0.5; animation: none; }
 
   .last-scan {
     display: flex; align-items: center; gap: 7px;
@@ -271,13 +268,6 @@
     border-radius: 12px;
     font-size: 12.5px;
     line-height: 1.4;
-  }
-  .banner-archive {
-    border: 1px dashed rgba(245,177,60,0.5);
-    background: rgba(245,177,60,0.08);
-    color: var(--signal);
-    justify-content: center;
-    letter-spacing: 0.06em;
   }
   .banner-circuit {
     border: 1px solid rgba(224,120,102,0.4);
@@ -1082,52 +1072,6 @@
   .outcome-cell .v.up   { color: var(--positive); }
   .outcome-cell .n { font-size: 10.5px; color: var(--dim); margin-top: 4px; }
 
-  .era-card {
-    grid-column: 1 / -1;
-    display: flex; flex-wrap: wrap; align-items: center;
-    gap: 16px;
-    justify-content: space-between;
-    border: 1px solid var(--line);
-    border-radius: 16px;
-    background: var(--panel);
-    padding: 14px 18px;
-  }
-  .era-left { display: flex; align-items: center; flex-wrap: wrap; gap: 18px; }
-  .era-title { font-size: 13.5px; font-weight: 600; }
-  .era-title + div { font-size: 11.5px; color: var(--muted); margin-top: 2px; }
-  .era-stats { display: flex; flex-wrap: wrap; gap: 10px 22px; font-family: 'JetBrains Mono', ui-monospace, monospace; }
-  .era-stats .k { font-size: 9px; letter-spacing: 0.14em; color: var(--muted); }
-  .era-stats .v { font-size: 12.5px; margin-top: 4px; }
-  .era-actions { display: flex; align-items: center; gap: 10px; flex-wrap: wrap; }
-  .era-input {
-    width: 126px; height: 38px;
-    padding: 0 12px;
-    border-radius: 11px;
-    border: 1px solid var(--line-3);
-    background: var(--bg-2);
-    color: var(--text);
-    font-size: 13px;
-    outline: none;
-  }
-  .era-input:focus { border-color: rgba(245,177,60,0.5); }
-  .btn-era {
-    height: 38px; padding: 0 16px;
-    border-radius: 11px;
-    border: 1px solid rgba(255,255,255,0.1);
-    background: rgba(255,255,255,0.04);
-    color: var(--text);
-    font-size: 13px; font-weight: 500;
-    cursor: pointer;
-    transition: transform .12s ease, border-color .15s ease, color .15s ease, background .15s ease;
-  }
-  .btn-era:hover:not(:disabled) {
-    border-color: rgba(245,177,60,0.5);
-    color: var(--signal-hi);
-    background: rgba(245,177,60,0.09);
-    transform: translateY(-1px);
-  }
-  .btn-era:disabled { opacity: 0.45; cursor: not-allowed; transform: none; }
-
   .save-bar {
     flex: 0 0 auto;
     display: flex; align-items: center; gap: 12px;
@@ -1239,13 +1183,6 @@
   .preflight-row.bad { border-color: rgba(224,120,102,0.3); }
   .preflight-label { font-size: 12.5px; font-weight: 500; }
   .preflight-detail { font-size: 11.5px; color: var(--muted); margin-top: 2px; line-height: 1.45; }
-  .mode-archive-row {
-    display: flex; align-items: center; justify-content: space-between; gap: 12px;
-    padding: 10px 13px;
-    border-radius: 12px;
-    border: 1px dashed rgba(245,177,60,0.4);
-    font-size: 12px;
-  }
   /* Going live is the one destructive-by-design button in the app. */
   .btn-save.armed.danger {
     background: linear-gradient(180deg, #f0934f, #d4553c);
@@ -1343,9 +1280,6 @@
     .arch-head { display: none; }
     .sig-top, .sig-detail { grid-template-columns: 1fr; }
     .signals-search { width: 100%; }
-    .era-card { grid-column: auto; }
-    .era-actions { width: 100%; }
-    .era-input { flex: 1; width: auto; }
 
     /* Fixed bottom tab bar replaces the top nav (thumb reach) */
     .bottom-nav {

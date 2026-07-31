@@ -33,7 +33,6 @@ MANAGED_SETTINGS = (
     # so this can never ride along in an ordinary save.
     "PAPER_MODE",
     "FIXED_POSITION_SIZE",
-    "HARD_MAX_POSITION_SIZE",
     "MAX_CONCURRENT_POSITIONS",
     "DAILY_LOSS_STAKES",
     "MAX_TOTAL_EXPOSURE_FRACTION",
@@ -255,12 +254,11 @@ BASE_FORECAST_ERROR = {
 # weighting, so calibrate.py measures the model rather than the sizing rule.
 # Set FIXED_POSITION_SIZE=0 to fall back to the old Kelly path.
 #
-# This codifies what was already happening — HARD_MAX_POSITION_SIZE was the
-# binding constraint on this bankroll and every real trade had sized exactly $2.
-# HARD_MAX_POSITION_SIZE is still enforced as a ceiling, so raising the flat size
-# above it does nothing until that is raised too. The dashboard Settings tab
-# therefore writes BOTH from its single "stake per trade" field, so that silent
-# no-op state cannot be created from the UI.
+# The stake is the SINGLE authority on per-trade size (user decision
+# 2026-07-30). There used to be a second dashboard field, HARD_MAX_POSITION_SIZE,
+# that clamped it via min(); with flat staking that could only ever silently
+# shrink a stake the user had just raised, so it is no longer a setting. It
+# survives below purely as the dollar cap on the dormant Kelly path.
 FIXED_POSITION_SIZE = float(_tunable("FIXED_POSITION_SIZE", "2.0"))
 # Daily loss budget, expressed in FULL STAKES rather than dollars, so it scales
 # automatically when the stake changes (user decision 2026-07-29: "the daily loss
@@ -270,7 +268,10 @@ FIXED_POSITION_SIZE = float(_tunable("FIXED_POSITION_SIZE", "2.0"))
 # via daily_loss_limit() below. Default 4 stakes × the $2 default stake = -$8,
 # identical to the old fixed DAILY_LOSS_LIMIT default, so behavior is continuous.
 DAILY_LOSS_STAKES = float(_tunable("DAILY_LOSS_STAKES", "4"))
-HARD_MAX_POSITION_SIZE = float(_tunable("HARD_MAX_POSITION_SIZE", "2.0"))
+# Code-level backstop for the Kelly path ONLY (reached when FIXED_POSITION_SIZE
+# is 0). Not runtime-tunable and absent from the dashboard: in flat-stake mode
+# nothing reads it. Env-overridable so the cap can still be raised on a deploy.
+HARD_MAX_POSITION_SIZE = float(os.getenv("HARD_MAX_POSITION_SIZE", "2.0"))
 MAX_POSITION_FRACTION = float(os.getenv("MAX_POSITION_FRACTION", "0.10"))
 MAX_TOTAL_EXPOSURE_FRACTION = float(_tunable("MAX_TOTAL_EXPOSURE_FRACTION", "0.70"))
 # Default lowered 10 -> 4 by user decision 2026-07-29. Editable in the dashboard
@@ -514,7 +515,6 @@ _RUNTIME = {
     # paper -> live behind the readiness preflight.
     "PAPER_MODE": PAPER_MODE,
     "FIXED_POSITION_SIZE": FIXED_POSITION_SIZE,
-    "HARD_MAX_POSITION_SIZE": HARD_MAX_POSITION_SIZE,
     "MAX_CONCURRENT_POSITIONS": MAX_CONCURRENT_POSITIONS,
     "DAILY_LOSS_STAKES": DAILY_LOSS_STAKES,
     "MAX_TOTAL_EXPOSURE_FRACTION": MAX_TOTAL_EXPOSURE_FRACTION,
@@ -559,9 +559,10 @@ def apply_runtime_overrides(values):
 
 
 def effective_stake():
-    """What a trade will actually stake: strategy.py takes min(stake, ceiling)."""
+    """What a trade will actually stake. In flat-stake mode this IS the stake:
+    there is no second knob that can quietly reduce it."""
     with _RUNTIME_LOCK:
-        return min(_RUNTIME["FIXED_POSITION_SIZE"], _RUNTIME["HARD_MAX_POSITION_SIZE"])
+        return _RUNTIME["FIXED_POSITION_SIZE"]
 
 
 def daily_loss_limit():
@@ -570,5 +571,5 @@ def daily_loss_limit():
     scales with it — a fixed dollar limit tuned for $2 stakes would otherwise
     halt a $6-stake day after barely one loss."""
     with _RUNTIME_LOCK:
-        stake = min(_RUNTIME["FIXED_POSITION_SIZE"], _RUNTIME["HARD_MAX_POSITION_SIZE"])
+        stake = _RUNTIME["FIXED_POSITION_SIZE"]
         return -(stake * _RUNTIME["DAILY_LOSS_STAKES"])
