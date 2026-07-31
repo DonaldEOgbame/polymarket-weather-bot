@@ -7,6 +7,7 @@ from datetime import datetime, timezone
 from db import (
     init_db, fetch_query, get_portfolio_state, get_daily_pnl, execute_query,
     purge_old_signals, purge_old_scan_log, purge_old_notifications, vacuum_db,
+    current_mode,
 )
 from scanner import scan_markets, verify_parser_fixtures, prefetch_order_books
 from strategy import evaluate_opportunity
@@ -262,20 +263,22 @@ def daily_summary():
 
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
         trades_today_query = fetch_query(
-            "SELECT COUNT(*) as c FROM trades WHERE entry_time >= ?",
-            (f"{today}T00:00:00",)
+            "SELECT COUNT(*) as c FROM trades WHERE entry_time >= ? AND mode=?",
+            (f"{today}T00:00:00", current_mode())
         )
         trades_today = trades_today_query[0]["c"] if trades_today_query else 0
 
         win_rate_query = fetch_query(
             "SELECT COUNT(*) as total, SUM(CASE WHEN pnl > 0 THEN 1 ELSE 0 END) as wins "
-            "FROM trades WHERE status='CLOSED' AND exit_time >= date('now', '-30 days')"
+            "FROM trades WHERE status='CLOSED' AND exit_time >= date('now', '-30 days') "
+            "AND mode=?", (current_mode(),)
         )
         total = win_rate_query[0]["total"] if win_rate_query else 0
         wins = win_rate_query[0]["wins"] or 0 if win_rate_query else 0
         win_rate = wins / total if total > 0 else 0.0
 
-        pnl_query = fetch_query("SELECT SUM(pnl) as tpnl FROM trades WHERE status='CLOSED'")
+        pnl_query = fetch_query("SELECT SUM(pnl) as tpnl FROM trades WHERE status='CLOSED' AND mode=?",
+                                (current_mode(),))
         total_pnl = pnl_query[0]["tpnl"] if pnl_query and pnl_query[0]["tpnl"] is not None else 0.0
 
         # Brier score over resolved trades (lower = better calibrated; 0.25 = no skill)
@@ -305,7 +308,8 @@ def _print_startup_summary():
         setting, daily_loss_limit, paper_mode,
     )
     portfolio = get_portfolio_state()
-    open_pos = fetch_query("SELECT COUNT(*) as c FROM positions")[0]["c"]
+    open_pos = fetch_query("SELECT COUNT(*) as c FROM positions WHERE mode=?",
+                            (current_mode(),))[0]["c"]
 
     mode = "PAPER" if paper_mode() else "LIVE"
     shadow_label = f"exploration ON (max ${SHADOW_MAX_SIZE_USDC:.2f})" if ENABLE_SHADOW_EXPLORATION else "log only"

@@ -38,11 +38,6 @@ import config as _config
 from config import (DB_PATH, STARTING_BANKROLL, MIN_POSITION_SIZE,
                     MANAGED_SETTINGS)
 DB_PATH = os.path.abspath(DB_PATH)
-# Frozen snapshot of the paper-trading era, written once at live cutover.
-# When the dashboard session toggles into archive view, every query reads this
-# file (read-only) instead of the live DB — a museum exhibit, not a running bot.
-ARCHIVE_DB_PATH = os.path.abspath(os.getenv(
-    'ARCHIVE_DB_PATH', os.path.join(os.path.dirname(DB_PATH), 'paper_archive.db')))
 
 from weather import STATIONS
 
@@ -111,68 +106,16 @@ def _validate_setting(key, raw):
 
 # ---- DB helpers ----
 
-def _era_archives():
-    """[{id, label, mode, started_at, ended_at, final_balance, archive_path}] for
-    every SEALED era whose snapshot file still exists, newest first.
+def _mode():
+    """Which book the dashboard is reading: 'paper' or 'live'.
 
-    Read straight from the live DB — never through _db(), which may itself be
-    pointed at an archive, and an archive's own era table is a stale snapshot."""
-    try:
-        conn = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
-        conn.row_factory = sqlite3.Row
-        try:
-            rows = conn.execute(
-                "SELECT id, label, mode, started_at, ended_at, seed_amount, "
-                "final_balance, archive_path FROM eras "
-                "WHERE archive_path IS NOT NULL ORDER BY id DESC").fetchall()
-        finally:
-            conn.close()
-        return [dict(r) for r in rows if r['archive_path'] and os.path.exists(r['archive_path'])]
-    except Exception:
-        return []   # table may not exist yet on an un-migrated DB
-
-
-def _legacy_archive_available():
-    """The original single paper-era snapshot, from before the era system."""
-    return os.path.exists(ARCHIVE_DB_PATH)
-
-
-def _archive_available():
-    return _legacy_archive_available() or bool(_era_archives())
-
-
-def _selected_archive_path():
-    """Path of the archive this session is viewing, or None for the live DB.
-
-    Two shapes are honoured: session['view_era'] = <era id> selects one of N
-    sealed eras; the older session['view_archive'] boolean still maps to the
-    legacy paper_archive.db so an existing session keeps working."""
-    try:
-        era_id = session.get('view_era')
-        if era_id:
-            for era in _era_archives():
-                if era['id'] == era_id:
-                    return era['archive_path']
-            return None     # stale selection — fall back to live, never to nothing
-        if session.get('view_archive') and _legacy_archive_available():
-            return ARCHIVE_DB_PATH
-    except RuntimeError:    # outside a request context (bot thread)
-        return None
-    return None
-
-
-def _viewing_archive():
-    return _selected_archive_path() is not None
-
+    Every money query is scoped by this. Paper and live rows live side by side
+    in the same tables, so an unscoped SUM would report simulated fills as real
+    P&L — the exact contamination the mode column exists to prevent."""
+    return 'paper' if _config.paper_mode() else 'live'
 
 def _db():
-    archive = _selected_archive_path()
-    if archive:
-        # Read-only URI open: an archive is a frozen exhibit — nothing the
-        # dashboard does may ever write to it.
-        conn = sqlite3.connect(f'file:{archive}?mode=ro', uri=True)
-    else:
-        conn = sqlite3.connect(DB_PATH)
+    conn = sqlite3.connect(DB_PATH)
     conn.row_factory = sqlite3.Row
     return conn
 
@@ -225,8 +168,7 @@ def api_login():
     d = request.get_json(silent=True) or {}
     if d.get('email') == DASHBOARD_EMAIL and d.get('password') == DASHBOARD_PASSWORD:
         # Re-issue a clean session on every login: a fresh id stops a
-        # pre-existing cookie from carrying stale view_era/view_archive state
-        # (or a fixated id) into the newly authenticated session.
+        # fixated one being carried into the newly authenticated session.
         session.clear()
         session['authed'] = True
         # Opt-in only — default False keeps the old browser-session behaviour
@@ -241,82 +183,14 @@ def api_logout():
     session.clear()
     return redirect('/')
 
-
-@app.post('/api/archive-view')
-@require_auth
-def api_archive_view():
-    """Toggle this session between the live DB and the frozen paper-era archive."""
-    if not _archive_available():
-        return jsonify(error='no archive snapshot exists yet', archive_view=False), 404
-    d = request.get_json(silent=True) or {}
-    want = d.get('on')
-    session['view_archive'] = (not session.get('view_archive')) if want is None else bool(want)
-    if session.get('view_archive'):
-        session.pop('view_era', None)   # the two selectors are mutually exclusive
-    return jsonify(ok=True, archive_view=bool(session.get('view_archive')))
-
-
-@app.get('/api/eras')
-@require_auth
-def api_eras():
-    """Every sealed era plus the one currently running, for the era switcher."""
-    current = None
-    try:
-        conn = sqlite3.connect(f'file:{DB_PATH}?mode=ro', uri=True)
-        conn.row_factory = sqlite3.Row
-        try:
-            row = conn.execute("SELECT id, label, mode, started_at, seed_amount "
-                               "FROM eras WHERE ended_at IS NULL "
-                               "ORDER BY id DESC LIMIT 1").fetchone()
-            current = dict(row) if row else None
-        finally:
-            conn.close()
-    except Exception:
-        pass
-    return jsonify({
-        'current': current,
-        'archived': _era_archives(),
-        'legacy_paper_archive': _legacy_archive_available(),
-        'viewing_era': session.get('view_era'),
-        'viewing_legacy': bool(session.get('view_archive')),
-    })
-
-
-@app.post('/api/view-era')
-@require_auth
-def api_view_era():
-    """Point this session at a sealed era's snapshot, or back at the live DB.
-
-    Body: {"era_id": N} to view era N, {"era_id": null} to return to live."""
-    d = request.get_json(silent=True) or {}
-    era_id = d.get('era_id')
-    if era_id is None:
-        session.pop('view_era', None)
-        session.pop('view_archive', None)
-        return jsonify(ok=True, viewing_era=None)
-    try:
-        era_id = int(era_id)
-    except (TypeError, ValueError):
-        return jsonify(error='era_id must be an integer or null'), 400
-    if not any(e['id'] == era_id for e in _era_archives()):
-        return jsonify(error=f'era {era_id} has no readable archive'), 404
-    session['view_era'] = era_id
-    session.pop('view_archive', None)
-    return jsonify(ok=True, viewing_era=era_id)
-
-
 def _total_deposited():
     """Seed + every DEPOSIT = total capital ever put in.
 
-    Both seed spellings count: db._seed_bankroll writes 'SEED', while
-    cutover_to_live.py writes 'LIVE_SEED' — and the live ledger opened with
-    the latter, so matching only 'SEED' would drop the original stake from the
-    denominator and overstate returns.
-
-    Goes through _q() rather than db.get_total_deposited() so it honours
-    archive view like every other dashboard figure."""
+    Both seed spellings count: db._seed_bankroll writes 'SEED' and older
+    ledgers opened with 'LIVE_SEED', so matching only 'SEED' would drop the
+    original stake from the denominator and overstate returns."""
     rows = _q("SELECT COALESCE(SUM(amount), 0) AS t FROM bankroll "
-              "WHERE event IN ('SEED','LIVE_SEED','DEPOSIT')")
+              "WHERE event IN ('SEED','LIVE_SEED','DEPOSIT') AND mode = ?", (_mode(),))
     total = rows[0]['t'] if rows else 0.0
     return total or STARTING_BANKROLL
 
@@ -328,7 +202,7 @@ def _total_withdrawn():
     equity + withdrawn - deposited. Without the withdrawn term, taking money
     off the table would read as a trading loss of the same size."""
     rows = _q("SELECT COALESCE(SUM(amount), 0) AS t FROM bankroll "
-              "WHERE event='WITHDRAWAL'")
+              "WHERE event='WITHDRAWAL' AND mode = ?", (_mode(),))
     return abs(rows[0]['t']) if rows else 0.0
 
 
@@ -347,9 +221,9 @@ def api_settings_get():
     """Current effective settings, their bounds, and the bankroll context the
     UI needs for its live impact readouts."""
     from db import get_total_deposited
-    cash_rows = _q('SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1')
+    cash_rows = _q('SELECT balance FROM bankroll WHERE mode = ? ORDER BY id DESC LIMIT 1', (_mode(),))
     available_cash = cash_rows[0]['balance'] if cash_rows else STARTING_BANKROLL
-    pos_rows = _q('SELECT size_usdc FROM positions')
+    pos_rows = _q('SELECT size_usdc FROM positions WHERE mode = ?', (_mode(),))
     locked = sum(r['size_usdc'] for r in pos_rows)
     # Typical entry price, so the settings panel can express the take-profit
     # upside in dollars. Averaged over settled trades because that is what the
@@ -357,7 +231,7 @@ def api_settings_get():
     # nonsense figure before any trade has closed.
     entry_rows = _q(
         'SELECT AVG(fill_price) AS avg_entry FROM trades '
-        'WHERE fill_price IS NOT NULL AND fill_price > 0'
+        'WHERE fill_price IS NOT NULL AND fill_price > 0 AND mode = ?', (_mode(),)
     )
     avg_entry = (entry_rows[0]['avg_entry'] if entry_rows else None) or 0.45
     return jsonify({
@@ -375,7 +249,6 @@ def api_settings_get():
             'paper_mode': _config.paper_mode(),
             'daily_loss_limit': _config.daily_loss_limit(),
         },
-        'archive_view': _viewing_archive(),
     })
 
 
@@ -391,8 +264,6 @@ def api_settings_post():
     from the settings table.
     """
     from db import save_settings, add_notification
-    if _viewing_archive():
-        return jsonify(error='cannot change settings while viewing the paper archive'), 409
 
     d = request.get_json(silent=True) or {}
     incoming = d.get('settings') or {}
@@ -424,9 +295,9 @@ def api_settings_post():
             f'${size:.2f} is below the ${MIN_POSITION_SIZE:.2f} CLOB minimum — '
             f'live orders would not fill.')
 
-    cash_rows = _q('SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1')
+    cash_rows = _q('SELECT balance FROM bankroll WHERE mode = ? ORDER BY id DESC LIMIT 1', (_mode(),))
     available_cash = cash_rows[0]['balance'] if cash_rows else STARTING_BANKROLL
-    pos_rows = _q('SELECT size_usdc FROM positions')
+    pos_rows = _q('SELECT size_usdc FROM positions WHERE mode = ?', (_mode(),))
     total_equity = available_cash + sum(r['size_usdc'] for r in pos_rows)
     if size > available_cash:
         field_errors['FIXED_POSITION_SIZE'] = (
@@ -468,7 +339,7 @@ def api_live_preflight():
         return jsonify(ok=False, checks=[{
             'id': 'preflight', 'label': 'Readiness check', 'ok': False,
             'blocking': True, 'detail': f'{type(e).__name__}: {e}'}]), 200
-    open_positions = len(_q('SELECT id FROM positions'))
+    open_positions = len(_q('SELECT id FROM positions WHERE mode = ?', (_mode(),)))
     # A paper position is a row with no on-chain counterpart. Going live while
     # holding one would have the executor manage it as if it were real: it would
     # try to SELL shares the wallet has never owned.
@@ -499,8 +370,6 @@ def api_trading_mode():
              never place the real exit orders.
     """
     from db import add_notification, save_settings
-    if _viewing_archive():
-        return jsonify(error='cannot change trading mode while viewing an archive'), 409
 
     d = request.get_json(silent=True) or {}
     if 'paper' not in d:
@@ -514,7 +383,7 @@ def api_trading_mode():
         return jsonify(ok=True, paper_mode=current_paper, changed=False,
                        message=f'already in {"paper" if current_paper else "live"} mode')
 
-    open_positions = len(_q('SELECT id FROM positions'))
+    open_positions = len(_q('SELECT id FROM positions WHERE mode = ?', (_mode(),)))
 
     if not want_paper:
         # ---- paper -> live: the hard gate ----
@@ -568,100 +437,6 @@ def api_trading_mode():
                    message=f'Now trading in {mode} mode. This applies to the very next '
                            f'decision the bot makes.')
 
-
-@app.post('/api/new-era')
-@require_auth
-def api_new_era():
-    """Close the current era and open a fresh one, from the dashboard — the
-    no-ssh replacement for start_new_era.py (both call db.cutover_era).
-
-    Seeds from the REAL wallet collateral when readable; a wallet still empty
-    seeds $0 and the auto cash-sync books the funding whenever it lands. The
-    bot's scan loop is paused for the few seconds of the cutover so no entry
-    can slip between "archive" and "wipe"."""
-    from db import cutover_era, fetch_query as _fq, add_notification
-    if _viewing_archive():
-        return jsonify(error='switch back to the live view first'), 409
-    d = request.get_json(silent=True) or {}
-    if not d.get('confirm'):
-        return jsonify(error='era cutover requires confirm=true'), 400
-
-    # Tolerate a DB from before the era system: init_db() normally runs at boot,
-    # but this endpoint must not 500 if the table is missing — create it.
-    try:
-        n_existing = (_fq("SELECT COUNT(*) AS c FROM eras") or [{'c': 0}])[0]['c']
-    except Exception:
-        n_existing = 0
-    if not n_existing:
-        from db import init_db
-        try:
-            init_db()
-            n_existing = (_fq("SELECT COUNT(*) AS c FROM eras") or [{'c': 0}])[0]['c']
-        except Exception:
-            pass
-    new_mode = 'paper' if _config.paper_mode() else 'live'
-    label = (str(d.get('label') or '').strip() or f'{new_mode}-{n_existing + 1}')[:40]
-
-    if d.get('seed') is not None:
-        try:
-            seed = max(0.0, float(d['seed']))
-        except (TypeError, ValueError):
-            return jsonify(error='seed must be a number'), 400
-        seed_source = 'manual'
-    else:
-        # "Wallet unreadable" is already a supported outcome (seed $0 and let
-        # the cash-sync book the funding when it lands), so nothing in this
-        # read may 500 the cutover. executor imports the CLOB client at module
-        # scope, so even the import can fail — in paper mode, or anywhere the
-        # library isn't installed — and that must degrade, not raise.
-        seed, seed_source = 0.0, 'wallet unreadable — seeded $0'
-        try:
-            from executor import get_wallet_collateral
-            try:
-                import main as _main
-                client = _main.executor.client if _main.executor else None
-            except Exception:
-                client = None
-            bal = get_wallet_collateral(client)
-            if bal is not None:
-                seed, seed_source = bal, 'wallet'
-        except Exception as e:
-            logging.warning(f"Wallet seed read unavailable: {type(e).__name__}: {e}")
-
-    # A $0 era is a wiped ledger the bot cannot trade its way out of: sizing
-    # needs cash, and in paper mode the wallet cash-sync never runs at all, so
-    # nothing would ever put money back. Refuse rather than silently zero a
-    # working bankroll — whatever the seed came from.
-    if seed <= 0:
-        hint = ('Paper mode never reads a wallet — pass an explicit seed.'
-                if _config.paper_mode() else
-                'Fund the wallet, or pass an explicit seed.')
-        return jsonify(
-            error=f'Refusing to open an era at $0.00 ({seed_source}). {hint}',
-            seed_source=seed_source, needs_seed=True), 409
-
-    # Pause the scan loop for the duration: an entry landing between the
-    # archive and the wipe would have a real CLOB fill but wiped DB rows.
-    try:
-        import main as _main
-        _main.trading_paused = True
-    except Exception:
-        _main = None
-    try:
-        summary = cutover_era(label, new_mode, seed)
-    except RuntimeError as e:
-        return jsonify(error=str(e)), 409
-    finally:
-        if _main is not None:
-            _main.trading_paused = False
-
-    add_notification('era', f"New era '{label}' opened at ${seed:.2f} "
-                            f"({summary['archived_trades']} trades archived).",
-                     severity='info')
-    summary['seed_source'] = seed_source
-    return jsonify(ok=True, **summary)
-
-
 @app.post('/api/deposit')
 @require_auth
 def api_deposit():
@@ -672,8 +447,6 @@ def api_deposit():
     live from the DB on every scan, never bound at import.
     """
     from db import record_deposit, get_total_deposited
-    if _viewing_archive():
-        return jsonify(error='cannot record a deposit while viewing the paper archive'), 409
     d = request.get_json(silent=True) or {}
     try:
         amount = round(float(d.get('amount')), 2)
@@ -705,8 +478,6 @@ def api_close_position():
     """
     import main as _main
     from db import add_notification
-    if _viewing_archive():
-        return jsonify(error='cannot close a position while viewing the paper archive'), 409
     d = request.get_json(silent=True) or {}
     try:
         pos_id = int(d.get('position_id'))
@@ -743,19 +514,19 @@ def api_data():
     today = now.strftime('%Y-%m-%d')
 
     # ---- portfolio ----
-    cash_rows = _q('SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1')
+    cash_rows = _q('SELECT balance FROM bankroll WHERE mode = ? ORDER BY id DESC LIMIT 1', (_mode(),))
     available_cash = cash_rows[0]['balance'] if cash_rows else STARTING_BANKROLL
 
     # Fetch positions directly — no join against signals (44k+ rows).
     # bucket_low/high are extracted from the question string if not on the position.
-    pos_rows = _q('SELECT * FROM positions')
+    pos_rows = _q('SELECT * FROM positions WHERE mode = ?', (_mode(),))
     locked_cash = sum(r['size_usdc'] for r in pos_rows)
     total_equity = available_cash + locked_cash
 
     dpnl = _q(
         "SELECT COALESCE(SUM(pnl), 0) AS p FROM trades "
-        "WHERE exit_time >= ? AND status='CLOSED'",
-        (f'{today}T00:00:00',)
+        "WHERE exit_time >= ? AND status='CLOSED' AND mode = ?",
+        (f'{today}T00:00:00', _mode())
     )
     daily_pnl = dpnl[0]['p'] if dpnl else 0.0
     # Clamp to 1.0 — an uncapped ratio would exceed 100% (e.g. a live-mode fill
@@ -771,8 +542,6 @@ def api_data():
         'mode': 'PAPER' if _config.paper_mode() else 'LIVE',
         # Archive view: the dashboard is reading the frozen paper-era snapshot,
         # not the running bot's DB. The frontend renders this unmistakably.
-        'archive_view': _viewing_archive(),
-        'archive_available': _archive_available(),
         'available_cash': available_cash,
         'locked_cash': locked_cash,
         'total_equity': total_equity,
@@ -874,9 +643,10 @@ def api_data():
     # Use the city column stored directly on trades (populated since mid-June).
     # Avoids a full GROUP BY scan of the 44k-row signals table on every dashboard poll.
     trade_rows = _q(
-        "SELECT * FROM trades WHERE status = 'CLOSED' ORDER BY exit_time DESC"
+        "SELECT * FROM trades WHERE status = 'CLOSED' AND mode = ? "
+        "ORDER BY exit_time DESC", (_mode(),)
     )
-    # The archive shows the market question under the city. It is not stored on
+    # The Archive tab shows the market question under the city. It is not stored on
     # trades, so pull it from the immutable markets table in one keyed lookup
     # rather than per-row (the list is unbounded).
     question_by_market = {
@@ -913,8 +683,8 @@ def api_data():
     def _calc_stats(days):
         rows = _q(
             "SELECT pnl, edge, entry_time, exit_time FROM trades "
-            "WHERE status='CLOSED' AND exit_time >= date('now', ?)",
-            (f'-{days} days',)
+            "WHERE status='CLOSED' AND exit_time >= date('now', ?) AND mode = ?",
+            (f'-{days} days', _mode())
         )
         total = len(rows)
         wins = sum(1 for t in rows if (t['pnl'] or 0) > 0)
@@ -1122,8 +892,8 @@ def api_data():
 
     filled_today = _q(
         "SELECT COUNT(*) AS c FROM trades "
-        "WHERE entry_time >= ? AND status IN ('OPEN', 'CLOSED')",
-        (f'{today}T00:00:00',)
+        "WHERE entry_time >= ? AND status IN ('OPEN', 'CLOSED') AND mode = ?",
+        (f'{today}T00:00:00', _mode())
     )
     filled = filled_today[0]['c'] if filled_today else 0
 

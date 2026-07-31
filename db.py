@@ -45,6 +45,12 @@ def init_db():
             # bid_depth_usd logged at entry in signals. See close_position_atomic.
             "ALTER TABLE trades ADD COLUMN exit_ask_depth_usd REAL",
             "ALTER TABLE trades ADD COLUMN exit_bid_depth_usd REAL",
+            # Which ledger this row belongs to: 'paper' or 'live'. Paper and live
+            # are two parallel books in one file, so a simulated fill can never
+            # reach a real P&L figure. DEFAULT 'paper' is the safe direction —
+            # a row that slips through un-tagged reads as simulated and is
+            # excluded from live money, rather than inflating it.
+            "ALTER TABLE trades ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper'",
         ]:
             try:
                 conn.execute(ddl)
@@ -77,6 +83,9 @@ def init_db():
             # from round(size_usdc/entry_price) — double rounding that could exceed
             # real holdings (CLOB rejects the sell) or book PnL on shares never held.
             "ALTER TABLE positions ADD COLUMN shares REAL",
+            # See the note on trades.mode. Positions additionally cannot span
+            # modes at all: the mode switch refuses while the book is open.
+            "ALTER TABLE positions ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper'",
         ]:
             try:
                 conn.execute(ddl)
@@ -164,6 +173,13 @@ def init_db():
                 trade_id INTEGER
             )
         ''')
+        # The bankroll ledger is per-mode: the paper book keeps its simulated
+        # balance while the live book tracks the real wallet, and neither is
+        # ever read into the other. See the note on trades.mode.
+        try:
+            conn.execute("ALTER TABLE bankroll ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper'")
+        except sqlite3.OperationalError:
+            pass
         conn.execute('''
             CREATE TABLE IF NOT EXISTS scan_log (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -231,25 +247,6 @@ def init_db():
             )
         ''')
 
-        # Trading eras. Each row is one funded run of the bot, archived to its
-        # own frozen DB snapshot when it ends. The original design had exactly
-        # one archive at a fixed path ('paper_archive.db') with a boolean
-        # dashboard toggle; that cannot express "paper era, then live era 1,
-        # then live era 2 after a full withdrawal and re-fund".
-        # `archive_path` is NULL for the era currently running.
-        conn.execute('''
-            CREATE TABLE IF NOT EXISTS eras (
-                id INTEGER PRIMARY KEY AUTOINCREMENT,
-                label TEXT NOT NULL,
-                mode TEXT NOT NULL,
-                started_at TEXT NOT NULL,
-                ended_at TEXT,
-                seed_amount REAL,
-                final_balance REAL,
-                archive_path TEXT,
-                note TEXT
-            )
-        ''')
 
         # Indexes — safe to re-run; IF NOT EXISTS is idempotent
         conn.execute("CREATE INDEX IF NOT EXISTS idx_bankroll_id ON bankroll(id DESC)")
@@ -265,21 +262,52 @@ def init_db():
 
         conn.commit()
 
-    rows = fetch_query("SELECT COUNT(*) as c FROM bankroll")
-    if rows[0]["c"] == 0:
-        _seed_bankroll(STARTING_BANKROLL)
+    # Seed the ledger for the mode we are booting in. Per-mode, because paper
+    # and live are separate books: opening the live book must not depend on
+    # whether a paper book already exists, and vice versa.
+    ensure_bankroll_seeded()
 
     logging.info("Database initialized successfully.")
 
 
-def _seed_bankroll(starting_amount):
+def current_mode():
+    """'paper' or 'live' — which ledger the bot is reading and writing now.
+
+    Read live from config rather than captured at import: the dashboard can
+    switch mode mid-process, and the very next query must land in the right
+    book. Every money read/write is scoped by this."""
+    return "paper" if _cfg.paper_mode() else "live"
+
+
+def ensure_bankroll_seeded(mode=None, amount=None):
+    """Open a ledger for `mode` if it has no rows yet. Returns the seeded
+    amount, or None when the ledger already existed (the common case).
+
+    Paper seeds at STARTING_BANKROLL so a demo has something to trade with.
+    Live seeds at $0 by default: real cash is booked by the wallet sync when
+    it actually lands, and inventing a balance the wallet does not hold would
+    have the bot size orders it cannot pay for."""
+    mode = mode or current_mode()
+    rows = fetch_query("SELECT COUNT(*) AS c FROM bankroll WHERE mode = ?", (mode,))
+    if rows and rows[0]["c"]:
+        return None
+    if amount is None:
+        amount = STARTING_BANKROLL if mode == "paper" else 0.0
+    _seed_bankroll(amount, mode)
+    return amount
+
+
+def _seed_bankroll(starting_amount, mode=None):
+    mode = mode or current_mode()
     now = datetime.now(timezone.utc).isoformat()
-    with sqlite3.connect(DB_PATH) as conn:
-        conn.execute(
-            "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id) VALUES (?, ?, ?, ?, ?)",
-            (now, "SEED", starting_amount, starting_amount, None)
-        )
-        conn.commit()
+    with _write_lock:
+        with sqlite3.connect(DB_PATH) as conn:
+            conn.execute(
+                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (now, "SEED", starting_amount, starting_amount, None, mode)
+            )
+            conn.commit()
 
 
 def get_settings():
@@ -332,20 +360,6 @@ def save_settings(values):
 set_settings = save_settings
 
 
-def get_eras():
-    """Every era, newest first. The one with archive_path IS NULL is live."""
-    return [dict(r) for r in fetch_query(
-        "SELECT * FROM eras ORDER BY id DESC")]
-
-
-def get_current_era():
-    """The era currently running (not yet archived), or None if the ledger has
-    never been started under the era system."""
-    rows = fetch_query(
-        "SELECT * FROM eras WHERE ended_at IS NULL ORDER BY id DESC LIMIT 1")
-    return dict(rows[0]) if rows else None
-
-
 def start_era(label, mode, seed_amount, note=None):
     """Open a new era. Called by start_new_era.py after the money tables have
     been wiped and re-seeded, so era N+1 begins with a clean ledger."""
@@ -371,109 +385,6 @@ def close_era(era_id, final_balance, archive_path):
                 (now, float(final_balance), archive_path, era_id),
             )
             conn.commit()
-
-
-def cutover_era(new_label, new_mode, seed, reset_settings=False):
-    """Close the running era and open a fresh one. The shared core behind both
-    the Settings tab's "Start new era" button and start_new_era.py — one
-    implementation so the two can never drift.
-
-    Steps: refuse while positions are open; freeze the whole DB to
-    era_<NNN>_<label>.db and TRIM it (SKIP signals and pre-era signals dropped —
-    an untrimmed snapshot is ~250MB and a few of them would fill the volume);
-    then in ONE transaction: seal the era row, wipe the money tables (bankroll,
-    trades, positions, resolutions — research tables are kept so calibration
-    keeps learning across eras), seed the new ledger, open the new era row.
-    A crash mid-cutover therefore leaves either the old era fully intact or the
-    new one fully opened, never a half-wiped ledger.
-
-    Returns a summary dict. Raises RuntimeError on refusal."""
-    import re as _re
-
-    open_pos = fetch_query("SELECT side, question FROM positions")
-    if open_pos:
-        raise RuntimeError(
-            f"{len(open_pos)} position(s) still open — let this era finish settling first")
-
-    cur_era = get_current_era()
-    n_trades = fetch_query("SELECT COUNT(*) AS c FROM trades")[0]["c"]
-    old_rows = fetch_query("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1")
-    old_balance = old_rows[0]["balance"] if old_rows else 0.0
-    n_existing = fetch_query("SELECT COUNT(*) AS c FROM eras")[0]["c"]
-
-    # ---- 1. freeze + trim the outgoing era (only if there is history) ----
-    archive_path = None
-    if n_trades or cur_era:
-        closing_label = _re.sub(r"[^A-Za-z0-9._-]", "-",
-                                (cur_era or {}).get("label") or "pre-era-history")
-        era_no = (cur_era["id"] if cur_era else n_existing) or 1
-        archive_path = os.path.join(
-            os.path.dirname(DB_PATH), f"era_{era_no:03d}_{closing_label}.db")
-        if os.path.exists(archive_path):
-            raise RuntimeError(f"{archive_path} already exists — refusing to overwrite an archive")
-        src = sqlite3.connect(DB_PATH)
-        try:
-            dst = sqlite3.connect(archive_path)
-            with dst:
-                src.backup(dst)
-            dst.close()
-        finally:
-            src.close()
-        era_started = cur_era["started_at"] if cur_era else None
-        arch = sqlite3.connect(archive_path)
-        try:
-            with arch:
-                arch.execute("DELETE FROM signals WHERE signal_type LIKE 'SKIP%'")
-                if era_started:
-                    arch.execute("DELETE FROM signals WHERE timestamp < ?", (era_started,))
-                    arch.execute("DELETE FROM scan_log WHERE id NOT IN "
-                                 "(SELECT id FROM scan_log ORDER BY id DESC LIMIT 500)")
-            arch.execute("VACUUM")
-        except sqlite3.OperationalError as e:
-            logging.warning(f"era archive trim skipped: {e}")
-        finally:
-            arch.close()
-
-    # ---- 2. seal + wipe + seed + open, atomically ----
-    # Direct SQL rather than close_era()/start_era(): those helpers take
-    # _write_lock themselves and it is a plain (non-reentrant) Lock — and more
-    # importantly this whole block must be ONE transaction.
-    now = datetime.now(timezone.utc).isoformat()
-    with _write_lock:
-        with sqlite3.connect(DB_PATH) as conn:
-            if cur_era:
-                conn.execute(
-                    "UPDATE eras SET ended_at=?, final_balance=?, archive_path=? WHERE id=?",
-                    (now, float(old_balance), archive_path, cur_era["id"]))
-            elif archive_path:
-                # History from before the era system: record it retroactively so
-                # the archive is reachable from the dashboard, not an orphan file.
-                conn.execute(
-                    "INSERT INTO eras (label, mode, started_at, ended_at, seed_amount, "
-                    "final_balance, archive_path, note) VALUES (?,?,?,?,?,?,?,?)",
-                    ("pre-era-history", new_mode, now, now, 0.0, float(old_balance),
-                     archive_path, "retro row for trades made before the era system"))
-            for t in ("bankroll", "trades", "positions", "resolutions"):
-                conn.execute(f"DELETE FROM {t}")
-            if reset_settings:
-                conn.execute("DELETE FROM settings")
-            conn.execute(
-                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id) "
-                "VALUES (?, 'LIVE_SEED', ?, ?, NULL)", (now, float(seed), float(seed)))
-            new_era = conn.execute(
-                "INSERT INTO eras (label, mode, started_at, seed_amount) VALUES (?,?,?,?)",
-                (new_label, new_mode, now, float(seed))).lastrowid
-            conn.commit()
-        with sqlite3.connect(DB_PATH) as conn:
-            conn.execute("VACUUM")
-
-    logging.info(f"Era cutover: '{new_label}' (id {new_era}) opened at ${seed:.2f}; "
-                 f"{n_trades} trades archived to {archive_path or '(nothing to archive)'}")
-    return {
-        "new_era_id": new_era, "new_label": new_label, "mode": new_mode,
-        "seed": float(seed), "archived_trades": n_trades,
-        "closed_balance": float(old_balance), "archive_path": archive_path,
-    }
 
 
 def record_deposit(amount, note=None):
@@ -505,30 +416,38 @@ def get_total_deposited():
     Returns are measured against this, not STARTING_BANKROLL: a deposit adds
     cash without being profit, so dividing by the original seed would report a
     funding event as a gain."""
+    mode = current_mode()
     rows = fetch_query(
-        "SELECT COALESCE(SUM(amount), 0) AS deposited FROM bankroll WHERE event='DEPOSIT'"
+        "SELECT COALESCE(SUM(amount), 0) AS deposited FROM bankroll "
+        "WHERE event='DEPOSIT' AND mode = ?", (mode,)
     )
     deposited = rows[0]["deposited"] if rows else 0.0
     # Two seed spellings exist: _seed_bankroll writes 'SEED', cutover_to_live.py
     # writes 'LIVE_SEED'. The live ledger opened with LIVE_SEED, so matching only
     # 'SEED' would omit the original capital and overstate the return.
     seed_rows = fetch_query(
-        "SELECT amount FROM bankroll WHERE event IN ('SEED','LIVE_SEED') ORDER BY id LIMIT 1"
+        "SELECT amount FROM bankroll WHERE event IN ('SEED','LIVE_SEED') AND mode = ? "
+        "ORDER BY id LIMIT 1", (mode,)
     )
-    seed = seed_rows[0]["amount"] if seed_rows else STARTING_BANKROLL
+    seed = seed_rows[0]["amount"] if seed_rows else (STARTING_BANKROLL if mode == "paper" else 0.0)
     return seed + (deposited or 0.0)
 
 
 def get_current_bankroll():
-    rows = fetch_query("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1")
+    """Latest balance in the ACTIVE book. A paper balance must never be
+    readable as live cash — the bot sizes real orders off this number."""
+    mode = current_mode()
+    rows = fetch_query(
+        "SELECT balance FROM bankroll WHERE mode = ? ORDER BY id DESC LIMIT 1", (mode,))
     if rows:
         return rows[0]["balance"]
-    return STARTING_BANKROLL
+    return STARTING_BANKROLL if mode == "paper" else 0.0
 
 
 def get_portfolio_state():
     available_cash = get_current_bankroll()
-    positions = fetch_query("SELECT SUM(size_usdc) as locked FROM positions")
+    positions = fetch_query(
+        "SELECT SUM(size_usdc) as locked FROM positions WHERE mode = ?", (current_mode(),))
     locked = positions[0]["locked"] if positions and positions[0]["locked"] else 0.0
     total_equity = available_cash + locked
     return {
@@ -541,14 +460,19 @@ def get_portfolio_state():
 def update_bankroll(event, amount, trade_id=None):
     """Thread-safe bankroll ledger update. Reads current balance and appends
     a new row inside a single lock so concurrent closes can't double-read."""
+    # Bind the mode ONCE for the whole transaction: a dashboard switch
+    # landing mid-write must not split a position, its trade and its cash
+    # movement across two books.
+    _mode = current_mode()
     with _write_lock:
         current = get_current_bankroll()
         new_balance = current + amount
         now = datetime.now(timezone.utc).isoformat()
         with sqlite3.connect(DB_PATH) as conn:
             conn.execute(
-                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id) VALUES (?, ?, ?, ?, ?)",
-                (now, event, amount, new_balance, trade_id)
+                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (now, event, amount, new_balance, trade_id, _mode)
             )
             conn.commit()
     return new_balance
@@ -563,34 +487,41 @@ def open_position_atomic(market_id, token_id, side, price, size, now_iso, questi
     calls (OOM-kill, deploy restart) could otherwise leave a position open
     without its cash ever being debited, silently inflating available cash.
     Returns the new trade_id."""
+    # Bind the mode ONCE for the whole transaction: a dashboard switch
+    # landing mid-write must not split a position, its trade and its cash
+    # movement across two books.
+    _mode = current_mode()
     with _write_lock:
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
             cur.execute(
                 "INSERT INTO positions (market_id, token_id, side, entry_price, size_usdc, "
-                "entry_time, question, is_high, city, target_date, shares) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "entry_time, question, is_high, city, target_date, shares, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (market_id, token_id, side, price, size, now_iso, question,
                  1 if is_high else 0, city, target_date,
-                 shares if shares is not None else (size / price if price > 0 else None))
+                 shares if shares is not None else (size / price if price > 0 else None),
+                 _mode)
             )
             cur.execute(
                 "INSERT INTO trades (market_id, side, size_usdc, fill_price, model_prob, edge, "
-                "status, entry_time, is_high, city, target_date) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "status, entry_time, is_high, city, target_date, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (market_id, side, size, price, model_prob, edge, "OPEN", now_iso,
-                 1 if is_high else 0, city, target_date)
+                 1 if is_high else 0, city, target_date, _mode)
             )
             trade_id = cur.lastrowid
-            row = cur.execute("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1").fetchone()
+            row = cur.execute("SELECT balance FROM bankroll WHERE mode = ? "
+                              "ORDER BY id DESC LIMIT 1", (_mode,)).fetchone()
             current = row[0] if row else STARTING_BANKROLL
             # entry_fee: taker fee the exchange charges ON TOP of the notional in
             # live mode — without debiting it the ledger drifts above the real
             # wallet by ~0.5-1% per round trip.
             new_balance = current - size - entry_fee
             cur.execute(
-                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id) VALUES (?, ?, ?, ?, ?)",
-                (now_iso, "TRADE_ENTRY", -(size + entry_fee), new_balance, trade_id)
+                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (now_iso, "TRADE_ENTRY", -(size + entry_fee), new_balance, trade_id, _mode)
             )
             conn.commit()
     return trade_id
@@ -616,6 +547,10 @@ def close_position_atomic(pos_id, market_id, side, pnl_dollars, size_usdc, exit_
 
     Returns True on success, False if the position was already gone (idempotent)."""
     now = datetime.now(timezone.utc).isoformat()
+    # Bind the mode ONCE for the whole transaction: a dashboard switch
+    # landing mid-write must not split a position, its trade and its cash
+    # movement across two books.
+    _mode = current_mode()
     with _write_lock:
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
@@ -629,8 +564,9 @@ def close_position_atomic(pos_id, market_id, side, pnl_dollars, size_usdc, exit_
             # partial-exit pnl already booked on the row (see reduce_position_atomic).
             trow = cur.execute(
                 "SELECT id FROM trades WHERE market_id=? AND status='OPEN' AND side=? "
+                "AND mode = ? "
                 "ORDER BY id DESC LIMIT 1",
-                (market_id, side)
+                (market_id, side, _mode)
             ).fetchone()
             trade_id = trow[0] if trow else None
             if trade_id is not None:
@@ -646,12 +582,14 @@ def close_position_atomic(pos_id, market_id, side, pnl_dollars, size_usdc, exit_
                     f"close_position_atomic: no OPEN trade row for {market_id} ({side}) — "
                     f"position deleted and bankroll credited, but trade ledger has no row to close."
                 )
-            row = cur.execute("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1").fetchone()
+            row = cur.execute("SELECT balance FROM bankroll WHERE mode = ? "
+                              "ORDER BY id DESC LIMIT 1", (_mode,)).fetchone()
             current = row[0] if row else STARTING_BANKROLL
             new_balance = current + size_usdc + pnl_dollars
             cur.execute(
-                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id) VALUES (?, ?, ?, ?, ?)",
-                (now, "TRADE_EXIT", size_usdc + pnl_dollars, new_balance, trade_id)
+                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (now, "TRADE_EXIT", size_usdc + pnl_dollars, new_balance, trade_id, _mode)
             )
             conn.commit()
     return True
@@ -666,6 +604,10 @@ def reduce_position_atomic(pos_id, market_id, side, sold_shares, entry_cost_free
     close: DB flat, bankroll credited cash never received, unsold shares stranded
     on-chain untracked). Returns True if the position row was updated."""
     now = datetime.now(timezone.utc).isoformat()
+    # Bind the mode ONCE for the whole transaction: a dashboard switch
+    # landing mid-write must not split a position, its trade and its cash
+    # movement across two books.
+    _mode = current_mode()
     with _write_lock:
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
@@ -679,19 +621,22 @@ def reduce_position_atomic(pos_id, market_id, side, sold_shares, entry_cost_free
             cur.execute(
                 "UPDATE trades SET pnl=COALESCE(pnl, 0)+? WHERE id="
                 "(SELECT id FROM trades WHERE market_id=? AND status='OPEN' AND side=? "
+                "AND mode = ? "
                 " ORDER BY id DESC LIMIT 1)",
-                (pnl_delta, market_id, side)
+                (pnl_delta, market_id, side, _mode)
             )
             if cur.rowcount == 0:
                 logging.error(
                     f"reduce_position_atomic: no OPEN trade row for {market_id} ({side}) — "
                     f"partial-exit pnl ${pnl_delta:.2f} not booked to any trade."
                 )
-            row = cur.execute("SELECT balance FROM bankroll ORDER BY id DESC LIMIT 1").fetchone()
+            row = cur.execute("SELECT balance FROM bankroll WHERE mode = ? "
+                              "ORDER BY id DESC LIMIT 1", (_mode,)).fetchone()
             current = row[0] if row else STARTING_BANKROLL
             cur.execute(
-                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id) VALUES (?, ?, ?, ?, ?)",
-                (now, "TRADE_PARTIAL_EXIT", proceeds, current + proceeds, None)
+                "INSERT INTO bankroll (timestamp, event, amount, balance, trade_id, mode) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (now, "TRADE_PARTIAL_EXIT", proceeds, current + proceeds, None, _mode)
             )
             conn.commit()
     return True
@@ -714,14 +659,18 @@ def fetch_query(query, params=()):
 
 
 def get_daily_pnl():
+    """Today's realized P&L in the ACTIVE book — the circuit breaker's input.
+    Unscoped, a day of paper losses would halt live trading (or a live loss
+    would halt a demo), which is the opposite of what either book means."""
     today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    query = "SELECT SUM(pnl) as tpnl FROM trades WHERE exit_time >= ? AND status='CLOSED'"
-    rows = fetch_query(query, (f"{today}T00:00:00",))
+    query = ("SELECT SUM(pnl) as tpnl FROM trades "
+             "WHERE exit_time >= ? AND status='CLOSED' AND mode = ?")
+    rows = fetch_query(query, (f"{today}T00:00:00", current_mode()))
     return rows[0]["tpnl"] if rows and rows[0]["tpnl"] is not None else 0.0
 
 
 def get_open_position(market_id):
-    rows = fetch_query("SELECT * FROM positions WHERE market_id=?", (market_id,))
+    rows = fetch_query("SELECT * FROM positions WHERE market_id=? AND mode=?", (market_id, current_mode()))
     return rows[0] if rows else None
 
 

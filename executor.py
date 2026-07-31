@@ -8,7 +8,7 @@ from py_clob_client_v2.clob_types import (
 )
 from db import (execute_query, fetch_query, get_open_position, close_position_atomic,
                 open_position_atomic, reduce_position_atomic, get_position_by_id,
-                update_bankroll, get_current_bankroll, add_notification)
+                update_bankroll, get_current_bankroll, add_notification, current_mode)
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
 from scanner import (get_realtime_price, get_market_resolution, get_gamma_mid_price,
                      get_orderbook_depth_usd, get_wallet_token_sizes, get_wallet_sells)
@@ -174,7 +174,7 @@ class Executor:
             return lock
 
     def reconcile_positions(self):
-        positions = fetch_query("SELECT * FROM positions")
+        positions = fetch_query("SELECT * FROM positions WHERE mode=?", (current_mode(),))
         if not positions:
             logging.info("Startup reconciliation: no open positions.")
             return
@@ -213,7 +213,7 @@ class Executor:
         """Poll Polymarket for resolution status of every open position. Settle any
         that have resolved. Called every monitor cycle so winning trades close at $1.00
         and losers at $0.00 without waiting for edge decay."""
-        positions = fetch_query("SELECT * FROM positions")
+        positions = fetch_query("SELECT * FROM positions WHERE mode=?", (current_mode(),))
         settled_count = 0
         for pos in positions:
             if self._try_settle_position(pos, source="monitor"):
@@ -245,7 +245,7 @@ class Executor:
         Returns the number of positions closed or reduced."""
         if paper_mode() or not POLYMARKET_FUNDER:
             return 0
-        positions = fetch_query("SELECT * FROM positions")
+        positions = fetch_query("SELECT * FROM positions WHERE mode=?", (current_mode(),))
         if not positions:
             return 0
         wallet = get_wallet_token_sizes(POLYMARKET_FUNDER)
@@ -319,7 +319,7 @@ class Executor:
                              f'Available cash now ${new_bal:.2f}.', severity='info')
             return 1
 
-        open_n = fetch_query("SELECT COUNT(*) AS c FROM positions")[0]["c"]
+        open_n = fetch_query("SELECT COUNT(*) AS c FROM positions WHERE mode=?", (current_mode(),))[0]["c"]
         if open_n:
             logging.warning(
                 f"Wallet ${bal:.2f} below ledger ${ledger:.2f} with {open_n} open "
@@ -462,8 +462,9 @@ class Executor:
                 return
             trade = fetch_query(
                 "SELECT model_prob FROM trades WHERE market_id=? AND side=? AND status='OPEN' "
+                "AND mode=? "
                 "ORDER BY id DESC LIMIT 1",
-                (pos["market_id"], pos["side"])
+                (pos["market_id"], pos["side"], current_mode())
             )
             model_prob_entry = trade[0]["model_prob"] if trade else None
             # model_prob is the probability our model assigned to the bucket (YES).
@@ -568,7 +569,7 @@ class Executor:
             return False
 
     def get_open_positions_count(self):
-        res = fetch_query("SELECT COUNT(*) as count FROM positions")
+        res = fetch_query("SELECT COUNT(*) as count FROM positions WHERE mode=?", (current_mode(),))
         return res[0]["count"] if res else 0
 
     @staticmethod
@@ -710,8 +711,8 @@ class Executor:
         # a different bucket of the same event either.
         if ONE_TRADE_PER_CITY_DATE and opp.city and opp.date:
             prior = fetch_query(
-                "SELECT id FROM trades WHERE city=? AND target_date=? LIMIT 1",
-                (opp.city, opp.date),
+                "SELECT id FROM trades WHERE city=? AND target_date=? AND mode=? LIMIT 1",
+                (opp.city, opp.date, current_mode()),
             )
             if prior:
                 logging.info(
@@ -726,8 +727,8 @@ class Executor:
         if REENTRY_COOLDOWN_HOURS > 0:
             last = fetch_query(
                 "SELECT exit_time FROM trades WHERE market_id=? AND exit_time IS NOT NULL "
-                "ORDER BY id DESC LIMIT 1",
-                (opp.market_id,),
+                "AND mode=? ORDER BY id DESC LIMIT 1",
+                (opp.market_id, current_mode()),
             )
             if last and last[0]["exit_time"]:
                 try:
@@ -799,7 +800,7 @@ class Executor:
 
     def get_live_prices(self):
         """Return {market_id: current_mid_price} for all open positions."""
-        positions = fetch_query("SELECT market_id, token_id FROM positions")
+        positions = fetch_query("SELECT market_id, token_id FROM positions WHERE mode=?", (current_mode(),))
         prices = {}
         for p in positions:
             ask, bid = get_realtime_price(p["token_id"])
@@ -810,7 +811,7 @@ class Executor:
         return prices
 
     def check_exits(self):
-        positions = fetch_query("SELECT * FROM positions")
+        positions = fetch_query("SELECT * FROM positions WHERE mode=?", (current_mode(),))
         for pos in positions:
             # Skip rather than block: if the dashboard is mid manual-close on this
             # position, the monitor has nothing useful to add and shouldn't stall
@@ -861,8 +862,9 @@ class Executor:
                 # no exit_price column — pnl is the ledger's record of the exit).
                 trades = fetch_query(
                     "SELECT pnl FROM trades WHERE market_id=? AND side=? AND status='CLOSED' "
+                    "AND mode=? "
                     "ORDER BY id DESC LIMIT 1",
-                    (pos["market_id"], pos["side"]))
+                    (pos["market_id"], pos["side"], current_mode()))
                 pnl = trades[0]["pnl"] if trades else None
                 return {"ok": True, "status": "closed",
                         "market_id": pos["market_id"],
@@ -1167,8 +1169,9 @@ class Executor:
 
         entry = fetch_query(
             "SELECT model_prob FROM trades WHERE market_id=? AND side=? AND status='OPEN' "
+                "AND mode=? "
             "ORDER BY id DESC LIMIT 1",
-            (pos["market_id"], pos["side"]),
+            (pos["market_id"], pos["side"], current_mode()),
         )
         entry_yes_prob = entry[0]["model_prob"] if entry and entry[0]["model_prob"] is not None else None
         if entry_yes_prob is None:

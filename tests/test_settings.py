@@ -343,115 +343,6 @@ class TestSettingsAPI:
         assert d["daily_loss_limit"] == -12.0
         assert db.get_settings()["FIXED_POSITION_SIZE"] == "4.0"  # and persisted
 
-    def test_archive_view_blocks_mutations(self, client, monkeypatch, tmp_path):
-        """Writing while pointed at an archive would hit a read-only connection;
-        both mutating endpoints must refuse cleanly instead."""
-        c, app_mod, _ = client
-        fake_archive = tmp_path / "era_001_paper.db"
-        sqlite3.connect(str(fake_archive)).close()
-        monkeypatch.setattr(app_mod, "_selected_archive_path", lambda: str(fake_archive))
-        assert c.post("/api/settings", json={"settings": {"FIXED_POSITION_SIZE": 4.0}}).status_code == 409
-        assert c.post("/api/deposit", json={"amount": 10, "confirm": True}).status_code == 409
-
-
-class TestEras:
-    """Multiple funded runs: paper era, live era 1, then live era 2 after a full
-    withdrawal and re-fund. The old design had one archive at a fixed path with
-    a boolean toggle and could not express this."""
-
-    def test_no_eras_initially(self, tmp_path, monkeypatch):
-        db, _, _ = _fresh_db(tmp_path, monkeypatch)
-        assert db.get_eras() == []
-        assert db.get_current_era() is None
-
-    def test_start_and_close_era(self, tmp_path, monkeypatch):
-        db, _, _ = _fresh_db(tmp_path, monkeypatch)
-        era_id = db.start_era("live-1", "live", 18.86)
-        cur = db.get_current_era()
-        assert cur["id"] == era_id and cur["label"] == "live-1"
-        assert cur["ended_at"] is None          # open eras have no end
-        db.close_era(era_id, 20.91, "/data/era_001_live-1.db")
-        assert db.get_current_era() is None     # sealed, nothing running
-        sealed = db.get_eras()[0]
-        assert sealed["final_balance"] == 20.91
-        assert sealed["archive_path"] == "/data/era_001_live-1.db"
-
-    def test_multiple_eras_coexist(self, tmp_path, monkeypatch):
-        db, _, _ = _fresh_db(tmp_path, monkeypatch)
-        e1 = db.start_era("paper", "paper", 40.0)
-        db.close_era(e1, 62.85, "/data/era_001_paper.db")
-        e2 = db.start_era("live-1", "live", 18.86)
-        db.close_era(e2, 20.91, "/data/era_002_live-1.db")
-        e3 = db.start_era("live-2", "live", 130.0)
-        eras = db.get_eras()
-        assert [e["label"] for e in eras] == ["live-2", "live-1", "paper"]
-        assert db.get_current_era()["id"] == e3   # only the newest is open
-
-    def test_only_one_era_open_at_a_time(self, tmp_path, monkeypatch):
-        db, _, _ = _fresh_db(tmp_path, monkeypatch)
-        e1 = db.start_era("live-1", "live", 10.0)
-        db.close_era(e1, 12.0, "/data/a.db")
-        db.start_era("live-2", "live", 100.0)
-        open_eras = [e for e in db.get_eras() if e["ended_at"] is None]
-        assert len(open_eras) == 1
-
-
-class TestEraArchiveSelection:
-    @pytest.fixture
-    def client(self, tmp_path, monkeypatch):
-        db, _, db_file = _fresh_db(tmp_path, monkeypatch)
-        monkeypatch.setenv("DASHBOARD_EMAIL", "t@t.com")
-        import app as app_mod
-        importlib.reload(app_mod)
-        app_mod.app.config["TESTING"] = True
-        c = app_mod.app.test_client()
-        with c.session_transaction() as s:
-            s["authed"] = True
-        return c, app_mod, db, tmp_path
-
-    def test_lists_only_eras_with_existing_files(self, client):
-        c, app_mod, db, tmp_path = client
-        real = tmp_path / "era_001_paper.db"
-        sqlite3.connect(str(real)).close()
-        e1 = db.start_era("paper", "paper", 40.0)
-        db.close_era(e1, 62.85, str(real))
-        e2 = db.start_era("live-1", "live", 18.86)
-        db.close_era(e2, 20.91, str(tmp_path / "deleted.db"))   # file never created
-        d = c.get("/api/eras").get_json()
-        labels = [e["label"] for e in d["archived"]]
-        assert labels == ["paper"]      # the missing-file era is not offered
-
-    def test_select_and_clear_era(self, client):
-        """_selected_archive_path reads flask.session, so it is exercised through
-        real requests rather than called bare (no request context outside one)."""
-        c, app_mod, db, tmp_path = client
-        real = tmp_path / "era_001_paper.db"
-        sqlite3.connect(str(real)).close()
-        e1 = db.start_era("paper", "paper", 40.0)
-        db.close_era(e1, 62.85, str(real))
-
-        assert c.post("/api/view-era", json={"era_id": e1}).get_json()["viewing_era"] == e1
-        assert c.get("/api/eras").get_json()["viewing_era"] == e1
-        # while pointed at an archive the dashboard is read-only
-        assert c.post("/api/deposit", json={"amount": 5, "confirm": True}).status_code == 409
-
-        assert c.post("/api/view-era", json={"era_id": None}).get_json()["viewing_era"] is None
-        assert c.get("/api/eras").get_json()["viewing_era"] is None
-        assert c.get("/api/settings").get_json()["archive_view"] is False
-
-    def test_unknown_era_rejected(self, client):
-        c, _, _, _ = client
-        assert c.post("/api/view-era", json={"era_id": 999}).status_code == 404
-
-    def test_stale_selection_falls_back_to_live(self, client):
-        """A session pointing at a deleted archive must read the LIVE db, never
-        crash and never silently show nothing."""
-        c, app_mod, _, _ = client
-        with c.session_transaction() as s:
-            s["view_era"] = 12345
-        assert app_mod._selected_archive_path() is None
-        assert c.get("/api/data").status_code == 200
-
 
 class TestDepositAPI:
     @pytest.fixture
@@ -488,65 +379,6 @@ class TestDepositAPI:
         d = c.post("/api/deposit", json={"amount": 110, "confirm": True}).get_json()
         assert d["new_balance"] == pytest.approx(before + 110)
         assert db.get_current_bankroll() == pytest.approx(before + 110)
-
-
-class TestCutoverEra:
-    """db.cutover_era — the shared core behind the Settings button and the CLI."""
-
-    def _populate(self, db, db_file):
-        with sqlite3.connect(str(db_file)) as conn:
-            conn.execute("INSERT INTO trades (market_id, side, size_usdc, fill_price, "
-                         "model_prob, edge, pnl, status, city, target_date) "
-                         "VALUES ('0xa','NO',2.0,0.6,0.2,0.2,1.0,'CLOSED','Tokyo','2026-07-01')")
-            conn.execute("INSERT INTO signals (timestamp, market_id, city, signal_type) "
-                         "VALUES ('2026-07-01T00:00:00','0xa','Tokyo','BUY_NO')")
-            conn.commit()
-
-    def test_cutover_archives_wipes_and_reseeds(self, tmp_path, monkeypatch):
-        db, _, db_file = _fresh_db(tmp_path, monkeypatch)
-        self._populate(db, db_file)
-        summary = db.cutover_era("live-2", "live", 130.0)
-        assert summary["archived_trades"] == 1
-        assert os.path.exists(summary["archive_path"])
-        # live DB: money wiped, ledger re-seeded, research kept
-        assert db.fetch_query("SELECT COUNT(*) AS c FROM trades")[0]["c"] == 0
-        assert db.get_current_bankroll() == 130.0
-        assert db.fetch_query("SELECT COUNT(*) AS c FROM signals")[0]["c"] == 1
-        # archive still holds the old trade
-        arch = sqlite3.connect(summary["archive_path"])
-        assert arch.execute("SELECT COUNT(*) FROM trades").fetchone()[0] == 1
-        # era rows: retro row sealed + new one open
-        assert db.get_current_era()["label"] == "live-2"
-        sealed = [e for e in db.get_eras() if e["ended_at"]]
-        assert len(sealed) == 1 and sealed[0]["archive_path"] == summary["archive_path"]
-
-    def test_cutover_refuses_with_open_position(self, tmp_path, monkeypatch):
-        db, _, db_file = _fresh_db(tmp_path, monkeypatch)
-        with sqlite3.connect(str(db_file)) as conn:
-            conn.execute("INSERT INTO positions (market_id, token_id, side, entry_price, "
-                         "size_usdc, entry_time, question) "
-                         "VALUES ('0xa','t','NO',0.6,2.0,'2026-07-01T00:00:00','q')")
-            conn.commit()
-        with pytest.raises(RuntimeError):
-            db.cutover_era("live-2", "live", 100.0)
-        assert db.fetch_query("SELECT COUNT(*) AS c FROM positions")[0]["c"] == 1  # untouched
-
-    def test_settings_survive_cutover(self, tmp_path, monkeypatch):
-        db, _, db_file = _fresh_db(tmp_path, monkeypatch)
-        db.save_settings({"FIXED_POSITION_SIZE": 5.0})
-        self._populate(db, db_file)
-        db.cutover_era("live-2", "live", 100.0)
-        assert db.get_settings()["FIXED_POSITION_SIZE"] == "5.0"
-
-    def test_second_cutover_coexists(self, tmp_path, monkeypatch):
-        db, _, db_file = _fresh_db(tmp_path, monkeypatch)
-        self._populate(db, db_file)
-        db.cutover_era("live-2", "live", 100.0)
-        db.record_deposit(10.0)
-        s2 = db.cutover_era("live-3", "live", 200.0)
-        assert db.get_current_era()["label"] == "live-3"
-        assert len([e for e in db.get_eras() if e["archive_path"]]) == 2
-        assert os.path.exists(s2["archive_path"])
 
 
 class TestWalletCashSync:
@@ -636,82 +468,6 @@ class TestWalletCashSync:
         assert 0 + app_mod._total_withdrawn() - app_mod._total_deposited() == pytest.approx(0.0)
 
 
-class TestNewEraAPI:
-    @pytest.fixture
-    def client(self, tmp_path, monkeypatch):
-        db, _, db_file = _fresh_db(tmp_path, monkeypatch)
-        monkeypatch.setenv("DASHBOARD_EMAIL", "t@t.com")
-        import app as app_mod
-        importlib.reload(app_mod)
-        app_mod.app.config["TESTING"] = True
-        c = app_mod.app.test_client()
-        with c.session_transaction() as s:
-            s["authed"] = True
-        return c, app_mod, db, db_file
-
-    def test_requires_confirm(self, client):
-        c, _, _, _ = client
-        assert c.post("/api/new-era", json={}).status_code == 400
-
-    def test_cutover_via_api(self, client, monkeypatch):
-        c, app_mod, db, db_file = client
-        with sqlite3.connect(str(db_file)) as conn:
-            conn.execute("INSERT INTO trades (market_id, side, size_usdc, fill_price, "
-                         "model_prob, edge, pnl, status) "
-                         "VALUES ('0xa','NO',2.0,0.6,0.2,0.2,1.0,'CLOSED')")
-            conn.commit()
-        import executor as ex
-        monkeypatch.setattr(ex, "get_wallet_collateral", lambda c=None: 130.0)
-        r = c.post("/api/new-era", json={"confirm": True, "label": "live-2"})
-        assert r.status_code == 200
-        d = r.get_json()
-        assert d["new_label"] == "live-2" and d["seed"] == 130.0
-        assert d["archived_trades"] == 1
-        assert db.get_current_bankroll() == pytest.approx(130.0)
-        assert db.get_current_era()["label"] == "live-2"
-
-    def test_open_positions_block_cutover(self, client):
-        c, _, db, db_file = client
-        with sqlite3.connect(str(db_file)) as conn:
-            conn.execute("INSERT INTO positions (market_id, token_id, side, entry_price, "
-                         "size_usdc, entry_time, question) VALUES ('0xa','t','NO',0.6,2.0,'t','q')")
-            conn.commit()
-        r = c.post("/api/new-era", json={"confirm": True})
-        assert r.status_code == 409
-        assert db.get_current_era() is None     # nothing happened
-
-    def test_unreadable_wallet_refuses_zero_seed(self, client, monkeypatch):
-        """A $0 era is a wiped ledger the bot can never trade out of — in paper
-        mode nothing ever books cash into it. Refuse instead of zeroing."""
-        c, _, db, _ = client
-        import executor as ex
-        monkeypatch.setattr(ex, "get_wallet_collateral", lambda c=None: None)
-        r = c.post("/api/new-era", json={"confirm": True})
-        assert r.status_code == 409
-        body = r.get_json()
-        assert body["needs_seed"] is True
-        assert db.get_current_era() is None          # nothing happened
-
-    def test_explicit_seed_overrides_unreadable_wallet(self, client, monkeypatch):
-        """The refusal is not a dead end: an explicit seed still opens the era."""
-        c, _, db, _ = client
-        import executor as ex
-        monkeypatch.setattr(ex, "get_wallet_collateral", lambda c=None: None)
-        r = c.post("/api/new-era", json={"confirm": True, "seed": 25.0})
-        assert r.status_code == 200
-        assert r.get_json()["seed"] == 25.0
-        assert db.get_current_bankroll() == 25.0
-
-    def test_explicit_zero_seed_still_refused(self, client, monkeypatch):
-        """Even asked for directly, $0 is refused — it is never a useful era."""
-        c, _, db, _ = client
-        import executor as ex
-        monkeypatch.setattr(ex, "get_wallet_collateral", lambda c=None: None)
-        r = c.post("/api/new-era", json={"confirm": True, "seed": 0})
-        assert r.status_code == 409
-        assert db.get_current_era() is None
-
-
 class TestTradingModeAPI:
     """The paper <-> live switch. This is the only control in the app that
     starts real money moving, so every gate on it is pinned here."""
@@ -740,10 +496,14 @@ class TestTradingModeAPI:
                                      "checks": list(checks)})
 
     @staticmethod
-    def _open_position(db_file):
+    def _open_position(db_file, mode="paper"):
+        """Positions belong to one book. The mode matters: a paper position must
+        block going live (it has no on-chain shares), and a LIVE position must
+        block going back to paper (the bot would stop placing its real exit)."""
         with sqlite3.connect(str(db_file)) as conn:
             conn.execute("INSERT INTO positions (market_id, token_id, side, entry_price, "
-                         "size_usdc, entry_time) VALUES ('0xa','t1','NO',0.6,2.0,'2026-07-30T00:00:00')")
+                         "size_usdc, entry_time, mode) "
+                         "VALUES ('0xa','t1','NO',0.6,2.0,'2026-07-30T00:00:00',?)", (mode,))
             conn.commit()
 
     def test_requires_auth(self, client):
@@ -802,7 +562,7 @@ class TestTradingModeAPI:
         c, _, _, config, db_file = client
         self._preflight(monkeypatch, True)
         c.post("/api/trading-mode", json={"paper": False, "confirm": True})
-        self._open_position(db_file)
+        self._open_position(db_file, mode="live")
         r = c.post("/api/trading-mode", json={"paper": True, "confirm": True})
         assert r.status_code == 409
         assert config.paper_mode() is False      # still live — exits stay real
@@ -848,3 +608,93 @@ class TestTradingModeAPI:
         self._preflight(monkeypatch, True)
         c.post("/api/trading-mode", json={"paper": False, "confirm": True})
         assert ex.paper_mode() is False
+
+
+class TestModeIsolation:
+    """Paper and live are two ledgers in one file. The property under test is
+    that NO money figure in either book can see the other's rows — a missed
+    filter is silent and shows simulated fills as real P&L."""
+
+    @pytest.fixture
+    def client(self, tmp_path, monkeypatch):
+        db, config, db_file = _fresh_db(tmp_path, monkeypatch)
+        monkeypatch.setenv("DASHBOARD_EMAIL", "t@t.com")
+        import app as app_mod
+        importlib.reload(app_mod)
+        app_mod.app.config["TESTING"] = True
+        c = app_mod.app.test_client()
+        with c.session_transaction() as s:
+            s["authed"] = True
+        return c, app_mod, db, config, db_file
+
+    @staticmethod
+    def _seed_rows(db_file):
+        """One settled winner in each book, and a deposit in each."""
+        with sqlite3.connect(str(db_file)) as conn:
+            for mode, pnl, size in (("paper", 5.0, 2.0), ("live", -1.0, 3.0)):
+                conn.execute(
+                    "INSERT INTO trades (market_id, side, size_usdc, fill_price, pnl, "
+                    "status, entry_time, exit_time, city, target_date, mode) VALUES "
+                    "(?,?,?,?,?,'CLOSED',?,?,?,?,?)",
+                    (f"0x{mode}", "NO", size, 0.5, pnl, "2026-07-30T01:00:00",
+                     "2026-07-30T02:00:00", "Lagos", "2026-07-30", mode))
+            conn.execute("INSERT INTO bankroll (timestamp, event, amount, balance, mode) "
+                         "VALUES ('2026-07-30T03:00:00','DEPOSIT',100.0,140.0,'live')")
+            conn.commit()
+
+    def test_paper_book_never_sees_live_rows(self, client):
+        c, _, db, config, db_file = client
+        self._seed_rows(db_file)
+        assert config.paper_mode() is True
+        d = c.get("/api/data").get_json()
+        assert [t["city"] for t in d["trades"]] == ["Lagos"]        # only one
+        assert d["trades"][0]["pnl"] == 5.0                          # the paper one
+        assert d["portfolio"]["available_cash"] == 40.0              # not the live 140
+        assert d["stats"]["30d"]["realized_pnl"] == 5.0
+
+    def test_live_book_never_sees_paper_rows(self, client, monkeypatch):
+        c, _, db, config, db_file = client
+        self._seed_rows(db_file)
+        config.apply_runtime_overrides({"PAPER_MODE": False})
+        d = c.get("/api/data").get_json()
+        assert d["trades"][0]["pnl"] == -1.0                         # the live one
+        assert len(d["trades"]) == 1
+        assert d["portfolio"]["available_cash"] == 140.0             # not the paper 40
+        assert d["stats"]["30d"]["realized_pnl"] == -1.0
+
+    def test_daily_pnl_and_circuit_breaker_are_per_book(self, client, db_file=None):
+        """A day of paper losses must not halt live trading."""
+        c, _, db, config, db_file = client
+        with sqlite3.connect(str(db_file)) as conn:
+            conn.execute(
+                "INSERT INTO trades (market_id, side, size_usdc, fill_price, pnl, status, "
+                "exit_time, mode) VALUES ('0xp','NO',2.0,0.5,-99.0,'CLOSED',?, 'paper')",
+                (db.datetime.now(db.timezone.utc).isoformat(),))
+            conn.commit()
+        assert db.get_daily_pnl() == -99.0            # paper book sees it
+        config.apply_runtime_overrides({"PAPER_MODE": False})
+        assert db.get_daily_pnl() == 0.0              # live book does not
+
+    def test_city_date_guard_is_per_book(self, client):
+        """A paper trade on a city/date must not veto the real one."""
+        c, _, db, config, db_file = client
+        self._seed_rows(db_file)      # both books have Lagos / 2026-07-30
+        paper = db.fetch_query(
+            "SELECT id FROM trades WHERE city=? AND target_date=? AND mode=?",
+            ("Lagos", "2026-07-30", "paper"))
+        live = db.fetch_query(
+            "SELECT id FROM trades WHERE city=? AND target_date=? AND mode=?",
+            ("Lagos", "2026-07-30", "live"))
+        assert len(paper) == 1 and len(live) == 1 and paper[0]["id"] != live[0]["id"]
+
+    def test_paper_ledger_survives_a_round_trip_to_live(self, client):
+        """'Paper resumes where it left off' — the whole point of tagging."""
+        c, _, db, config, _ = client
+        db.update_bankroll("TRADE_EXIT", 7.5)
+        assert db.get_current_bankroll() == 47.5
+        config.apply_runtime_overrides({"PAPER_MODE": False})
+        db.ensure_bankroll_seeded()
+        db.update_bankroll("DEPOSIT", 12.0)
+        assert db.get_current_bankroll() == 12.0      # live book, independent
+        config.apply_runtime_overrides({"PAPER_MODE": True})
+        assert db.get_current_bankroll() == 47.5      # paper exactly as left
