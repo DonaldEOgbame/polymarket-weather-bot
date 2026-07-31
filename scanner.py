@@ -16,7 +16,8 @@ from config import (
     MARKET_DISCOVERY_STOP_AFTER_WEATHER, MAX_CLOB_CANDIDATES,
     MAX_BUCKETS_PER_CITY_DATE,
 )
-from utils import get_session, parse_utc_datetime, safe_get, get_cached_price, set_cached_price, get_cached_depth
+from utils import (get_session, parse_utc_datetime, safe_get, get_cached_price,
+                   set_cached_price, get_cached_depth, get_cached_top_size)
 
 @dataclass
 class MarketOpportunity:
@@ -308,6 +309,37 @@ def _book_depth_usd(data):
     return _depth(data.get("asks", [])), _depth(data.get("bids", []))
 
 
+def _top_of_book_size(data):
+    """Shares resting AT the best price on each side: (ask_top_size, bid_top_size).
+
+    Not the same question as _book_depth_usd. Total depth says whether a size
+    could fill at all; top-of-book says whether the quoted best price is real or
+    is one small order defining the entire spread. On a book where
+    MAX_ENTRY_SPREAD_FRACTION allows up to 15%, a bid quoted by a single 2-share
+    order and a bid backed by 200 shares mean very different things about a
+    drawdown measured against that bid — which is exactly the Chongqing -56.2%
+    question the position trail exists to settle.
+
+    Sizes are SUMMED across levels at the best price: the CLOB returns levels
+    unaggregated, so two orders at the same price arrive as two entries. Uses
+    the same min-ask/max-bid rule as _best_ask_bid_from_book — never index 0,
+    which is the worst price, not the best.
+    """
+    def _top(levels, best_fn):
+        parsed = []
+        for lvl in levels or []:
+            try:
+                parsed.append((float(lvl["price"]), float(lvl["size"])))
+            except (TypeError, ValueError, KeyError):
+                continue
+        if not parsed:
+            return 0.0
+        best = best_fn(p for p, _ in parsed)
+        return sum(s for p, s in parsed if p == best)
+
+    return _top(data.get("asks", []), min), _top(data.get("bids", []), max)
+
+
 def get_realtime_price_status(token_id):
     """Fetch best ask/bid for a token. Returns (ask, bid, reachable)."""
     cached = get_cached_price(token_id)
@@ -320,7 +352,9 @@ def get_realtime_price_status(token_id):
             data = resp.json()
             best_ask, best_bid = _best_ask_bid_from_book(data)
             ask_depth, bid_depth = _book_depth_usd(data)
-            set_cached_price(token_id, best_ask, best_bid, True, ask_depth, bid_depth)
+            ask_top, bid_top = _top_of_book_size(data)
+            set_cached_price(token_id, best_ask, best_bid, True, ask_depth, bid_depth,
+                             ask_top, bid_top)
             return best_ask, best_bid, True
         logging.warning(f"Orderbook for {token_id}: HTTP {resp.status_code}")
     except Exception as e:
@@ -342,6 +376,19 @@ def get_orderbook_depth_usd(token_id):
     # gets populated, then re-check the cache.
     get_realtime_price_status(token_id)
     cached = get_cached_depth(token_id)
+    return cached if cached is not None else (None, None)
+
+
+def get_orderbook_top_size(token_id):
+    """Shares at the best price on each side: (ask_top_size, bid_top_size).
+    Piggybacks on the same 30s cache as price and depth, so on the monitor path
+    — which has already read the book this cycle — this costs nothing. Returns
+    (None, None) if the book wasn't readable."""
+    cached = get_cached_top_size(token_id)
+    if cached is not None:
+        return cached
+    get_realtime_price_status(token_id)
+    cached = get_cached_top_size(token_id)
     return cached if cached is not None else (None, None)
 
 

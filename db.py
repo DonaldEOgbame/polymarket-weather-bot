@@ -401,6 +401,99 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_gates_gate "
                      "ON replay_gates(gate, passed)")
 
+        # --- Monitor-cycle position trail --------------------------------
+        # One row per OPEN POSITION per monitor cycle, unconditionally.
+        #
+        # This exists because signal_trail records EVALUATIONS, and a market
+        # stops being evaluated the moment it drops out of the scan candidate
+        # set. Measured on the eight historical losers: the trail watched a
+        # median of 6.5 hours after entry and was BLIND for a median of 14 hours
+        # before close. Houston #68 was watched for 1.0 hour and blind for 32.5.
+        #
+        # Three questions were unanswerable from stored data as a result, and
+        # all three are load-bearing:
+        #   * did the losers decline gradually, or jump to zero at settlement?
+        #   * was Chongqing's recorded -56.2% drawdown a real mid-price move, or
+        #     bid-side spread on a thin book?
+        #   * every stop-loss threshold in config.py was replayed against data
+        #     that does not cover the window the stop would fire in.
+        #
+        # Hence best_bid, best_ask and mid are stored SEPARATELY. The bid/mid
+        # distinction is the entire unresolved question; one derived number
+        # loses it. Rule outcomes go to position_trail_rules, structured, for
+        # the same reason replay_gates is not a prose string.
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS position_trail (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                mode TEXT,
+
+                position_id INTEGER,
+                trade_id INTEGER,
+                market_id TEXT,
+                token_id TEXT,
+                city TEXT,
+                target_date TEXT,
+                side TEXT,
+
+                best_bid REAL,
+                best_ask REAL,
+                mid REAL,
+                spread_fraction REAL,
+                bid_top_size REAL,
+                ask_top_size REAL,
+                bid_depth_usd REAL,
+                ask_depth_usd REAL,
+                price_source TEXT,
+
+                entry_price REAL,
+                stake_usdc REAL,
+                shares REAL,
+
+                unrealized_pnl_mid REAL,
+                unrealized_pnl_frac_mid REAL,
+                unrealized_pnl_bid REAL,
+                unrealized_pnl_frac_bid REAL,
+
+                hours_to_resolution REAL,
+                hold_minutes REAL,
+
+                exit_fired INTEGER DEFAULT 0,
+                exit_rule_fired TEXT
+            )
+        ''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ptrail_pos "
+                     "ON position_trail(position_id, timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ptrail_ts "
+                     "ON position_trail(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ptrail_market "
+                     "ON position_trail(market_id, timestamp)")
+
+        # observed/threshold side by side, per rule, per cycle. `fired` is
+        # whether the rule's CONDITION held — not whether the bot acted on it,
+        # which also depends on the enable flag and on an earlier rule having
+        # already exited. Keeping those separate is what makes "would a 40% stop
+        # have fired here?" answerable without re-deriving the exit path.
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS position_trail_rules (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                trail_id INTEGER NOT NULL,
+                rule TEXT NOT NULL,
+                basis TEXT,
+                enabled INTEGER,
+                evaluated INTEGER,
+                observed REAL,
+                threshold REAL,
+                fired INTEGER,
+                detail TEXT,
+                FOREIGN KEY (trail_id) REFERENCES position_trail(id)
+            )
+        ''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ptrail_rules_trail "
+                     "ON position_trail_rules(trail_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_ptrail_rules_rule "
+                     "ON position_trail_rules(rule, fired)")
+
         conn.execute('''
             CREATE TABLE IF NOT EXISTS resolutions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -993,6 +1086,114 @@ def get_recent_notifications(limit=100):
 def purge_old_notifications(keep_days=30):
     """Delete notification rows older than keep_days."""
     execute_query("DELETE FROM notifications WHERE timestamp < ?", (_iso_cutoff(keep_days),))
+
+
+def log_position_trail(row, rules):
+    """Persist one monitor-cycle observation of one open position, plus its
+    per-rule exit evaluations.
+
+    Best-effort by the same rule as log_replay_signal: this is a measurement
+    artifact, not part of the trading path, and a schema drift must degrade the
+    dataset rather than stall a monitor cycle or block an exit. Unknown keys in
+    `row` are dropped rather than raising.
+
+    `rules` is a list of dicts with keys: rule, basis, enabled, evaluated,
+    observed, threshold, fired, detail.
+
+    Returns the new trail id, or None if the write failed.
+    """
+    try:
+        with _write_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=30.0)
+            try:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(position_trail)")}
+                data = {k: v for k, v in row.items() if k in cols}
+                if not data:
+                    return None
+                names = ", ".join(data)
+                marks = ", ".join("?" * len(data))
+                cur = conn.execute(
+                    f"INSERT INTO position_trail ({names}) VALUES ({marks})",
+                    tuple(data.values()),
+                )
+                trail_id = cur.lastrowid
+                if rules:
+                    conn.executemany(
+                        "INSERT INTO position_trail_rules (trail_id, rule, basis, enabled,"
+                        " evaluated, observed, threshold, fired, detail)"
+                        " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                        [(trail_id, r["rule"], r.get("basis"),
+                          1 if r.get("enabled") else 0,
+                          1 if r.get("evaluated") else 0,
+                          None if r.get("observed") is None else float(r["observed"]),
+                          None if r.get("threshold") is None else float(r["threshold"]),
+                          None if r.get("fired") is None else (1 if r["fired"] else 0),
+                          r.get("detail"))
+                         for r in rules],
+                    )
+                conn.commit()
+                return trail_id
+            finally:
+                conn.close()
+    except Exception as e:
+        logging.error(f"position trail logging failed: {e}", exc_info=True)
+        return None
+
+
+def purge_old_position_trail(keep_days=90):
+    """Delete position-trail rows older than keep_days.
+
+    Retention is "life of the position plus keep_days": a row is only eligible
+    once it is older than the cutoff, and a row for a position still open is by
+    construction younger than the cutoff long before it could be dropped —
+    positions here resolve within 72 hours. The floor is enforced by the caller
+    (POSITION_TRAIL_RETENTION_DAYS, minimum 90) rather than here, so a wrong
+    value fails loudly at config load instead of silently shortening history.
+
+    Volume is small by design: one row per open position per 5 minutes, so four
+    concurrent positions held for a full day is ~1,150 rows.
+    """
+    cutoff = _iso_cutoff(keep_days)
+    execute_query(
+        "DELETE FROM position_trail_rules WHERE trail_id IN "
+        "(SELECT id FROM position_trail WHERE timestamp < ?)",
+        (cutoff,),
+    )
+    execute_query("DELETE FROM position_trail WHERE timestamp < ?", (cutoff,))
+
+
+def get_position_trail(position_id=None, market_id=None, since=None, limit=None):
+    """Reconstruct the bid/ask/mid path for a position, oldest first.
+
+    Ordered by timestamp rather than id so a path stays correct if rows ever
+    arrive out of insertion order (two monitor threads, a resumed process)."""
+    sql = ["SELECT * FROM position_trail WHERE 1=1"]
+    params = []
+    if position_id is not None:
+        sql.append("AND position_id = ?"); params.append(position_id)
+    if market_id is not None:
+        sql.append("AND market_id = ?"); params.append(market_id)
+    if since is not None:
+        sql.append("AND timestamp >= ?"); params.append(since)
+    sql.append("ORDER BY timestamp, id")
+    if limit:
+        sql.append("LIMIT ?"); params.append(limit)
+    return fetch_query(" ".join(sql), tuple(params))
+
+
+def get_position_trail_rules(trail_ids):
+    """Per-rule evaluations for a set of trail rows, as {trail_id: [rows]}."""
+    ids = list(trail_ids)
+    if not ids:
+        return {}
+    marks = ",".join("?" * len(ids))
+    out = {}
+    for r in fetch_query(
+        f"SELECT * FROM position_trail_rules WHERE trail_id IN ({marks}) ORDER BY id",
+        tuple(ids),
+    ):
+        out.setdefault(r["trail_id"], []).append(r)
+    return out
 
 
 def log_replay_signal(row, gates):

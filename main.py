@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from db import (
     init_db, fetch_query, get_portfolio_state, get_daily_pnl, execute_query,
     purge_old_signals, purge_old_scan_log, purge_old_notifications, vacuum_db,
-    current_mode,
+    purge_old_position_trail, current_mode,
 )
 from scanner import scan_markets, verify_parser_fixtures, prefetch_order_books
 from strategy import evaluate_opportunity
@@ -255,7 +255,8 @@ def _daily_purge():
     try:
         from config import (NOTIFICATION_RETENTION_DAYS, SIGNAL_RETENTION_DAYS,
                             SCAN_LOG_RETENTION_DAYS, SKIP_SIGNAL_RETENTION_DAYS,
-                            SKIP_SIGNAL_SAMPLE_PCT, SKIP_SIGNAL_NEAR_MISS_EDGE)
+                            SKIP_SIGNAL_SAMPLE_PCT, SKIP_SIGNAL_NEAR_MISS_EDGE,
+                            POSITION_TRAIL_RETENTION_DAYS)
         # Pass the configured retentions — the no-arg calls silently ignored the
         # SIGNAL_RETENTION_DAYS / SCAN_LOG_RETENTION_DAYS env overrides.
         purge_old_signals(SIGNAL_RETENTION_DAYS, SKIP_SIGNAL_RETENTION_DAYS,
@@ -263,6 +264,7 @@ def _daily_purge():
                           near_miss_edge=SKIP_SIGNAL_NEAR_MISS_EDGE)
         purge_old_scan_log(SCAN_LOG_RETENTION_DAYS)
         purge_old_notifications(NOTIFICATION_RETENTION_DAYS)
+        purge_old_position_trail(POSITION_TRAIL_RETENTION_DAYS)
         # DELETE alone never shrinks the file — sqlite just marks pages free, so
         # the DB only ratchets upward (it filled the 1GB volume once already).
         # VACUUM after the purge returns the space to the filesystem.

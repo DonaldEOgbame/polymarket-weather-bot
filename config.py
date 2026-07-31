@@ -204,7 +204,58 @@ YES_MARGIN_WIDTH_FRACTION = float(os.getenv("YES_MARGIN_WIDTH_FRACTION", "0.6"))
 # Narrow-bucket guard: buckets ≤ this width (°F) require higher edge to enter.
 # Exact and 1°F-range buckets are structurally disadvantaged vs above/below markets.
 NARROW_BUCKET_WIDTH_F = float(os.getenv("NARROW_BUCKET_WIDTH_F", "2.0"))
-NARROW_BUCKET_EDGE_THRESHOLD = float(os.getenv("NARROW_BUCKET_EDGE_THRESHOLD", "0.20"))
+
+# LOWERED 0.20 -> 0.12 BY OWNER DECISION, 2026-07-31. This is a choice, not a fit:
+# nothing in the data identifies 0.12 as optimal, and the section below is written
+# so a later reader can tell this apart from a calibration constant.
+#
+# Rationale: more trade flow, so evidence accumulates faster. The bot has 27
+# settled trades after four weeks; at 0.20 the recalibrated sigma admits 6 of
+# them. That is not a sample anything can be decided from.
+#
+# Supporting evidence, and what it is worth. Replaying the 27 settled trades
+# through the current pipeline (harness: reconcile.py, session scratchpad
+# 2026-07-31):
+#
+#     threshold   survivors   settled P&L   win rate
+#       0.20          6         +$6.70       100.0%
+#       0.15         10         +$7.58        90.0%
+#       0.12         12         +$9.56        91.7%
+#       0.10         12         +$9.56        91.7%
+#       0.08         12         +$9.56        91.7%
+#
+# On live trades only: 9 of 20 survive at 0.12 against 3 of 20 at 0.20, adding
+# 5 wins and 1 loss (London, Taipei, Hong Kong x2, Shenzhen; Houston #68 -$2.00)
+# for +$2.85. LIMIT: this sample was SELECTED BY THE OLD GATES — every row in it
+# is a trade that was actually placed. It is in-sample for both thresholds and it
+# cannot credit either one for markets that neither configuration ever saw. The
+# +$2.86 figure quoted in the change request is +$2.85 on re-run; the difference
+# is rounding of the per-trade settled values, not a different result.
+#
+# The curve is FLAT BELOW 0.12: 0.08, 0.10 and 0.12 select the identical 12
+# trades. EDGE_THRESHOLD is 0.08, so choosing 0.12 is much closer to abolishing
+# the separate narrow-bucket regime than to tuning it. Read it that way.
+#
+# THE COUNTER-ARGUMENT, ON RECORD: adverse selection. The gated-slice analysis
+# behind PROB_CALIBRATION_INTERCEPT/SLOPE (below) found the market carrying real
+# information precisely where the model disagrees enough to trade, and found
+# LARGER disagreements more accurate than smaller ones. A lower threshold trades
+# smaller disagreements — the less accurate end. That argues for 0.20, and unlike
+# the table above it was measured on live data. This decision overrides it
+# knowingly, on the grounds that 6 trades cannot settle the question either way.
+#
+# COUPLING WARNING — NARROW_BUCKET_STD_INFLATION (1.4x, below) and this threshold
+# correct the SAME defect, and either lever alone reaches the same place:
+#
+#     inflation 1.4 + thr 0.12  ->  12 survivors, +$9.56   <- deployed
+#     inflation 1.0 + thr 0.20  ->   9 survivors, +$9.58
+#     inflation 1.0 + thr 0.12  ->  12 survivors, +$9.56   <- adds nothing
+#
+# Do NOT now also remove the inflation. It would be the third correction of one
+# defect, it buys nothing on this sample, and PROB_CALIBRATION_INTERCEPT/SLOPE
+# were fitted on probabilities that had already been through the inflation step
+# (see the COUPLING note on those constants) — dropping it silently invalidates them.
+NARROW_BUCKET_EDGE_THRESHOLD = float(os.getenv("NARROW_BUCKET_EDGE_THRESHOLD", "0.12"))
 
 # Std inflation multiplier applied to narrow buckets (≤ NARROW_BUCKET_WIDTH_F).
 # Makes the probability estimate more conservative on thin windows.
@@ -875,6 +926,18 @@ _nm = os.getenv("SKIP_SIGNAL_NEAR_MISS_EDGE", "").strip()
 SKIP_SIGNAL_NEAR_MISS_EDGE = float(_nm) if _nm else EDGE_THRESHOLD
 SCAN_LOG_RETENTION_DAYS = int(os.getenv("SCAN_LOG_RETENTION_DAYS", "14"))
 NOTIFICATION_RETENTION_DAYS = int(os.getenv("NOTIFICATION_RETENTION_DAYS", "30"))
+# Monitor-cycle position trail: life of the position plus 90 days MINIMUM.
+#
+# The floor is enforced, not advisory — max()'d rather than range-checked,
+# because the failure this table exists to fix was caused by deletion. The
+# skip-signal purge shortened a calibration sample to save disk and left every
+# constant in this file fitted on a sample too small to support it; the same
+# reflex applied here would re-blind the exact window the stop-loss question
+# needs. There is no disk argument to weigh against it: one row per open
+# position per 5 minutes is ~1,150 rows for four positions held a full day,
+# against ~2,100 signal rows PER DAY.
+POSITION_TRAIL_RETENTION_DAYS = max(
+    90, int(os.getenv("POSITION_TRAIL_RETENTION_DAYS", "90")))
 
 # --- External APIs ---
 OPEN_METEO_URL = "https://api.open-meteo.com/v1/forecast"
@@ -1021,6 +1084,16 @@ def validate_env_ranges():
                 f"(Spearman +0.105, n=27); a steep ramp is the old NWS-skill-decay "
                 f"shape and should not be restored without a re-fit."
             )
+
+    if NARROW_BUCKET_EDGE_THRESHOLD < EDGE_THRESHOLD:
+        problems.append(
+            f"NARROW_BUCKET_EDGE_THRESHOLD={NARROW_BUCKET_EDGE_THRESHOLD} is BELOW "
+            f"EDGE_THRESHOLD={EDGE_THRESHOLD}. The narrow-bucket gate exists to be "
+            f"STRICTER than the general one — inverting it makes thin, structurally "
+            f"disadvantaged buckets the easiest markets to enter, which is the "
+            f"opposite of the guard's purpose. Lowering it to equality effectively "
+            f"abolishes the separate regime; going below it is almost certainly a typo."
+        )
 
     if not 0.5 < MAX_ENTRY_PRICE <= 0.95:
         problems.append(

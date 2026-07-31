@@ -85,10 +85,26 @@ def get_cached_depth(token_id: str):
             return cached["ask_depth"], cached["bid_depth"]
     return None
 
-def set_cached_price(token_id: str, ask: float, bid: float, reachable: bool, ask_depth: float = None, bid_depth: float = None):
+def get_cached_top_size(token_id: str):
+    """Retrieve cached (ask_top_size, bid_top_size) — shares resting AT the best
+    price on each side — if not expired (TTL=30s). Returns None if not cached.
+
+    Distinct from get_cached_depth: total depth answers "could this size fill at
+    all", top-of-book answers "is the quoted best price real or one lot deep".
+    The position trail needs the second to tell a genuine mid-price move from a
+    single stale order defining the whole spread."""
+    now = time.time()
+    with _PRICE_CACHE_LOCK:
+        cached = _PRICE_CACHE.get(token_id)
+        if cached and (now - cached["timestamp"] < 30) and "ask_top_size" in cached:
+            return cached["ask_top_size"], cached["bid_top_size"]
+    return None
+
+def set_cached_price(token_id: str, ask: float, bid: float, reachable: bool, ask_depth: float = None, bid_depth: float = None, ask_top_size: float = None, bid_top_size: float = None):
     """Update cache with latest price details. ask_depth/bid_depth (total $ resting
-    on each side) are optional — only set when the caller already parsed the full
-    book, so the common price-only path doesn't pay for data it won't use."""
+    on each side) and ask_top_size/bid_top_size (shares at the best price) are
+    optional — only set when the caller already parsed the full book, so the
+    common price-only path doesn't pay for data it won't use."""
     with _PRICE_CACHE_LOCK:
         entry = {
             "ask": ask,
@@ -99,6 +115,9 @@ def set_cached_price(token_id: str, ask: float, bid: float, reachable: bool, ask
         if ask_depth is not None:
             entry["ask_depth"] = ask_depth
             entry["bid_depth"] = bid_depth
+        if ask_top_size is not None:
+            entry["ask_top_size"] = ask_top_size
+            entry["bid_top_size"] = bid_top_size
         _PRICE_CACHE[token_id] = entry
 
 def ensure_utc(dt: datetime) -> datetime:

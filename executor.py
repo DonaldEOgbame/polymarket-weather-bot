@@ -8,10 +8,12 @@ from py_clob_client_v2.clob_types import (
 )
 from db import (execute_query, fetch_query, get_open_position, close_position_atomic,
                 open_position_atomic, reduce_position_atomic, get_position_by_id,
-                update_bankroll, get_current_bankroll, add_notification, current_mode)
+                update_bankroll, get_current_bankroll, add_notification, current_mode,
+                log_position_trail)
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
-from scanner import (get_realtime_price, get_market_resolution, get_gamma_mid_price,
-                     get_orderbook_depth_usd, get_wallet_token_sizes, get_wallet_sells)
+from scanner import (get_realtime_price, get_realtime_price_status, get_market_resolution,
+                     get_gamma_mid_price, get_orderbook_depth_usd, get_orderbook_top_size,
+                     get_wallet_token_sizes, get_wallet_sells)
 from zoneinfo import ZoneInfo
 from utils import parse_utc_datetime
 from weather import get_signal_engine, get_bucket_probability, _norm_cdf
@@ -65,6 +67,253 @@ def get_wallet_collateral(client=None):
     except Exception as e:
         logging.warning(f"Wallet collateral read failed: {type(e).__name__}: {e}")
         return None
+
+
+class PositionObservation:
+    """One monitor-cycle snapshot of one open position, and the row it persists.
+
+    Built ONCE per position per cycle, BEFORE the exit check runs. That ordering
+    is the whole design: constructing it reads the order book, which populates
+    the 30-second price cache, so every get_realtime_price() call inside the exit
+    path this cycle returns the identical numbers that get stored. The trail is
+    therefore a record of what the bot saw, not a re-derivation of it — a
+    re-derivation would drift the moment either side changed.
+
+    Rules are recorded two ways, and the distinction is deliberate:
+      * `fired`     — did the condition HOLD, given these prices. Computed here
+                      for the cheap rules whether or not the exit path reached
+                      them, because "would a 40% stop have fired on this cycle"
+                      must be answerable for every cycle, including the ones
+                      where an earlier rule exited first or an early return
+                      skipped the check.
+      * `evaluated` — did the live exit path actually TEST this rule this cycle.
+    Reading `fired` as "the bot acted" would be wrong; that is `exit_rule_fired`
+    on the parent row.
+
+    stop_loss is recorded TWICE, on mid and on bid. That is the unresolved
+    question this table was built for: the three live positions that "slid to
+    zero over hours" were observed on bid, and on a book where entry allows up
+    to 15% spread, a bid-based drawdown can trip without the market repricing at
+    all — the same pathology documented in the SUSTAINED_LOSS_MIN_DROP comment.
+    Storing one derived number would decide the question by accident.
+    """
+
+    def __init__(self, pos, now, executor=None):
+        self.pos = pos
+        self.now = now
+        self.executor = executor
+        self.rules = []
+        self.exit_rule_fired = None
+
+        token_id = pos.get("token_id")
+        ask, bid, reachable = (0.0, 0.0, False)
+        if token_id:
+            try:
+                ask, bid, reachable = get_realtime_price_status(token_id)
+            except Exception as e:
+                logging.warning(f"position trail: book read failed for {token_id}: {e}")
+
+        self.best_ask = ask if ask > 0 else None
+        self.best_bid = bid if bid > 0 else None
+        if ask > 0 and bid > 0:
+            self.mid = (ask + bid) / 2.0
+            self.price_source = "clob"
+        elif ask > 0 or bid > 0:
+            self.mid = ask or bid
+            self.price_source = "clob_one_sided"
+        else:
+            self.mid = None
+            self.price_source = "unreadable"
+
+        # Same Gamma fallback the exit path uses, recorded as such. A Gamma
+        # price is a last-known mark with no book behind it; conflating it with
+        # a real quote is how the phantom-$0.999 exits were booked.
+        if self.mid is None:
+            try:
+                gamma = get_gamma_mid_price(pos.get("market_id"), pos.get("side"))
+            except Exception:
+                gamma = None
+            if gamma and gamma > 0:
+                self.mid = gamma
+                self.price_source = "gamma_fallback"
+
+        self.spread_fraction = None
+        if self.best_ask and self.best_bid and self.mid:
+            self.spread_fraction = (self.best_ask - self.best_bid) / self.mid
+
+        self.ask_depth_usd, self.bid_depth_usd = (None, None)
+        self.ask_top_size, self.bid_top_size = (None, None)
+        if token_id and reachable:
+            # Both come out of the cache the read above just populated — no
+            # second network round trip.
+            try:
+                self.ask_depth_usd, self.bid_depth_usd = get_orderbook_depth_usd(token_id)
+                self.ask_top_size, self.bid_top_size = get_orderbook_top_size(token_id)
+            except Exception:
+                pass
+
+        self.entry_price = pos.get("entry_price") or 0.0
+        self.stake = pos.get("size_usdc") or 0.0
+        self.shares = pos.get("shares") or (
+            self.stake / self.entry_price if self.entry_price > 0 else 0.0)
+
+        # Denormalised so drawdown is computable from one row, no join. Both are
+        # gross of the exit fee: a fee-net figure would bake TAKER_FEE_RATE into
+        # stored history and silently rewrite it if that constant is ever re-fit.
+        self.pnl_mid, self.pnl_frac_mid = self._pnl(self.mid)
+        self.pnl_bid, self.pnl_frac_bid = self._pnl(self.best_bid)
+
+        self.hold_minutes = None
+        try:
+            entry_time = datetime.fromisoformat(pos["entry_time"])
+            self.hold_minutes = (now - entry_time).total_seconds() / 60.0
+        except Exception:
+            pass
+
+        self.hours_to_resolution = None
+        try:
+            target_dt = parse_utc_datetime(pos["target_date"] + "T23:59:00+00:00")
+            self.hours_to_resolution = (target_dt - now).total_seconds() / 3600.0
+        except Exception:
+            pass
+
+        self.trade_id = None
+        try:
+            rows = fetch_query(
+                "SELECT id FROM trades WHERE market_id=? AND side=? AND status='OPEN' "
+                "AND mode=? ORDER BY id DESC LIMIT 1",
+                (pos.get("market_id"), pos.get("side"), current_mode()))
+            if rows:
+                self.trade_id = rows[0]["id"]
+        except Exception:
+            pass
+
+    def _pnl(self, price):
+        """Unrealised P&L at `price`, in dollars and as a fraction of stake.
+
+        The fraction is pnl/stake, which for a $0-$1 instrument is identically
+        (price - entry)/entry — the same number the stop-loss compares against."""
+        if price is None or self.entry_price <= 0:
+            return None, None
+        dollars = (price - self.entry_price) * self.shares
+        return dollars, (price - self.entry_price) / self.entry_price
+
+    def record_rule(self, rule, fired, observed=None, threshold=None, basis=None,
+                    enabled=True, evaluated=True, detail=None):
+        """Note that the live exit path tested `rule` this cycle.
+
+        Upsert, not append: take_profit is tested twice per cycle — once on the
+        fast path ahead of the 30-minute hold, once in the main block against
+        exit_fill — and two rows for one (rule, basis) would silently double any
+        `SELECT ... WHERE rule=?` count. Last write wins because the later test
+        is the more complete one; the earlier record survives only when the path
+        returned before reaching the second."""
+        self.rules = [r for r in self.rules
+                      if not (r["rule"] == rule and r["basis"] == basis)]
+        self.rules.append({
+            "rule": rule, "basis": basis, "enabled": enabled,
+            "evaluated": evaluated, "observed": observed, "threshold": threshold,
+            "fired": fired, "detail": detail,
+        })
+
+    def _fill_unevaluated_rules(self):
+        """Compute every rule the exit path did NOT reach this cycle.
+
+        Without this the trail would go quiet in exactly the circumstances that
+        matter — the pre-30-minute window, the post-target-date hold, an
+        unreadable book — which is the same shape of blindness the table exists
+        to end. The cheap rules are recomputed from these prices; thesis_break
+        is not, because it needs a fresh ensemble run, so it is recorded as
+        unevaluated with the reason rather than guessed at.
+        """
+        seen = {(r["rule"], r["basis"]) for r in self.rules}
+
+        sl_pct = setting("STOP_LOSS_PCT")
+        sl_on = setting("ENABLE_STOP_LOSS")
+        for basis, frac in (("mid", self.pnl_frac_mid), ("bid", self.pnl_frac_bid)):
+            if ("stop_loss", basis) in seen:
+                continue
+            self.record_rule(
+                "stop_loss", basis=basis, enabled=sl_on, evaluated=False,
+                observed=frac, threshold=-sl_pct,
+                fired=None if frac is None else frac <= -sl_pct,
+                detail="not reached by the exit path this cycle" if frac is not None
+                       else "no price on this basis")
+
+        if ("take_profit", "bid") not in seen:
+            tp = setting("TAKE_PROFIT_PRICE")
+            self.record_rule(
+                "take_profit", basis="bid", enabled=True, evaluated=False,
+                observed=self.best_bid, threshold=tp,
+                fired=None if self.best_bid is None else self.best_bid >= tp,
+                detail="not reached by the exit path this cycle")
+
+        if ("sustained_loss", "mid") not in seen:
+            streak = 0
+            if self.executor is not None:
+                key = self.pos.get("id", self.pos.get("market_id"))
+                streak = getattr(self.executor, "_loss_streak", {}).get(key, 0)
+            self.record_rule(
+                "sustained_loss", basis="mid", enabled=ENABLE_SUSTAINED_LOSS_GUARD,
+                evaluated=False, observed=streak, threshold=SUSTAINED_LOSS_POLLS,
+                fired=None,
+                detail=f"streak not advanced this cycle; min_drop={SUSTAINED_LOSS_MIN_DROP}")
+
+        if ("thesis_break", None) not in seen:
+            self.record_rule(
+                "thesis_break", basis=None, enabled=ENABLE_THESIS_BREAK_EXIT,
+                evaluated=False, observed=None, threshold=EXIT_EDGE_FLOOR, fired=None,
+                detail="requires a live ensemble re-run; not performed this cycle")
+
+    def persist(self):
+        """Write the row. Never raises — logging must not affect trading."""
+        try:
+            self._fill_unevaluated_rules()
+            return log_position_trail({
+                "timestamp": self.now.isoformat(),
+                "mode": current_mode(),
+                "position_id": self.pos.get("id"),
+                "trade_id": self.trade_id,
+                "market_id": self.pos.get("market_id"),
+                "token_id": self.pos.get("token_id"),
+                "city": self.pos.get("city"),
+                "target_date": self.pos.get("target_date"),
+                "side": self.pos.get("side"),
+                "best_bid": self.best_bid,
+                "best_ask": self.best_ask,
+                "mid": self.mid,
+                "spread_fraction": self.spread_fraction,
+                "bid_top_size": self.bid_top_size,
+                "ask_top_size": self.ask_top_size,
+                "bid_depth_usd": self.bid_depth_usd,
+                "ask_depth_usd": self.ask_depth_usd,
+                "price_source": self.price_source,
+                "entry_price": self.entry_price,
+                "stake_usdc": self.stake,
+                "shares": self.shares,
+                "unrealized_pnl_mid": self.pnl_mid,
+                "unrealized_pnl_frac_mid": self.pnl_frac_mid,
+                "unrealized_pnl_bid": self.pnl_bid,
+                "unrealized_pnl_frac_bid": self.pnl_frac_bid,
+                "hours_to_resolution": self.hours_to_resolution,
+                "hold_minutes": self.hold_minutes,
+                "exit_fired": 1 if self.exit_rule_fired else 0,
+                "exit_rule_fired": self.exit_rule_fired,
+            }, self.rules)
+        except Exception as e:
+            logging.error(f"position trail persist failed: {e}", exc_info=True)
+            return None
+
+
+class _UnloggedObservation:
+    """Stand-in for callers of _check_exit_for_position outside the monitor loop
+    (tests, ad-hoc scripts). Accepts rule records and drops them: persistence
+    belongs to check_exits, which is the only path that observes the book first
+    and so the only one whose row would mean anything."""
+    exit_rule_fired = None
+
+    def record_rule(self, *args, **kwargs):
+        pass
 
 
 class Executor:
@@ -873,7 +1122,17 @@ class Executor:
             try:
                 if not get_position_by_id(pos["id"]):
                     continue  # closed while we waited for the lock
-                self._check_exit_for_position(pos)
+                # Observe BEFORE deciding, persist in `finally`. Both halves are
+                # load-bearing: building the observation first warms the price
+                # cache so the exit path below sees the same book this row
+                # records, and the finally means a cycle that exits, throws, or
+                # returns early still leaves a row. A trail with holes at the
+                # interesting moments is the failure this replaces.
+                obs = PositionObservation(pos, datetime.now(timezone.utc), executor=self)
+                try:
+                    self._check_exit_for_position(pos, obs)
+                finally:
+                    obs.persist()
             finally:
                 lock.release()
 
@@ -952,7 +1211,8 @@ class Executor:
             return False
         return target_date < now.strftime("%Y-%m-%d")
 
-    def _check_exit_for_position(self, pos):
+    def _check_exit_for_position(self, pos, obs=None):
+        obs = obs if obs is not None else _UnloggedObservation()
         entry_time = datetime.fromisoformat(pos["entry_time"])
         now = datetime.now(timezone.utc)
         hold_minutes = (now - entry_time).total_seconds() / 60.0
@@ -965,7 +1225,11 @@ class Executor:
         # holding to $1, so securing it immediately is the intended behaviour.
         tp_ask, tp_bid = get_realtime_price(pos["token_id"])
         take_profit = setting("TAKE_PROFIT_PRICE")
+        obs.record_rule("take_profit", basis="bid", observed=tp_bid,
+                        threshold=take_profit, fired=tp_bid >= take_profit,
+                        detail="fast path, ahead of the 30-minute hold")
         if tp_bid >= take_profit:
+            obs.exit_rule_fired = "take_profit"
             self._close_position(
                 pos, pnl_dollars=None,
                 exit_reason=f"Take Profit (bid {tp_bid:.3f} >= {take_profit:.2f})",
@@ -996,10 +1260,20 @@ class Executor:
             if setting("ENABLE_STOP_LOSS"):
                 sl_ask, sl_bid = get_realtime_price(pos["token_id"])
                 entry = pos["entry_price"]
+                # Deliberately bid-based, and the ONLY bid-based stop in the
+                # bot: this path exists to sweep a real fillable bid off a
+                # position already heading to $0, so the number that matters is
+                # what a seller would actually receive, not the mid.
+                sl_frac = ((sl_bid - entry) / entry) if (sl_bid > 0 and entry > 0) else None
+                obs.record_rule("stop_loss", basis="bid", observed=sl_frac,
+                                threshold=-setting("STOP_LOSS_PCT"),
+                                fired=sl_frac is not None and sl_frac <= -setting("STOP_LOSS_PCT"),
+                                detail="post-target-date salvage; needs confirmed bid depth")
                 if sl_bid > 0 and entry > 0 and (sl_bid - entry) / entry <= -setting("STOP_LOSS_PCT"):
                     _, bid_depth = get_orderbook_depth_usd(pos["token_id"])
                     shares_held = pos["size_usdc"] / entry
                     if bid_depth is not None and bid_depth >= shares_held * sl_bid:
+                        obs.exit_rule_fired = "stop_loss_post_date_salvage"
                         self._close_position(
                             pos, pnl_dollars=None,
                             exit_reason=(
@@ -1074,14 +1348,50 @@ class Executor:
         else:
             self._loss_streak.pop(pos_key, None)
         streak = self._loss_streak.get(pos_key, 0)
+
+        # Record all three cheap rules before acting on any of them. Recording
+        # only the one that fired would answer "why did it exit" and nothing
+        # else; the question the trail exists for — would a DIFFERENT threshold
+        # have fired here — needs the observed value on every cycle, including
+        # the cycles where nothing happened.
+        stop_pct = setting("STOP_LOSS_PCT")
+        stop_on = setting("ENABLE_STOP_LOSS")
+        obs.record_rule("sustained_loss", basis="mid", observed=streak,
+                        threshold=SUSTAINED_LOSS_POLLS,
+                        enabled=ENABLE_SUSTAINED_LOSS_GUARD,
+                        fired=ENABLE_SUSTAINED_LOSS_GUARD and streak >= SUSTAINED_LOSS_POLLS,
+                        detail=(f"drawdown {pnl_pct:.4f} vs min_drop "
+                                f"{-SUSTAINED_LOSS_MIN_DROP:.4f}"))
+        # The deployed stop measures on MID (current_price), not bid. Both are
+        # stored so the choice can be re-examined against real data rather than
+        # re-argued: on a book allowing 15% spread the two disagree materially.
+        obs.record_rule("stop_loss", basis="mid", observed=pnl_pct,
+                        threshold=-stop_pct, enabled=stop_on,
+                        fired=pnl_pct <= -stop_pct,
+                        detail=("deployed basis" + (" (Gamma fallback price)"
+                                                    if used_gamma_fallback else "")))
+        bid_frac = ((bid_price - entry_price) / entry_price
+                    if bid_price > 0 and entry_price > 0 else None)
+        obs.record_rule("stop_loss", basis="bid", observed=bid_frac,
+                        threshold=-stop_pct, enabled=stop_on,
+                        fired=None if bid_frac is None else bid_frac <= -stop_pct,
+                        detail="counterfactual — the deployed stop fires on mid")
+        obs.record_rule("take_profit", basis="bid", observed=exit_fill,
+                        threshold=setting("TAKE_PROFIT_PRICE"),
+                        fired=bid_price > 0 and exit_fill >= setting("TAKE_PROFIT_PRICE"),
+                        detail="requires a real bid; Gamma fallback cannot fire this")
+
         if ENABLE_SUSTAINED_LOSS_GUARD and streak >= SUSTAINED_LOSS_POLLS:
+            obs.exit_rule_fired = "sustained_loss"
             exit_reason = (
                 f"Sustained loss ({streak} polls below entry, "
                 f"mid=${current_price:.3f} vs entry=${entry_price:.3f}, pnl={pnl_pct:.1%})"
             )
         elif setting("ENABLE_STOP_LOSS") and pnl_pct <= -setting("STOP_LOSS_PCT"):
+            obs.exit_rule_fired = "stop_loss"
             exit_reason = f"Stop Loss ({pnl_pct:.1%})"
         elif bid_price > 0 and exit_fill >= setting("TAKE_PROFIT_PRICE"):
+            obs.exit_rule_fired = "take_profit"
             # bid_price > 0 guard: on the Gamma fallback exit_fill is a stale
             # estimate with NO real book behind it — firing take-profit there books
             # a paper fill nobody would pay (the phantom-$0.999 failure class).
@@ -1166,6 +1476,18 @@ class Executor:
                 target_date_str = signals[0]["target_date"]
                 adaptive_floor = self._adaptive_exit_floor(target_date_str, now)
 
+                # Recorded here and nowhere else: this is the only point in the
+                # cycle where a fresh ensemble has actually been run, so it is
+                # the only point where the observed edge is a real number rather
+                # than a guess. Cycles that never get here store the rule as
+                # unevaluated instead of inventing a value.
+                obs.record_rule(
+                    "thesis_break", observed=current_edge, threshold=adaptive_floor,
+                    enabled=ENABLE_THESIS_BREAK_EXIT,
+                    fired=current_edge < adaptive_floor,
+                    detail=(f"model_prob {latest_prob:.4f}, mid {current_price:.4f}, "
+                            f"floor {'raised (late-market)' if adaptive_floor > EXIT_EDGE_FLOOR else 'base'}"))
+
                 if ENABLE_THESIS_BREAK_EXIT and current_edge < adaptive_floor:
                     # Edge fell below the floor — but WHY? Two opposite causes, only one
                     # worth selling on:
@@ -1179,6 +1501,7 @@ class Executor:
                     # eventual winners (intraday forecast swings) for every 1 real loss cut.
                     thesis_broken = self._thesis_broken(pos, latest_prob, current_price, entry_price)
                     if thesis_broken or not HOLD_WINNERS_TO_RESOLUTION:
+                        obs.exit_rule_fired = "thesis_break"
                         exit_reason = (
                             f"Edge decayed ({current_edge:.3f} < {adaptive_floor:.3f}"
                             + (" [late-market]" if adaptive_floor > EXIT_EDGE_FLOOR else "")
