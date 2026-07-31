@@ -568,6 +568,56 @@ class Executor:
             logging.error(f"settle_closed_trade failed for {market_id}: {e}", exc_info=True)
             return False
 
+    def settle_unscored_trades(self, limit=200):
+        """Backfill resolutions for any closed trade that has no resolution row,
+        independent of trades.resolution_logged.
+
+        check_resolutions() cannot do this on its own because resolution_logged
+        is a single flag serving two jobs — "model accuracy recorded" and "done
+        with this trade". It gets set as soon as the accuracy write succeeds (or
+        when raw_models/coords are missing), and from then on the trade is never
+        revisited. Anything that made settle_closed_trade return False on that
+        one pass is therefore permanent: a missing markets row, or simply having
+        closed before settle_closed_trade existed. That is why 16 of 32
+        take-profit trades in the 2026-07-31 export carry no resolution row at
+        all — a bookkeeping gap, not a trading error.
+
+        This roughly doubles the calibration sample without placing a new bet,
+        which matters when every constant in config.py is fitted on 27 trades.
+        Idempotent (settle_closed_trade no-ops when a row exists) and safe to run
+        on every cycle. Returns the number of rows written."""
+        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        try:
+            rows = fetch_query(
+                "SELECT t.id, t.market_id, t.side, t.is_high, t.city, t.target_date, "
+                "       t.model_prob, t.size_usdc, t.fill_price "
+                "FROM trades t "
+                "LEFT JOIN resolutions r "
+                "       ON r.market_id = t.market_id AND r.side = t.side "
+                "WHERE r.market_id IS NULL "
+                "  AND t.target_date IS NOT NULL AND t.target_date <= ? "
+                "  AND t.status != 'open' "
+                "ORDER BY t.target_date DESC LIMIT ?",
+                (today, limit),
+            )
+        except Exception as e:
+            logging.error(f"settle_unscored_trades query failed: {e}", exc_info=True)
+            return 0
+
+        written = 0
+        for t in rows:
+            try:
+                if self.settle_closed_trade(dict(t)):
+                    written += 1
+            except Exception as e:
+                logging.error(f"settle_unscored_trades: {t['market_id']}: {e}")
+        if written:
+            logging.info(
+                f"Backfilled {written} settlement row(s) for previously unscored "
+                f"closed trades ({len(rows)} candidates)"
+            )
+        return written
+
     def get_open_positions_count(self):
         res = fetch_query("SELECT COUNT(*) as count FROM positions WHERE mode=?", (current_mode(),))
         return res[0]["count"] if res else 0

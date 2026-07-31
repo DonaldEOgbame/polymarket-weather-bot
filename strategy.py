@@ -5,12 +5,13 @@ from scanner import get_realtime_price, get_orderbook_depth_usd, PARSER_VERSION
 from db import execute_query
 from datetime import datetime, timezone
 from config import (
-    EDGE_THRESHOLD, MIN_MODEL_AGREEMENT, MAX_MODEL_SPREAD,
+    EDGE_THRESHOLD, MIN_MODEL_AGREEMENT, MAX_MODEL_SPREAD_STD,
     KELLY_CAP, MIN_POSITION_SIZE,
     MAX_POSITION_FRACTION, BASE_POSITION_FRACTION, HARD_MAX_POSITION_SIZE,
-    SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD, SHADOW_MAX_SIZE_USDC,
+    SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD_STD, SHADOW_MAX_SIZE_USDC,
     ENABLE_SHADOW_EXPLORATION, paper_mode,
     NARROW_BUCKET_WIDTH_F, NARROW_BUCKET_EDGE_THRESHOLD, NARROW_BUCKET_STD_INFLATION,
+    MAX_SIGMA_F,
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION,
     TAKER_FEE_RATE, SLIPPAGE_FRACTION, MAX_ENTRY_SPREAD_FRACTION,
     FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION, MAX_ENTRY_PRICE,
@@ -171,7 +172,16 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     if is_narrow:
         import copy
         engine_res = copy.copy(engine_res)
-        engine_res["ensemble_std"] = engine_res["ensemble_std"] * NARROW_BUCKET_STD_INFLATION
+        # Re-clamp to MAX_SIGMA_F AFTER inflating. compute_sigma applies the
+        # ceiling, then this multiplies by 1.4 on top of it, so before 2026-07-31
+        # the sigma actually used to price a bucket could reach MAX_SIGMA_F * 1.4
+        # = 11.2°F — a ceiling the constant's name promises and did not deliver.
+        # Clamping last makes MAX_SIGMA_F mean what it says. It is also the
+        # conservative direction: a smaller sigma makes a narrow bucket look MORE
+        # likely, which lowers the NO edge, so this can only remove trades.
+        engine_res["ensemble_std"] = min(
+            engine_res["ensemble_std"] * NARROW_BUCKET_STD_INFLATION, MAX_SIGMA_F
+        )
         logging.debug(
             f"Narrow-bucket std inflation x{NARROW_BUCKET_STD_INFLATION} "
             f"for {opp.city} (width={bucket_width:.1f}°F)"
@@ -196,6 +206,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     no_edge = ((1.0 - prob) - opp.no_price) - transaction_cost(opp.no_price, no_spread_frac)
 
     agreement = engine_res["model_agreement"]
+    # Weighted stdev since 2026-07-31, not max-min — see MAX_MODEL_SPREAD_STD.
     spread = engine_res["model_spread"]
     model_count = engine_res.get("model_count", MIN_MODEL_COUNT)
 
@@ -218,8 +229,9 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     if signal is None and no_edge >= effective_edge_threshold:
         if agreement < MIN_MODEL_AGREEMENT:
             skip_reason = f"NO edge {no_edge:.3f} but agreement too low ({agreement:.2f} < {MIN_MODEL_AGREEMENT})"
-        elif spread > MAX_MODEL_SPREAD:
-            skip_reason = f"NO edge {no_edge:.3f} but spread too wide ({spread:.1f}°F > {MAX_MODEL_SPREAD}°F)"
+        elif spread > MAX_MODEL_SPREAD_STD:
+            skip_reason = (f"NO edge {no_edge:.3f} but spread too wide "
+                           f"({spread:.2f}°F sd > {MAX_MODEL_SPREAD_STD}°F sd)")
         elif no_spread_frac is None:
             # Fail CLOSED: an unreadable book (empty/one-sided/error) is most
             # likely exactly the thin market this gate exists to block — skipping
@@ -276,24 +288,24 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                 continue
 
             shadow_agr_ok = agreement >= SHADOW_MIN_AGREEMENT
-            shadow_spr_ok = spread < SHADOW_MAX_SPREAD
+            shadow_spr_ok = spread < SHADOW_MAX_SPREAD_STD
             shadow_passes = shadow_agr_ok and shadow_spr_ok
 
             strict_blocks = []
             if agreement < MIN_MODEL_AGREEMENT:
                 strict_blocks.append(f"agr({agreement:.2f}<{MIN_MODEL_AGREEMENT})")
-            if spread > MAX_MODEL_SPREAD:
-                strict_blocks.append(f"spread({spread:.1f}>{MAX_MODEL_SPREAD})")
+            if spread > MAX_MODEL_SPREAD_STD:
+                strict_blocks.append(f"spread_sd({spread:.2f}>{MAX_MODEL_SPREAD_STD})")
 
             shadow_verdict = (
                 "ok" if shadow_passes
                 else (f"agr_fail({agreement:.2f}<{SHADOW_MIN_AGREEMENT})" if not shadow_agr_ok
-                      else f"spread_fail({spread:.1f}>={SHADOW_MAX_SPREAD})")
+                      else f"spread_fail_sd({spread:.2f}>={SHADOW_MAX_SPREAD_STD})")
             )
             logging.info(
                 f"SHADOW_{'PASS' if shadow_passes else 'BLOCK'} | "
                 f"{opp.city} {opp.date} [{s_side}] | "
-                f"edge={s_edge:.3f} agr={agreement:.2f} spread={spread:.1f}°F | "
+                f"edge={s_edge:.3f} agr={agreement:.2f} spread={spread:.2f}°F sd | "
                 f"strict_blocked=[{', '.join(strict_blocks) or 'none'}] | "
                 f"shadow={shadow_verdict}"
             )

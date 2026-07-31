@@ -195,6 +195,79 @@ class TestSettleClosedTrade:
         assert wrote == []
 
 
+class TestSettleUnscoredTrades:
+    """Backfill pass for closed trades with no resolution row.
+
+    check_resolutions() alone cannot do this: trades.resolution_logged serves
+    two jobs — "model accuracy recorded" and "done with this trade" — and is set
+    as soon as the accuracy write succeeds. Anything that made settlement fail on
+    that single pass is therefore permanent, including simply having closed
+    before settle_closed_trade existed. That is why 16 of 32 take-profit trades
+    in the 2026-07-31 export carry no resolution row at all.
+    """
+
+    def _rows(self):
+        return [{"id": 1, "market_id": "0x1", "side": "NO", "is_high": 0,
+                 "city": "Tokyo", "target_date": "2026-07-13",
+                 "model_prob": 0.05, "size_usdc": 2.0, "fill_price": 0.68}]
+
+    def test_settles_trades_the_flag_would_have_skipped(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+        monkeypatch.setattr(ex, "fetch_query", lambda sql, params=(): self._rows())
+        settled = []
+        monkeypatch.setattr(Executor, "settle_closed_trade",
+                            lambda self, t: settled.append(t["market_id"]) or True)
+        assert e.settle_unscored_trades() == 1
+        assert settled == ["0x1"]
+
+    def test_query_ignores_resolution_logged(self, monkeypatch):
+        """The whole point of the backfill — selecting on resolution_logged would
+        reproduce the bug it exists to fix."""
+        import executor as ex
+        e = Executor.__new__(Executor)
+        seen = {}
+        def fq(sql, params=()):
+            seen["sql"] = sql
+            return []
+        monkeypatch.setattr(ex, "fetch_query", fq)
+        e.settle_unscored_trades()
+        assert "resolution_logged" not in seen["sql"]
+        assert "LEFT JOIN resolutions" in seen["sql"]
+        assert "r.market_id IS NULL" in seen["sql"]
+
+    def test_open_positions_are_excluded(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+        seen = {}
+        def fq(sql, params=()):
+            seen["sql"] = sql
+            return []
+        monkeypatch.setattr(ex, "fetch_query", fq)
+        e.settle_unscored_trades()
+        assert "status != 'open'" in seen["sql"]
+
+    def test_one_bad_trade_does_not_abort_the_batch(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+        rows = [dict(self._rows()[0], market_id=f"0x{i}") for i in range(3)]
+        monkeypatch.setattr(ex, "fetch_query", lambda sql, params=(): rows)
+        def flaky(self, t):
+            if t["market_id"] == "0x1":
+                raise RuntimeError("boom")
+            return True
+        monkeypatch.setattr(Executor, "settle_closed_trade", flaky)
+        assert e.settle_unscored_trades() == 2
+
+    def test_query_failure_is_swallowed(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+        def boom(sql, params=()):
+            raise RuntimeError("db gone")
+        monkeypatch.setattr(ex, "fetch_query", boom)
+        assert e.settle_unscored_trades() == 0
+
+
 class TestLiveExitFeeDeduction:
     """Live-mode exits recompute PnL from the actual fill price (not the paper
     mid estimate), but must still subtract the taker fee — omitting it silently

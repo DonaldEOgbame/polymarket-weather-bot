@@ -293,14 +293,24 @@ def main():
     print(f"  mean(z)          : {mz:+.3f}   (≠0 → systematic warm/cold bias)")
     print(f"  std(z)           : {sz:.3f}    (1.0 = perfectly calibrated spread)")
     if n >= 8 and not math.isnan(sz):
+        # The knob is SIGMA_SCALE_HIGH / SIGMA_SCALE_LOW, not BASE_FORECAST_ERROR.
+        # BASE_FORECAST_ERROR is now the intercept of |error| = a + b*spread and
+        # is multiplied by the direction scale downstream, so scaling it alone
+        # moves only the zero-spread end of the curve.
         if sz > 1.15:
-            print(f"  VERDICT: sigma is TOO TIGHT — overconfident. Scale BASE_FORECAST_ERROR")
-            print(f"           by ~{sz:.2f}x. Current 'edges' are partly illusory.")
+            print(f"  VERDICT: sigma is TOO TIGHT — overconfident. Scale")
+            print(f"           SIGMA_SCALE_HIGH / SIGMA_SCALE_LOW by ~{sz:.2f}x.")
+            print(f"           Current 'edges' are partly illusory.")
         elif sz < 0.85:
-            print(f"  VERDICT: sigma is TOO WIDE — timid. You can scale BASE_FORECAST_ERROR")
-            print(f"           by ~{sz:.2f}x to surface more real edge.")
+            print(f"  VERDICT: sigma is TOO WIDE — timid. You can scale")
+            print(f"           SIGMA_SCALE_HIGH / SIGMA_SCALE_LOW by ~{sz:.2f}x")
+            print(f"           to surface more real edge.")
         else:
             print("  VERDICT: sigma is well-calibrated. Trust the probabilities.")
+        print("  NOTE: run this separately for highs and lows. Maxima and minima are")
+        print("        two different problems (std(z) 2.51 vs 0.78 when last measured")
+        print("        together), and a blended std(z) can read ~1.0 while both halves")
+        print("        are badly wrong in opposite directions.")
     else:
         print("  (need >=8 resolved forecasts for a reliable verdict)")
 

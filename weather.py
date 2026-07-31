@@ -6,9 +6,11 @@ import time as _time
 from config import (
     OPEN_METEO_URL, BASE_FORECAST_ERROR,
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION, CONVECTIVE_CITIES,
-    GFS_BIAS_CORRECTIONS, MODEL_BIAS_CORRECTIONS,
+    GFS_BIAS_CORRECTIONS, model_bias_correction,
     ENABLE_PROB_CALIBRATION, PROB_CALIBRATION_INTERCEPT, PROB_CALIBRATION_SLOPE,
     METAR_WARM_CORRECTION_F, MIN_BUCKET_PROB,
+    SIGMA_SPREAD_COEF, SIGMA_SCALE_HIGH, SIGMA_SCALE_LOW, MIN_SIGMA_F, MAX_SIGMA_F,
+    SIGMA_STUDENT_T_DF,
 )
 
 def _pstdev(data):
@@ -20,11 +22,170 @@ def _pstdev(data):
     variance = sum((x - mean) ** 2 for x in data) / n
     return math.sqrt(variance)
 
+
+def _weighted_pstdev(values_by_model, weights):
+    """Weight-aware population standard deviation of the ensemble members.
+
+    The unweighted version let a member carrying 5% of the blend move the spread
+    gate as far as ECMWF carrying 40%. It is also the statistic the sigma
+    coefficient is fitted against, so it must match what config.py was fitted on.
+    Members absent from `weights` contribute nothing, matching how the weighted
+    mean already treats them."""
+    tw = sum(weights.get(m, 0.0) for m in values_by_model)
+    if tw <= 0:
+        return 0.0
+    mean = sum(v * weights.get(m, 0.0) / tw for m, v in values_by_model.items())
+    var = sum(weights.get(m, 0.0) / tw * (v - mean) ** 2 for m, v in values_by_model.items())
+    return math.sqrt(max(var, 0.0))
+
 def _norm_cdf(x, loc=0.0, scale=1.0):
     """Calculate the standard normal CDF (equivalent to norm.cdf(x, loc, scale))."""
     if scale <= 0.0:
         scale = 0.5  # safe clamp to match weather.py's minimum std logic
     return 0.5 * (1.0 + math.erf((x - loc) / (scale * math.sqrt(2.0))))
+
+
+def _betainc(a, b, x):
+    """Regularised incomplete beta I_x(a, b), by the standard continued fraction
+    (Lentz). Only needed for the Student-t CDF below — stdlib has no equivalent
+    and the project deliberately avoids a scipy dependency."""
+    if x <= 0.0:
+        return 0.0
+    if x >= 1.0:
+        return 1.0
+    lbeta = math.lgamma(a) + math.lgamma(b) - math.lgamma(a + b)
+    front = math.exp(a * math.log(x) + b * math.log(1.0 - x) - lbeta) / a
+    fv, c, d = 1.0, 1.0, 0.0
+    for i in range(300):
+        m = i // 2
+        if i == 0:
+            num = 1.0
+        elif i % 2 == 0:
+            num = (m * (b - m) * x) / ((a + 2 * m - 1) * (a + 2 * m))
+        else:
+            num = -((a + m) * (a + b + m) * x) / ((a + 2 * m) * (a + 2 * m + 1))
+        d = 1.0 + num * d
+        d = 1e-30 if abs(d) < 1e-30 else d
+        d = 1.0 / d
+        c = 1.0 + num / c
+        c = 1e-30 if abs(c) < 1e-30 else c
+        fv *= c * d
+        if abs(1.0 - c * d) < 1e-10:
+            break
+    return front * (fv - 1.0)
+
+
+def _student_t_cdf(x, loc=0.0, scale=1.0, df=4.0):
+    """Student-t CDF, VARIANCE-MATCHED to `scale`.
+
+    The t distribution's own variance is df/(df-2) times its scale parameter, so
+    passing sigma straight in as the scale would silently widen the distribution
+    on top of the fatter tails and make the fitted SIGMA_SCALE_* constants mean
+    something different. Dividing first keeps Var = scale**2, so switching this
+    kernel on changes tail SHAPE only — the fitted sigma still means what it
+    meant. Falls back to Gaussian for df <= 2, where the variance is undefined."""
+    if scale <= 0.0:
+        scale = 0.5
+    if df <= 2.0:
+        return _norm_cdf(x, loc, scale)
+    s = scale / math.sqrt(df / (df - 2.0))
+    t = (x - loc) / s
+    ib = _betainc(df / 2.0, 0.5, df / (df + t * t))
+    return 0.5 * ib if t <= 0.0 else 1.0 - 0.5 * ib
+
+
+def _bucket_cdf(x, loc, scale):
+    """The distribution used to price buckets: Student-t when
+    SIGMA_STUDENT_T_DF > 2, Gaussian otherwise."""
+    if SIGMA_STUDENT_T_DF and SIGMA_STUDENT_T_DF > 2.0:
+        return _student_t_cdf(x, loc, scale, SIGMA_STUDENT_T_DF)
+    return _norm_cdf(x, loc, scale)
+
+
+def compute_sigma(spread_std, lead_hours, is_high, city_key=None):
+    """Forecast sigma in °F.
+
+        sigma = k_dir * (base(lead) + SIGMA_SPREAD_COEF * spread_std)
+
+    Replaces sqrt(base**2 + spread_std**2), which buried the spread term: under
+    quadrature a wide ensemble moved sigma by tenths of a degree, where the
+    measured relationship is roughly linear with a slope above 3. See the fit
+    notes on SIGMA_SPREAD_COEF and SIGMA_SCALE_* in config.py.
+
+    `spread_std` must be the WEIGHTED standard deviation of the members, not
+    max-min: the coefficient is fitted against the former precisely because it
+    does not drift as the ensemble grows."""
+    base = _interpolate_base_error(lead_hours)
+    k = SIGMA_SCALE_HIGH if is_high else SIGMA_SCALE_LOW
+    sigma = k * (base + SIGMA_SPREAD_COEF * float(spread_std))
+    if city_key and city_key in CONVECTIVE_CITIES:
+        sigma *= CONVECTIVE_STD_INFLATION
+    # Ceiling guards extrapolation beyond the fitted spread range; by
+    # construction it cannot bind on a market the spread gate would let through.
+    return min(max(sigma, MIN_SIGMA_F), MAX_SIGMA_F)
+
+
+def _build_engine_result(model_temps, region, city_key, lead_hours, is_high):
+    """Assemble the signal-engine dict from a model→temp map.
+
+    Single implementation shared by get_signal_engine (one market) and
+    prefetch_signal_engines (whole scan). These were two copies of the same
+    thirty lines and had already drifted apart in their comments; sigma is now
+    fitted per direction, which is exactly the kind of change that must not be
+    made twice. Returns None when the ensemble is too thin to trade."""
+    if not model_temps or len(model_temps) < MIN_MODEL_COUNT:
+        if model_temps:
+            logging.warning(
+                f"Only {len(model_temps)} model(s) available for {city_key} "
+                f"(is_high={is_high}), need >= {MIN_MODEL_COUNT} — skipping"
+            )
+        return None
+
+    weights = WEIGHTS[region]
+    total_weight = sum(weights[m] for m in model_temps if m in weights)
+    if total_weight == 0:
+        return None
+
+    raw_weighted_mean = sum(
+        temp * (weights[m] / total_weight)
+        for m, temp in model_temps.items() if m in weights
+    )
+    # METAR_WARM_CORRECTION_F is 0 by default since 2026-07-31 — the per-model,
+    # per-direction corrections in fetch_forecasts now carry what this used to
+    # approximate with one global number. Kept as a knob, not a default.
+    weighted_mean = raw_weighted_mean + METAR_WARM_CORRECTION_F
+
+    model_spread_std = float(_weighted_pstdev(model_temps, weights))
+    combined_std = compute_sigma(model_spread_std, lead_hours, is_high, city_key)
+
+    # Agreement is measured against the RAW consensus, not the bias-shifted mean:
+    # no model temp contains METAR_WARM_CORRECTION_F, so comparing to the shifted
+    # mean made the band asymmetric and could fail a perfectly agreeing ensemble.
+    # WEIGHTED so that adding a low-weight regional member cannot swing the gate
+    # as hard as ECMWF — see the n-invariance note on MIN_MODEL_AGREEMENT.
+    agree_w = sum(weights.get(m, 0.0) for m, t in model_temps.items()
+                  if abs(t - raw_weighted_mean) < 2.0)
+    model_agreement = agree_w / total_weight if total_weight else 0.0
+
+    return {
+        "ensemble_mean": weighted_mean,
+        "ensemble_std": combined_std,
+        "model_spread_std": model_spread_std,
+        "base_error": _interpolate_base_error(lead_hours),
+        "model_agreement": model_agreement,
+        "raw_models": model_temps,
+        "raw_weighted_mean": raw_weighted_mean,
+        "city_key": city_key,
+        # Reported as a weighted stdev, NOT max-min. max-min can only grow with
+        # member count, so the old value made MAX_MODEL_SPREAD a de-facto cap on
+        # ensemble SIZE rather than on disagreement.
+        "model_spread": model_spread_std,
+        "model_spread_range": max(model_temps.values()) - min(model_temps.values()),
+        "lead_time_hours": lead_hours,
+        "model_count": len(model_temps),
+        "is_high": bool(is_high),
+        "convective_inflated": city_key in CONVECTIVE_CITIES,
+    }
 
 # Cross-scan in-memory forecast cache: {(city, is_high): (fetch_timestamp, result)}
 # Avoids re-fetching Open-Meteo on every 10-minute scan cycle.
@@ -220,13 +381,21 @@ def fetch_forecasts(city_name, is_high=True, force_refresh=False):
                     val += correction
                     logging.debug(f"GFS bias correction ({correction:+.1f}°F) for {city_key}")
 
-                # Global per-model cold-bias correction (from calibrate.py verification,
-                # not city-specific). MODEL_BIAS_CORRECTIONS values are the model's
-                # measured cold bias magnitude, so adding it shifts the forecast warmer.
-                if model in MODEL_BIAS_CORRECTIONS:
-                    model_correction = MODEL_BIAS_CORRECTIONS[model]
+                # Per-model bias correction, keyed by DIRECTION as well as model.
+                # A model that runs cold on daily maxima generally runs warm on
+                # daily minima — Open-Meteo interpolates coarse-timestep output to
+                # hourly, and smoothing a diurnal curve clips the afternoon peak
+                # and lifts the overnight trough. One signed offset applied to
+                # both directions therefore corrects one of them the wrong way;
+                # for jma_gsm the old flat +1.55 was 3.26°F out on minima. See the
+                # measured table in config.MODEL_BIAS_CORRECTIONS.
+                model_correction = model_bias_correction(model, is_high)
+                if model_correction:
                     val += model_correction
-                    logging.debug(f"Model bias correction ({model_correction:+.1f}°F) for {model}")
+                    logging.debug(
+                        f"Model bias correction ({model_correction:+.2f}°F) for "
+                        f"{model} is_high={is_high}"
+                    )
 
                 model_temps[model] = val
         forecasts_by_date[date_str] = model_temps
@@ -245,71 +414,10 @@ def get_signal_engine(city_name, target_date, is_high=True, hours_to_resolution=
         logging.warning(f"Target date {target_date} not in forecast range")
         return None
         
-    model_temps = forecasts_by_date[target_date]
-    if not model_temps:
-        return None
-    
-    if len(model_temps) < MIN_MODEL_COUNT:
-        logging.warning(
-            f"Only {len(model_temps)} model(s) available for {city_key} on {target_date}, "
-            f"need >= {MIN_MODEL_COUNT} — skipping"
-        )
-        return None
-
-    weights = WEIGHTS[region]
-    total_weight = sum(weights[m] for m in model_temps if m in weights)
-    if total_weight == 0:
-        return None
-
-    raw_weighted_mean = sum(
-        temp * (weights[m] / total_weight)
-        for m, temp in model_temps.items()
-        if m in weights
+    return _build_engine_result(
+        forecasts_by_date[target_date], region, city_key,
+        hours_to_resolution, is_high,
     )
-    # Shift toward the METAR resolution source Polymarket settles on (runs warmer
-    # than Open-Meteo). Applied to the mean only — it moves where the distribution
-    # is centred without touching model spread/agreement.
-    weighted_mean = raw_weighted_mean + METAR_WARM_CORRECTION_F
-
-    model_spread_std = float(_pstdev(list(model_temps.values())))
-
-    base_error = _interpolate_base_error(hours_to_resolution)
-
-    combined_std = math.sqrt(base_error ** 2 + model_spread_std ** 2)
-
-    # Convective city inflation: afternoon storms in tropical/continental cities
-    # introduce temperature swings that NWS-calibrated base errors don't capture.
-    convective_inflated = False
-    if city_key in CONVECTIVE_CITIES:
-        combined_std *= CONVECTIVE_STD_INFLATION
-        convective_inflated = True
-        logging.debug(f"Convective std inflation x{CONVECTIVE_STD_INFLATION} applied for {city_key}")
-
-    # Agreement is measured against the RAW consensus, not the bias-shifted mean:
-    # no model temp contains METAR_WARM_CORRECTION_F, so comparing to the shifted
-    # mean made the band asymmetric (only 2.0-correction °F of warm-side tolerance)
-    # and could fail a perfectly agreeing ensemble.
-    within_threshold = sum(
-        1 for t in model_temps.values()
-        if abs(t - raw_weighted_mean) < 2.0
-    )
-    model_agreement = within_threshold / len(model_temps)
-    model_spread = max(model_temps.values()) - min(model_temps.values())
-
-    return {
-        "ensemble_mean": weighted_mean,
-        "ensemble_std": combined_std,
-        "model_spread_std": model_spread_std,
-        "base_error": base_error,
-        "model_agreement": model_agreement,
-        "raw_models": model_temps,
-        "raw_weighted_mean": raw_weighted_mean,
-        "city_key": city_key,
-        "model_spread": model_spread,
-        "lead_time_hours": hours_to_resolution,
-        "model_count": len(model_temps),
-        "convective_inflated": convective_inflated,
-    }
 
 def _calibrate_prob(p):
     """Platt-scale the raw Gaussian bucket probability onto the empirically observed
@@ -361,7 +469,7 @@ def get_bucket_probability(engine_result, bucket_lower, bucket_upper):
     elif bucket_upper is not None and bucket_lower is None:
         ub += 0.5
 
-    prob = _norm_cdf(ub, loc=mean, scale=std) - _norm_cdf(lb, loc=mean, scale=std)
+    prob = _bucket_cdf(ub, mean, std) - _bucket_cdf(lb, mean, std)
     prob = max(0.0, min(1.0, float(prob)))
 
     # Calibrate ONLY closed (bounded) buckets — exact-degree and narrow ranges. Those
@@ -436,57 +544,10 @@ def prefetch_signal_engines(opportunities) -> dict:
             engine_cache[key] = None
             continue
 
-        model_temps = forecasts_by_date[opp.date]
-        if not model_temps or len(model_temps) < MIN_MODEL_COUNT:
-            if model_temps:
-                logging.warning(
-                    f"Only {len(model_temps)} model(s) available for {city_key} on {opp.date}, "
-                    f"need >= {MIN_MODEL_COUNT} — skipping"
-                )
-            engine_cache[key] = None
-            continue
-
-        weights = WEIGHTS[region]
-        total_weight = sum(weights[m] for m in model_temps if m in weights)
-        if total_weight == 0:
-            engine_cache[key] = None
-            continue
-
-        raw_weighted_mean = sum(
-            temp * (weights[m] / total_weight)
-            for m, temp in model_temps.items() if m in weights
+        engine_cache[key] = _build_engine_result(
+            forecasts_by_date[opp.date], region, city_key,
+            opp.hours_to_resolution, opp.is_high,
         )
-        weighted_mean = raw_weighted_mean + METAR_WARM_CORRECTION_F  # match METAR resolution source (see get_signal_engine)
-        model_spread_std = float(_pstdev(list(model_temps.values())))
-
-        base_error = _interpolate_base_error(opp.hours_to_resolution)
-
-        combined_std = math.sqrt(base_error ** 2 + model_spread_std ** 2)
-
-        convective_inflated = False
-        if city_key in CONVECTIVE_CITIES:
-            combined_std *= CONVECTIVE_STD_INFLATION
-            convective_inflated = True
-
-        # vs raw consensus, not the bias-shifted mean — see get_signal_engine
-        within_threshold = sum(1 for t in model_temps.values() if abs(t - raw_weighted_mean) < 2.0)
-        model_agreement = within_threshold / len(model_temps)
-        model_spread = max(model_temps.values()) - min(model_temps.values())
-
-        engine_cache[key] = {
-            "ensemble_mean": weighted_mean,
-            "ensemble_std": combined_std,
-            "model_spread_std": model_spread_std,
-            "base_error": base_error,
-            "model_agreement": model_agreement,
-            "raw_models": model_temps,
-            "raw_weighted_mean": raw_weighted_mean,
-            "city_key": city_key,
-            "model_spread": model_spread,
-            "lead_time_hours": opp.hours_to_resolution,
-            "model_count": len(model_temps),
-            "convective_inflated": convective_inflated,
-        }
 
     hits = sum(1 for v in engine_cache.values() if v is not None)
     logging.info(
@@ -496,8 +557,83 @@ def prefetch_signal_engines(opportunities) -> dict:
     return engine_cache
 
 
-def log_model_accuracy(city, target_date, model, forecast_temp, actual_temp):
+def validate_city_tables():
+    """Every city named in a city-keyed config table must exist in STATIONS.
+
+    A city that does not is a silent no-op: "Tampa" sat in both
+    CONVECTIVE_CITIES and GFS_BIAS_CORRECTIONS while absent from STATIONS, so
+    its std inflation and its -1.3°F GFS correction never once applied, and
+    nothing said so. Typos in these tables fail exactly this quietly.
+
+    Returns a list of human-readable problems; empty means clean. See
+    validate_config_tables() for the raising entrypoint."""
+    problems = []
+    for label, names in (("CONVECTIVE_CITIES", CONVECTIVE_CITIES),
+                         ("GFS_BIAS_CORRECTIONS", GFS_BIAS_CORRECTIONS)):
+        for missing in sorted(set(names) - set(STATIONS)):
+            problems.append(f"{label} names '{missing}', which is not in STATIONS "
+                            f"(its setting has never applied)")
+    return problems
+
+
+def validate_model_tables():
+    """Every model in WEIGHTS must carry an explicit bias correction.
+
+    A model with no entry used to inherit a timestep prior; it now raises. This
+    catches that at boot instead of on the first fetch, where the exception would
+    be swallowed by prefetch_signal_engines' per-city handler and present as
+    "no opportunities" rather than as a misconfiguration."""
+    problems = []
+    for region, weights in WEIGHTS.items():
+        for model in sorted(weights):
+            for is_high in (True, False):
+                try:
+                    model_bias_correction(model, is_high)
+                except KeyError as e:
+                    problems.append(f"WEIGHTS[{region!r}]: {e.args[0]}")
+    return problems
+
+
+def validate_config_tables(raise_on_problem=True):
+    """Boot-time guard over every table that can silently not apply.
+
+    RAISES by default. These are code-controlled, version-tracked tables, so a
+    problem here means a human edited one half of a pair and not the other —
+    exactly the failure that shipped Tampa (a setting that never applied for
+    weeks) and gfs_global's phantom +0.7°F. Refusing to boot is the cheap
+    outcome; trading on a table that quietly does nothing is the expensive one.
+
+    Call BEFORE the first scan cycle, from every entrypoint."""
+    from config import validate_env_ranges
+    problems = validate_city_tables() + validate_model_tables() + validate_env_ranges()
+    for p in problems:
+        logging.error(f"Config validation: {p}")
+    if problems and raise_on_problem:
+        raise RuntimeError(
+            f"{len(problems)} config table problem(s) — refusing to start:\n  "
+            + "\n  ".join(problems)
+        )
+    return problems
+
+
+def log_model_accuracy(city, target_date, model, forecast_temp, actual_temp, is_high=None):
+    """Record one model's forecast against the settled temperature.
+
+    is_high is part of the key: a city's daily max and min are two different
+    forecasting problems with opposite biases, and writing both under one key
+    left 24 of 47 verified city-days in the 2026-07-31 export carrying two
+    conflicting 'actual' values. UPSERT on the natural key so a re-run refreshes
+    a row instead of stacking duplicates.
+
+    The `WHERE is_high IS NOT NULL` on the conflict target is REQUIRED, not
+    decorative: the backing index is partial (it excludes legacy rows whose
+    direction could not be recovered), and SQLite rejects a conflict target that
+    does not match a real index — without it every call here raises
+    OperationalError."""
     execute_query('''
-        INSERT INTO model_accuracy (city, target_date, model, forecast_temp, actual_temp)
-        VALUES (?, ?, ?, ?, ?)
-    ''', (city, target_date, model, forecast_temp, actual_temp))
+        INSERT INTO model_accuracy (city, target_date, is_high, model, forecast_temp, actual_temp)
+        VALUES (?, ?, ?, ?, ?, ?)
+        ON CONFLICT (city, target_date, is_high, model) WHERE is_high IS NOT NULL
+        DO UPDATE SET forecast_temp=excluded.forecast_temp, actual_temp=excluded.actual_temp
+    ''', (city, target_date, (None if is_high is None else int(bool(is_high))),
+          model, forecast_temp, actual_temp))

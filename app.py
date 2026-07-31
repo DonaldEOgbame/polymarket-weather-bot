@@ -715,6 +715,10 @@ def api_data():
     ma_rows = _q(
         "SELECT model, COUNT(*) AS n, AVG(ABS(forecast_temp - actual_temp)) AS mae "
         "FROM model_accuracy WHERE target_date >= date('now', '-30 days') "
+        # is_high IS NULL marks legacy rows whose direction could not be
+        # recovered — the ones that carried conflicting actuals. Excluded so
+        # the panel is not averaging a max against a min.
+        "AND is_high IS NOT NULL "
         "GROUP BY model ORDER BY mae"
     )
     ma_prev = {
@@ -722,6 +726,7 @@ def api_data():
             "SELECT model, AVG(ABS(forecast_temp - actual_temp)) AS mae "
             "FROM model_accuracy "
             "WHERE target_date >= date('now', '-60 days') AND target_date < date('now', '-30 days') "
+            "AND is_high IS NOT NULL "
             "GROUP BY model"
         )
     }

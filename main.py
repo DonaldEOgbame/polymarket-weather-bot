@@ -14,7 +14,8 @@ from strategy import evaluate_opportunity
 from executor import Executor
 from alerts import send_daily_summary, send_error_alert, send_circuit_breaker_alert
 from config import SCAN_INTERVAL_MINUTES, MONITOR_INTERVAL_MINUTES, daily_loss_limit
-from weather import log_model_accuracy, get_station_coords, prefetch_signal_engines
+from weather import (log_model_accuracy, get_station_coords, prefetch_signal_engines,
+                     validate_config_tables)
 from metar import final_extreme_f
 from utils import get_session
 import schedule
@@ -80,6 +81,17 @@ def check_resolutions():
     Polymarket resolution and model-accuracy logging are independent."""
     try:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+
+        # Score every closed trade that still has no resolution row, whatever
+        # resolution_logged says. Take-profit and stop exits close the position
+        # without ever reaching _try_settle_position, and the flag below is set
+        # by the accuracy pass, so without this they stay unscored forever —
+        # which is why the Brier stats were blind to half the take-profits.
+        try:
+            executor.settle_unscored_trades()
+        except Exception as e:
+            logging.error(f"Unscored-trade backfill failed: {e}", exc_info=True)
+
         unlogged = fetch_query(
             "SELECT DISTINCT t.id, t.market_id, t.side, t.is_high, t.city, t.target_date, "
             "t.model_prob, t.size_usdc, t.fill_price "
@@ -141,7 +153,8 @@ def check_resolutions():
                 actual_temp = final_extreme_f(city, target_date, is_high)
                 if actual_temp is not None:
                     for model_name, forecast_temp in raw_models.items():
-                        log_model_accuracy(city, target_date, model_name, forecast_temp, actual_temp)
+                        log_model_accuracy(city, target_date, model_name, forecast_temp,
+                                           actual_temp, is_high=is_high)
                     execute_query("UPDATE trades SET resolution_logged=1 WHERE id=?", (t["id"],))
                     logging.info(
                         f"Model accuracy logged (METAR) for {city} {target_date}: actual={actual_temp:.1f}°F"
@@ -241,10 +254,13 @@ def run_monitor_cycle():
 def _daily_purge():
     try:
         from config import (NOTIFICATION_RETENTION_DAYS, SIGNAL_RETENTION_DAYS,
-                            SCAN_LOG_RETENTION_DAYS, SKIP_SIGNAL_RETENTION_DAYS)
+                            SCAN_LOG_RETENTION_DAYS, SKIP_SIGNAL_RETENTION_DAYS,
+                            SKIP_SIGNAL_SAMPLE_PCT, SKIP_SIGNAL_NEAR_MISS_EDGE)
         # Pass the configured retentions — the no-arg calls silently ignored the
         # SIGNAL_RETENTION_DAYS / SCAN_LOG_RETENTION_DAYS env overrides.
-        purge_old_signals(SIGNAL_RETENTION_DAYS, SKIP_SIGNAL_RETENTION_DAYS)
+        purge_old_signals(SIGNAL_RETENTION_DAYS, SKIP_SIGNAL_RETENTION_DAYS,
+                          sample_pct=SKIP_SIGNAL_SAMPLE_PCT,
+                          near_miss_edge=SKIP_SIGNAL_NEAR_MISS_EDGE)
         purge_old_scan_log(SCAN_LOG_RETENTION_DAYS)
         purge_old_notifications(NOTIFICATION_RETENTION_DAYS)
         # DELETE alone never shrinks the file — sqlite just marks pages free, so
@@ -300,10 +316,10 @@ def daily_summary():
 def _print_startup_summary():
     from config import (
         STARTING_BANKROLL, EDGE_THRESHOLD, MIN_MODEL_AGREEMENT,
-        MAX_MODEL_SPREAD, KELLY_CAP, MIN_POSITION_SIZE,
+        MAX_MODEL_SPREAD_STD, KELLY_CAP, MIN_POSITION_SIZE,
         MAX_HOURS_TO_RESOLUTION,
         MIN_VOLUME, MARKET_DISCOVERY_MAX_PAGES, MARKET_DISCOVERY_LIMIT,
-        SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD, SHADOW_MAX_SIZE_USDC,
+        SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD_STD, SHADOW_MAX_SIZE_USDC,
         ENABLE_SHADOW_EXPLORATION, TAKER_FEE_RATE, SLIPPAGE_FRACTION,
         setting, daily_loss_limit, paper_mode,
     )
@@ -321,8 +337,8 @@ def _print_startup_summary():
         f"  Bankroll     : ${portfolio['total_equity']:.2f}  (cash ${portfolio['available_cash']:.2f}  locked ${portfolio['locked_cash']:.2f})",
         f"  Open pos     : {open_pos} / {setting('MAX_CONCURRENT_POSITIONS')}  |  Daily loss limit: ${daily_loss_limit():.2f} ({setting('DAILY_LOSS_STAKES'):g} stakes)",
         f"  Edge thresh  : {EDGE_THRESHOLD:.0%} (net of taker fee {TAKER_FEE_RATE:.0%}·p·(1-p) + {SLIPPAGE_FRACTION:.1%} slippage)  |  Kelly cap: {KELLY_CAP:.0%}  |  Max size: ${setting('HARD_MAX_POSITION_SIZE'):.2f}",
-        f"  Strict gates : agreement ≥ {MIN_MODEL_AGREEMENT:.0%}  |  spread < {MAX_MODEL_SPREAD}°F",
-        f"  Shadow gates : agreement ≥ {SHADOW_MIN_AGREEMENT:.0%}  |  spread < {SHADOW_MAX_SPREAD}°F  |  {shadow_label}",
+        f"  Strict gates : agreement ≥ {MIN_MODEL_AGREEMENT:.0%} (weighted)  |  spread < {MAX_MODEL_SPREAD_STD}°F sd",
+        f"  Shadow gates : agreement ≥ {SHADOW_MIN_AGREEMENT:.0%}  |  spread < {SHADOW_MAX_SPREAD_STD}°F sd  |  {shadow_label}",
         f"  Market filter: vol ≥ ${MIN_VOLUME:,.0f}  |  ≤ {MAX_HOURS_TO_RESOLUTION:.0f}h to resolution",
         f"  Discovery    : {MARKET_DISCOVERY_MAX_PAGES} pages × {MARKET_DISCOVERY_LIMIT} events  (tag_id=84, weather)",
         f"  Schedule     : scan every {SCAN_INTERVAL_MINUTES}m  |  monitor every {MONITOR_INTERVAL_MINUTES}m",
@@ -355,6 +371,12 @@ def run_bot(in_thread=False):
 
     verify_parser_fixtures()
     init_db()
+    # BEFORE the first scan, and it raises. A city-keyed or model-keyed config
+    # entry that never applies is invisible at runtime — Tampa's GFS correction
+    # was dead for weeks — so the check is worthless if the first cycle has
+    # already traded on the broken table. app.py runs this same function in its
+    # bot thread, so both entrypoints are covered here.
+    validate_config_tables()
     executor = Executor()
     _print_startup_summary()
 

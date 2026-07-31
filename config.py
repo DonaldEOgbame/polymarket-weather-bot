@@ -97,15 +97,35 @@ STARTING_BANKROLL = float(os.getenv("STARTING_BANKROLL", "40.0"))
 
 # --- Strategy Thresholds ---
 EDGE_THRESHOLD = float(os.getenv("EDGE_THRESHOLD", "0.08"))
-# Raised 0.6->0.75 by user preference 2026-07-10: with 3-4 models this only takes
-# discrete values (e.g. 0.50/0.67/0.75/1.00 at n=4), so 0.75 means "at least 3 of 4
-# models agree." Historical note: 9/12 trades so far sat at exactly 0.75 and the
-# one loss was also at 0.75 (spread, not agreement, was the actual gap on that
-# trade — see forecast_direction_agrees), so this isn't validated by outcome data
-# as better than 0.6, it's a deliberate stricter stance pending more resolved trades.
+# Raised 0.6->0.75 by user preference 2026-07-10 as a deliberately stricter stance
+# pending more resolved trades; it was never validated by outcome data as better
+# than 0.6, and the evidence below suggests it is not measuring what it claims to.
+#
+# NOW WEIGHT-BASED (2026-07-31), not a raw member count. As an unweighted count
+# of members within 2°F of the mean, this silently tightened as the ensemble grew:
+# at n=4 it meant "3 of 4", at n=10 it would mean "8 of 10" — a much stricter
+# condition that has nothing to do with forecast quality. It is now the fraction
+# of ENSEMBLE WEIGHT sitting within 2°F, which means the same thing at any n.
+#
+# Caveat worth keeping in view: agreement does not actually predict error in this
+# bot's record (Spearman -0.29 against |error|, t=-1.52, n=27 — if anything the
+# wrong sign). The six largest misses all had agreement between 0.75 and 1.00,
+# and the single worst (Seoul 2026-07-25, off by 5.7°F) had agreement 1.00.
+# Retained as a conservatism, not as a validated predictor; the spread term in
+# sigma is where model disagreement is actually priced.
 MIN_MODEL_AGREEMENT = float(os.getenv("MIN_MODEL_AGREEMENT", "0.75"))
-# 2.7°F = 1.5°C — maximum spread between model forecasts before trade is skipped
-MAX_MODEL_SPREAD = float(os.getenv("MAX_MODEL_SPREAD", "2.7"))
+# Maximum ensemble disagreement before a trade is skipped, as a WEIGHTED STANDARD
+# DEVIATION in °F.
+#
+# RENAMED from MAX_MODEL_SPREAD (which was 2.7 = 1.5°C) because the UNITS changed
+# and a stale env var carrying the old value would have quietly disabled the gate:
+# 2.7 as a standard deviation is roughly 6.9°F of range, which nothing in the
+# record approaches. The old statistic was max-min, which can only increase as
+# members are added, so it was really a cap on ensemble SIZE — expanding from 4
+# models to 10 would have driven trade flow to zero and looked like a data bug.
+# 1.05 is the equivalent cut on the historical distribution (median range/stdev
+# ratio 2.55 across the 59 traded signals).
+MAX_MODEL_SPREAD_STD = float(os.getenv("MAX_MODEL_SPREAD_STD", "1.05"))
 
 # --- Transaction costs (subtracted from raw edge before the threshold check) ---
 # Polymarket taker fee per share = TAKER_FEE_RATE * p * (1 - p), a bell curve that
@@ -133,14 +153,31 @@ MAX_ENTRY_SPREAD_FRACTION = float(os.getenv("MAX_ENTRY_SPREAD_FRACTION", "0.15")
 MIN_MODEL_COUNT = int(os.getenv("MIN_MODEL_COUNT", "3"))
 
 # --- Open-Meteo → METAR resolution-source correction (°F) ---
-# Polymarket resolves off the airport METAR feed (via Wunderground), which was measured
-# to run ~+0.72°C (~+1.3°F) WARMER than Open-Meteo's forecast at these stations across
-# the first 19 traded station-days (14/19 positive; biggest gaps on the trades we lost:
-# Hong Kong +2.6, Tokyo +2.5). Our forecasts were systematically too cold vs the ruler
-# that actually pays out. Shift the ensemble mean warmer by this amount so probabilities
-# target the METAR reading, not the ERA5 reanalysis. Re-fit from calibrate.py --source
-# metar as more trades resolve; per-station corrections can later replace this global one.
-METAR_WARM_CORRECTION_F = float(os.getenv("METAR_WARM_CORRECTION_F", "1.3"))
+# SET TO 0 on 2026-07-31. This was +1.3, fitted on the first 19 traded station-days
+# when the ensemble genuinely ran cold against the paying ruler. It no longer does,
+# and the shift is now the largest single source of bias in the pipeline.
+#
+# Measured on the 27 settled trades with a trustworthy settlement temperature:
+#
+#                    MAE     mean bias
+#   raw ensemble    2.59°F     -0.23°F     <- essentially unbiased
+#   +1.3 shifted    2.82°F     +1.07°F     <- the shift IS the bias
+#
+# Split by direction the raw mean is -0.51 on highs and +0.45 on lows, i.e. the
+# residual cold bias only ever existed on highs, and it is the diurnal-compression
+# artifact now handled per-model and per-direction by MODEL_BIAS_CORRECTIONS. A
+# flat warm shift applied to both directions double-corrects highs and actively
+# inverts lows: on minimum-temp markets it degraded MAE from 1.61°F to 2.30°F.
+#
+# It was also destroying the one predictor that works. Model spread ranks forecast
+# error at Spearman +0.46 (p=0.016) against the RAW mean; against the shifted mean
+# the same correlation is -0.05. The blanket shift adds a constant error term that
+# swamps the spread signal, which is why the deployed sigma formula never saw it.
+#
+# If a station correction is warranted at all it is per-station AND per-direction —
+# Hong Kong and Seoul want opposite signs — and must be re-fit only after the
+# settlement ruler is confirmed for every city. Do not restore a global value.
+METAR_WARM_CORRECTION_F = float(os.getenv("METAR_WARM_CORRECTION_F", "0.0"))
 
 # --- Forecast margin gate ("stop cutting it close") ---
 # Only enter when the ensemble mean is at least this many °F clear of the NEAREST
@@ -176,7 +213,10 @@ NARROW_BUCKET_STD_INFLATION = float(os.getenv("NARROW_BUCKET_STD_INFLATION", "1.
 # Cities with high convective variability where afternoon storms cause large
 # unpredictable temperature swings. Std is inflated by this multiplier.
 CONVECTIVE_STD_INFLATION = float(os.getenv("CONVECTIVE_STD_INFLATION", "1.3"))
-CONVECTIVE_CITIES = set(os.getenv("CONVECTIVE_CITIES", "Miami,Houston,Dallas,Atlanta,Tampa").split(","))
+# "Tampa" removed 2026-07-31: it is not in weather.STATIONS, so this entry and
+# its -1.3°F GFS correction had never once applied. weather.validate_city_tables()
+# now warns at startup if a phantom city is reintroduced here.
+CONVECTIVE_CITIES = set(os.getenv("CONVECTIVE_CITIES", "Miami,Houston,Dallas,Atlanta").split(","))
 
 # --- Probability calibration (Platt scaling on the raw Gaussian bucket prob) ---
 # The raw normal-CDF bucket probability is systematically OVERCONFIDENT: measured on
@@ -233,13 +273,137 @@ PROB_CALIBRATION_SLOPE = float(os.getenv("PROB_CALIBRATION_SLOPE", "0.7480"))
 MIN_BUCKET_PROB = float(os.getenv("MIN_BUCKET_PROB", "0.05"))
 
 # Base forecast uncertainty in °F, keyed by hours to resolution.
-# Interpolated at runtime; values reflect NWS skill decay with lead time.
+# Interpolated at runtime.
+#
+# FLATTENED 2026-07-31. The old ramp (1.0 at 12h → 2.5 at 72h) encoded NWS skill
+# decay, which is real in general but is NOT present in this bot's own record:
+#
+#   Spearman(lead_hours, |error|) = +0.105  (n=27, t=+0.53 — nowhere near
+#                                            significant)
+#   MAE under 24h lead : 2.76°F  (n=6)
+#   MAE at 24h+ lead   : 2.55°F  (n=21)
+#
+# Error is flat in lead time, or mildly inverted. The bot trades a narrow lead
+# window (mostly 18-60h) where the skill curve is genuinely shallow, and the
+# short-lead end was the more dangerous one: sigma of ~1.0-1.3°F was being used
+# against a real error near 2.8°F. That is a larger contributor to the tail
+# overconfidence than the Gaussian kernel itself.
+#
+# NOTE ON UNITS: this is no longer sigma. It is the INTERCEPT term `a` of the
+# regression |error| = a + b*weighted_spread_std, then scaled per direction by
+# SIGMA_SCALE_* below. Read it as "the error left when the models agree
+# perfectly", not as a standalone forecast error. Fitted value 0.84; the
+# effective floor on sigma is a*SIGMA_SCALE (1.26°F on highs) plus MIN_SIGMA_F.
 BASE_FORECAST_ERROR = {
-    12:  float(os.getenv("BASE_FORECAST_ERROR_12H",  "1.0")),
-    24:  float(os.getenv("BASE_FORECAST_ERROR_24H",  "1.5")),
-    48:  float(os.getenv("BASE_FORECAST_ERROR_48H",  "2.0")),
-    72:  float(os.getenv("BASE_FORECAST_ERROR_72H",  "2.5")),
+    12:  float(os.getenv("BASE_FORECAST_ERROR_12H",  "0.84")),
+    24:  float(os.getenv("BASE_FORECAST_ERROR_24H",  "0.84")),
+    48:  float(os.getenv("BASE_FORECAST_ERROR_48H",  "0.84")),
+    72:  float(os.getenv("BASE_FORECAST_ERROR_72H",  "0.95")),
 }
+
+# --- Sigma construction ---
+# Replaces sigma = sqrt(base^2 + spread^2), which buried the one variable that
+# actually predicts error. Measured on the 27 settled trades, against the RAW
+# (unshifted) ensemble mean:
+#
+#   spread tertile   mean spread   MAE
+#   tight                1.12      1.50
+#   mid                  1.62      2.41
+#   wide                 2.26      3.87
+#   Spearman +0.461 (n=27, p≈0.016), monotonic
+#
+# The coefficient on spread is ~1.0. Under the old quadrature form a spread of
+# 2.26 against a base of 2.0 moved sigma only 0.3°F; here it moves it 2.3°F.
+#
+# IMPORTANT — the tertile fit above is against max-min (range), which is NOT
+# invariant to member count: adding models can only push a max-min statistic up,
+# so a coefficient fitted at n=4 would silently inflate sigma the moment the
+# ensemble grows. Refitted against the POPULATION STANDARD DEVIATION, which is
+# member-count invariant and is what the code actually passes in:
+#
+#   |error| = 0.84 + 2.78 * weighted_stdev    (n=27, same data, same ranking)
+#
+# Note model_agreement does NOT predict error (Spearman -0.29, t=-1.52) and is
+# deliberately not used here. The six largest misses all had agreement between
+# 0.75 and 1.00, and the worst of them (Seoul 2026-07-25, 5.7°F) had spread 0.63
+# with agreement 1.00. Unanimous models are not accurate models — which is also
+# why a floor on sigma matters more than a tight-agreement bonus.
+#
+#   sigma = SIGMA_SCALE[is_high] * (base_error + SIGMA_SPREAD_COEF * spread_std)
+SIGMA_SPREAD_COEF = float(os.getenv("SIGMA_SPREAD_COEF", "2.78"))
+
+# Direction scale. This is the plainest finding in the whole record: highs and
+# lows are two different forecasting problems, and the deployed sigma was sized
+# BACKWARDS between them — wider on the accurate segment, narrower on the noisy one.
+#
+#              n   win rate   settled P&L   per trade   MAE    std(z)   median sigma
+#   LOW       13     92.3%      +$13.27      +$1.02    1.61     0.83       2.28
+#   HIGH      30     73.3%       +$3.08      +$0.10    3.01     2.58       1.79
+#
+# std(z) is the diagnostic: 1.0 means sigma is right-sized. Highs were running
+# 2.58, i.e. errors two and a half times larger than the distribution admitted;
+# lows were at 0.83, marginally too wide. Overnight minima are set by radiative
+# cooling, which NWP handles well; daytime maxima depend on convection and cloud
+# timing, which it does not. The gap is physical and should persist.
+#
+# LOW is n=13 on its own, which proves little — but four independent measurements
+# (win rate, MAE, std(z), and the per-model bias sign flip) agree, and one
+# mechanism predicts all four.
+#
+# Values are fitted, not chosen: k is set so that RMS(z) = 1.0 within each
+# direction under the formula above.
+#
+# HIGH is fitted on the LIVE ERA ONLY (n=16), for the same reason as
+# MODEL_BIAS_CORRECTIONS: the three paper rows carrying a HIGH settlement
+# temperature all predate the 2026-07-23 premature-resolution fix and record
+# morning readings as daily maxima, so they carry 6-8°F of fictitious error.
+# Pooling them inflated k_high to 1.50, which over-widened sigma on live data
+# (std(z) fell to 0.63 — a distribution 1.6x wider than the errors justify,
+# which suppresses edge and costs trades for nothing).
+#
+#   k_high fitted on   paper only (n=3)  2.48   <- the poisoned rows
+#                      pooled    (n=19)  1.36
+#                      LIVE      (n=16)  1.02   <- deployed
+#
+# LOW stays at 0.80. The live era has only n=4 low trades with a settlement
+# temperature; their fit says 0.71, but tightening sigma on n=4 is exactly the
+# "fitting rules to noise faster than data arrives" failure, and 0.80 errs wide.
+# Effect on the median sigma used, live era: HIGH 1.79°F -> ~2.9°F.
+SIGMA_SCALE_HIGH = float(os.getenv("SIGMA_SCALE_HIGH", "1.02"))
+SIGMA_SCALE_LOW = float(os.getenv("SIGMA_SCALE_LOW", "0.80"))
+
+# Hard floor on sigma (°F), replacing the old max(std, 0.5) clamp. Tight model
+# agreement is not evidence of accuracy — Seoul 2026-07-25 had the tightest
+# ensemble in the record (pstdev 0.24) and missed by 5.70°F. Without a floor the
+# formula would have priced that day at sigma 1.26.
+MIN_SIGMA_F = float(os.getenv("MIN_SIGMA_F", "1.0"))
+
+# Ceiling on sigma (°F), guarding the linear spread term against extrapolation.
+# The coefficient is fitted over weighted-spread 0.25-1.08; a market where the
+# models disagree by a weighted 3.4°F (they exist — Tokyo highs on 2026-08-01)
+# would extrapolate to sigma 15°F, which is not a credible temperature forecast.
+#
+# MUST STAY ABOVE the gate-implied maximum. MAX_MODEL_SPREAD_STD = 1.05 caps any
+# TRADEABLE market at sigma 5.64, so at 8.0 this never binds on a trade — it only
+# tidies the skipped-signal log. That ordering matters: a wide sigma makes a
+# narrow bucket look unlikely, which INFLATES the NO edge rather than suppressing
+# it, so a cap that bit on tradeable markets would manufacture confidence, not
+# remove it. If MAX_MODEL_SPREAD_STD is ever raised, re-check this bound first.
+MAX_SIGMA_F = float(os.getenv("MAX_SIGMA_F", "8.0"))
+
+# Student-t degrees of freedom for the bucket-probability kernel. 0 = Gaussian.
+# Variance-matched: the scale is divided by sqrt(nu/(nu-2)) so switching kernels
+# changes tail SHAPE without changing the fitted sigma's meaning.
+#
+# Honest note on strength of evidence: the "6 of 27 errors exceed 2 sigma" that
+# motivated this was mostly a symptom of sigma being undersized on highs, not of
+# genuinely fat tails. Once sigma is fitted per direction, only 1 of 27 exceeds
+# 2 sigma (Seoul, |z|=2.90) where a Gaussian expects 1.2. So this is insurance,
+# not a fix for a measured excess: at nu=4 a 3-sigma event is priced 4.9x higher
+# than Gaussian, which is cheap protection against the regime breaks that caused
+# every tail bust (Seoul -5.7°F, Chengdu -6.9°F, Lucknow +6.0°F). Set 0 to
+# restore the Gaussian kernel.
+SIGMA_STUDENT_T_DF = float(os.getenv("SIGMA_STUDENT_T_DF", "4"))
 
 # --- Risk / Sizing (measurement-week mode) ---
 # Goal of this profile: maximise the NUMBER of small resolved trades per week so
@@ -285,15 +449,29 @@ KELLY_CAP = float(os.getenv("KELLY_CAP", "0.08"))
 # Polymarket's real CLOB minimum order is ~$1; below this, live orders won't fill.
 MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "1.00"))
 
-# Refuse entries at or above this price. DISABLED at 1.00 by user decision 2026-07-28:
-# in the live era the seven >=0.75 entries collectively netted +$1.00 with zero busts,
-# so the cap was giving up realized P&L to insure against a bust class the new
-# calibration constants (which price the tail up directly) and the per-city/date entry
-# limit already mitigate. The knob and both gate checks are retained — the original
-# case for 0.75 (43-trade replay 2026-07-26: 0.80+ band returned $1.87 on $24.00
-# deployed vs $16.79 on $20.25 sub-0.60; a 0.16:1 payoff needs ~88% hit rate to break
-# even) still stands if the bust class ever reappears. Set back below 1.00 to re-arm.
-MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "1.00"))
+# Refuse entries at or above this price.
+#
+# RE-ARMED at 0.80 on 2026-07-31, reversing the 2026-07-28 decision to disable it.
+# That decision was made on BOOKED P&L from the seven >=0.75 live entries (+$1.00,
+# no busts). Booked P&L is the wrong measure here: most of those positions were
+# closed early at take-profit, so it scores the scalp, not the bet. On SETTLED
+# P&L — what the bet was actually worth — the whole 43-trade record says:
+#
+#   fill band     n   settled P&L   per trade   win rate
+#   <=0.50        2      +$0.88       +$0.44       50%
+#   0.50-0.60    15      +$7.47       +$0.50       73%
+#   0.60-0.70    12      +$9.17       +$0.76       92%
+#   0.70-0.80     4      +$2.38       +$0.59      100%
+#   0.80-0.90    10      -$3.55       -$0.36       70%
+#
+# Everything below 0.80 is profitable: +$19.89 over 33 trades. The 0.80-0.90 band
+# is the only losing band in the book. The arithmetic is unforgiving — paying 85c
+# to win 15c needs ~85% accuracy, and measured accuracy at that confidence is 70%.
+#
+# Note this is the same cut as "raise the edge threshold", since edge and fill are
+# mechanically linked (edge = (1-P) - ask). Price is the better-identified
+# variable of the two, so the gate lives here. Set to 1.00 to disable.
+MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.80"))
 
 # One trade per city per target day (user rule 2026-07-28). The live log shows repeat
 # same-city/same-day entries stacking correlated risk on one weather outcome: two Hong
@@ -408,7 +586,18 @@ MAX_BUCKETS_PER_CITY_DATE = int(os.getenv("MAX_BUCKETS_PER_CITY_DATE", "5"))
 # Shadow logging is always active when strict evaluation fails — helps tune thresholds.
 # Exploration trades are placed only when ENABLE_SHADOW_EXPLORATION=true AND PAPER_MODE=true.
 SHADOW_MIN_AGREEMENT = float(os.getenv("SHADOW_MIN_AGREEMENT", "0.50"))
-SHADOW_MAX_SPREAD = float(os.getenv("SHADOW_MAX_SPREAD", "5.0"))
+# RENAMED from SHADOW_MAX_SPREAD and RESCALED 2026-07-31, for the same reason
+# MAX_MODEL_SPREAD became MAX_MODEL_SPREAD_STD: the statistic it is compared
+# against changed from max-min to weighted standard deviation, and the constant
+# did not. At 5.0 against a weighted sd whose observed maximum is 2.78, the
+# shadow spread gate could not bind on any market that has ever been seen — the
+# relaxed-gate diagnostic was reporting "spread ok" unconditionally.
+#
+# 2.0 keeps the original intent: roughly twice the strict gate, so the shadow
+# universe is meaningfully wider than the live one without being unbounded.
+# (Strict is MAX_MODEL_SPREAD_STD = 1.05; on the 59-signal trail, 2.0 admits
+# ~95% of signals against the strict gate's ~80%.)
+SHADOW_MAX_SPREAD_STD = float(os.getenv("SHADOW_MAX_SPREAD_STD", "2.0"))
 SHADOW_MAX_SIZE_USDC = float(os.getenv("SHADOW_MAX_SIZE_USDC", "0.25"))
 ENABLE_SHADOW_EXPLORATION = os.getenv("ENABLE_SHADOW_EXPLORATION", "false").lower() == "true"
 
@@ -445,27 +634,222 @@ POLYMARKET_SIG_TYPE = int(os.getenv("POLYMARKET_SIG_TYPE", "0"))  # 0=EOA, 1=Mag
 GFS_BIAS_CORRECTIONS = {
     k: float(v) for k, v in (
         pair.split(":") for pair in
-        os.getenv("GFS_BIAS_CORRECTIONS", "Miami:-1.5,Houston:-1.5,Dallas:-1.2,Atlanta:-1.0,Tampa:-1.3").split(",")
+        os.getenv("GFS_BIAS_CORRECTIONS", "Miami:-1.5,Houston:-1.5,Dallas:-1.2,Atlanta:-1.0").split(",")
         if ":" in pair
     )
 }
 
-# --- Global per-model cold-bias corrections (°F), applied to every city ---
-# Derived from calibrate.py's per-model signed bias (mean(model - actual) across
-# resolved forecasts, n=38 as of 2026-07-01). Unlike GFS_BIAS_CORRECTIONS above,
-# these run cold everywhere in the sample, not just specific cities, so they're
-# applied globally rather than city-keyed. Re-run calibrate.py periodically and
-# update these as more forecasts resolve — n=38 is a first read, not a settled value.
-MODEL_BIAS_CORRECTIONS = {
-    k: float(v) for k, v in (
-        pair.split(":") for pair in
-        os.getenv(
-            "MODEL_BIAS_CORRECTIONS",
-            "ecmwf_ifs025:0.29,icon_global:0.03,gem_global:1.32,jma_gsm:1.55"
-        ).split(",")
-        if ":" in pair
-    )
+# --- Global per-model bias corrections (°F), keyed by (model, is_high) ---
+# SIGN CONVENTION: the value is ADDED to the model's forecast, so it is the
+# NEGATIVE of the model's measured bias (mean(forecast - actual)).
+#
+# These used to be one signed offset per model, applied in both directions and
+# all positive. That was wrong, and measurably so. Re-measured 2026-07-31 on the
+# 108 model-forecast rows in the full export (mean(forecast - actual), split on
+# is_high):
+#
+#   model          bias on HIGH   bias on LOW   swing   native timestep
+#   icon_global       -0.43         +0.36        0.79   hourly
+#   ecmwf_ifs025      -0.73         +0.36        1.10   3-hourly
+#   gem_global        +0.09         +0.29        0.20   3-hourly
+#   jma_gsm           -1.32         +1.71        3.03   6-hourly
+#
+# Every model except GEM flips sign between directions, and the size of the flip
+# scales with how coarse the model's native output timestep is. That is the
+# signature of interpolation, not of model bias: Open-Meteo resamples coarse
+# model output onto an hourly grid, and smoothing a diurnal curve clips the
+# afternoon peak and lifts the overnight trough. Forecasts therefore come out
+# too COLD on highs and too WARM on lows, in proportion to the timestep.
+#
+# Verified 2026-07-31 that `daily=temperature_2m_max` is exactly the max of
+# `hourly=temperature_2m` over the local day (checked on jma_gsm/ecmwf/icon,
+# identical to 0.1°F). So this artifact cannot be dodged by computing the daily
+# aggregate locally — the interpolation happens upstream of both. Correcting it
+# per direction here is the fix; preferring natively-hourly models is the other.
+#
+# CRITICAL: the biases above are RESIDUALS, not raw model biases. The stored
+# forecasts they were measured on already had the previous corrections applied
+# (weather.py corrects inside fetch_forecasts, before raw_models is persisted;
+# those corrections shipped 2026-07-01, ahead of the 07-04..07-28 sample). So
+# the new correction is
+#       c_new = c_old - B         NOT   c_new = -B
+# Using -B would have thrown away the correction already baked into the numbers
+# and left jma_gsm 1.55°F too cold on every high.
+#
+#   model          c_old   B_high   -> HIGH    B_low   -> LOW
+#   ecmwf_ifs025   +0.29   -0.73     +1.02     +0.36    (held)
+#   icon_global    +0.03   -0.43     +0.46     +0.36    (held)
+#   gem_global     +1.32   +0.09     +1.23     +0.29    (held)
+#   jma_gsm        +1.55   -1.32     +2.87     +1.71    (held)
+#
+# NOTE: the HIGH column above is SUPERSEDED — B_high there is the pooled
+# paper+live measurement, and the deployed values come from the live-era-only
+# re-fit further down (+2.29/+1.74/+2.46/+3.99). The arithmetic shown is still
+# the arithmetic used; only the sample changed. The LOW column is current.
+#
+# WHY THE LOW COLUMN IS HELD AT ITS OLD VALUE. The measured low-side biases are
+# not robust: they rest on n=5-8 rows, and dropping Hong Kong — the one city with
+# a confirmed INVERTED settlement ruler — flips their sign.
+#
+#   low-side B      with HK                without HK
+#   ecmwf_ifs025    +0.36                  -0.19
+#   icon_global     +0.36                  -0.14
+#   gem_global      +0.29                  -0.31
+#   jma_gsm         +1.71 (n=5)            +0.95 (n=3)
+#
+# So "forecasts run warm on lows" is largely two Hong Kong trades scored against
+# the wrong station. The HIGH column is stable to the same test (-0.73 -> -0.70,
+# -0.43 -> -0.47, -1.32 -> -1.40, n=18) and is deployed. Lows are also the
+# profitable segment (92% win rate, +$1.02/trade) — not the place to act on a
+# sign that flips when one city is removed. Re-fit lows after the ruler is fixed.
+#
+# The SWING is unaffected by this correction (adding a constant to both
+# directions cancels), so the diurnal-compression mechanism above stands as
+# measured; only the levels needed the c_old term restored.
+#
+# Net effect at the ensemble level on the 27 settled trades, with
+# METAR_WARM_CORRECTION_F also going to 0:
+#
+#                                   HIGH bias   HIGH MAE   LOW bias   LOW MAE
+#   deployed (c_old + METAR 1.3)      +0.83       3.01       +1.70      2.29
+#   this commit                       +0.07       2.95       +0.40      1.62
+#
+# n=108 forecast rows over 27 city-days: a first read, not a settled value.
+# Re-fit once model_accuracy has direction-split rows (see db.py migration).
+# gfs_global is deliberately absent — it already carries per-city corrections in
+# GFS_BIAS_CORRECTIONS, and its n=3 residual would double-count them.
+def _parse_dir_bias(raw):
+    """Parse "model:high:low,..." into {(model, is_high): correction}.
+
+    RAISES on anything that is not exactly `model:high:low` with two parseable
+    floats. It used to `continue` past a malformed entry, which meant the OLD
+    two-field format ("model:value") parsed to an EMPTY dict — silently, with no
+    log line. Paired with the timestep-prior fallback that used to sit below,
+    that produced a fully populated and entirely wrong correction table from one
+    stale environment variable. An env var here is either wholly valid or the
+    process refuses to boot; a partial dict is never acceptable, because the
+    models that fall out of it are exactly the ones that then go uncorrected."""
+    out = {}
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            raise ValueError(
+                f"MODEL_BIAS_CORRECTIONS: empty entry in {raw!r} (trailing or "
+                f"doubled comma). Expected 'model:high:low' per entry."
+            )
+        bits = token.split(":")
+        if len(bits) != 3:
+            raise ValueError(
+                f"MODEL_BIAS_CORRECTIONS: entry {token!r} has {len(bits)} "
+                f"field(s), expected 3 ('model:high:low'). The two-field form "
+                f"'model:value' is the pre-2026-07-31 format and is no longer "
+                f"valid — corrections are now keyed by direction."
+            )
+        model, hi, lo = bits[0].strip(), bits[1].strip(), bits[2].strip()
+        if not model:
+            raise ValueError(
+                f"MODEL_BIAS_CORRECTIONS: entry {token!r} has an empty model id."
+            )
+        try:
+            out[(model, True)] = float(hi)
+            out[(model, False)] = float(lo)
+        except ValueError:
+            raise ValueError(
+                f"MODEL_BIAS_CORRECTIONS: entry {token!r} has non-numeric "
+                f"correction(s) (high={hi!r}, low={lo!r})."
+            ) from None
+    if not out:
+        raise ValueError("MODEL_BIAS_CORRECTIONS parsed to an empty table.")
+    return out
+
+
+# FITTED ON THE LIVE ERA ONLY (2026-07-18 onward, n=14-16 per model). The
+# paper-era rows must be excluded, not merely down-weighted: every paper trade
+# that carries a settlement temperature targets 2026-07-18, BEFORE the
+# premature-resolution fix shipped on 2026-07-23, so its "actual" is a mid-day
+# reading recorded as a daily maximum. Their measured bias is +6.0 to +6.6°F
+# against -1.1 to -2.4°F on live, and the implausibility is visible by eye —
+# Taipei 86.0°F and Lucknow 84.2°F as July daily highs are morning temperatures.
+#
+# Pooling the two eras dragged every HIGH constant. Measured on the live era:
+#
+#   correction set                    bias    MAE   std(z)
+#   raw API, no correction           -2.45   2.73    0.94
+#   previous deployed (c_old+METAR)  -0.47   2.20    1.03
+#   pooled paper+live fit            -1.09   2.24    0.63   <- worse than before
+#   live-only fit (this)             +0.10   2.09    0.98
+#
+# The pooled fit was a REGRESSION on the only regime with real fills. Honest
+# caveat: bias going to ~0 is tautological (c_new is defined to zero it), so the
+# real evidence here is MAE 2.20 -> 2.09 and std(z) 0.63 -> 0.98.
+#
+# gfs_global CARRIES AN EXPLICIT ZERO, and must never be merely absent from this
+# table. It already has per-city corrections in GFS_BIAS_CORRECTIONS, so a model
+# -level correction on top would double-count them. Until 2026-07-31 it was
+# simply omitted, and the lookup below fell through to a timestep prior that
+# handed it +0.7°F on highs and -0.4°F on lows — a correction it had never had,
+# on a member carrying 20-30% of ensemble weight in every US/EU city. The
+# comment asserting it was "deliberately absent" was true and the code ignored
+# it, which is the whole argument for stating the zero rather than implying it.
+#
+# Its own measured residual is +3.17°F on highs, and that is NOT used: n=3, and
+# those three rows straddle cities where GFS_BIAS_CORRECTIONS applied and cities
+# where it did not, so the figure mixes two correction states and measures
+# neither. Re-measure per city, or not at all.
+MODEL_BIAS_CORRECTIONS = _parse_dir_bias(os.getenv(
+    "MODEL_BIAS_CORRECTIONS",
+    "ecmwf_ifs025:2.29:0.29,icon_global:1.74:0.03,"
+    "gem_global:2.46:1.32,jma_gsm:3.99:1.55,gfs_global:0:0",
+))
+
+# ADVISORY ONLY — nothing reads these at runtime. They are the starting point a
+# HUMAN should use when adding a model to WEIGHTS, quoted back in the error
+# message below so the decision is made once, in this file, on purpose.
+#
+# These were a runtime FALLBACK until 2026-07-31, and that is precisely how
+# gfs_global acquired a wrong-signed correction nobody chose. A prior good enough
+# to reason from is not good enough to apply silently: the difference between
+# "our best guess for an unmeasured model" and "the number we ship" is exactly
+# the review step that was missing.
+MODEL_TIMESTEP_HOURS = {
+    "icon_global": 1, "icon_eu": 1, "icon_d2": 1, "gfs_hrrr": 1, "jma_msm": 1,
+    "ecmwf_ifs025": 3, "gem_global": 3, "gfs_global": 3, "ukmo_global_deterministic_10km": 3,
+    "meteofrance_arpege_world": 3, "cma_grapes_global": 3, "bom_access_global": 3,
+    "jma_gsm": 6, "ecmwf_aifs025_single": 6, "gfs_graphcast025": 6, "ncep_aigfs025": 6,
 }
+TIMESTEP_BIAS_PRIOR = {           # (suggested HIGH, suggested LOW) — see above
+    1: (0.4, -0.4),
+    3: (0.7, -0.4),
+    6: (1.3, -1.7),
+}
+
+
+def model_bias_correction(model, is_high):
+    """°F to ADD to `model`'s forecast for this direction.
+
+    RAISES KeyError for a model with no entry in MODEL_BIAS_CORRECTIONS. There
+    is deliberately no fallback: every model in WEIGHTS must carry an explicit,
+    reviewed correction — zero included (see gfs_global). WEIGHTS is a
+    code-controlled table, so the only way to reach this error is to add a model
+    without deciding its correction, which is the decision this refuses to make
+    on your behalf. validate_model_tables() surfaces it at boot rather than
+    mid-scan."""
+    try:
+        return MODEL_BIAS_CORRECTIONS[(model, bool(is_high))]
+    except KeyError:
+        step = MODEL_TIMESTEP_HOURS.get(model)
+        hint = ""
+        if step is not None:
+            hi, lo = TIMESTEP_BIAS_PRIOR[step]
+            hint = (f" Its native timestep is {step}h; the advisory prior for "
+                    f"that class is high={hi:+.1f} low={lo:+.1f}, but measure it "
+                    f"if you can.")
+        raise KeyError(
+            f"No bias correction for model {model!r} (is_high={bool(is_high)}). "
+            f"Every model in weather.WEIGHTS needs an explicit entry in "
+            f"MODEL_BIAS_CORRECTIONS, including an explicit 0 for models "
+            f"corrected elsewhere.{hint}"
+        ) from None
 
 # --- Data retention (days) ---
 # 14d default (was 60): at ~2,100 signal rows/day × ~2.5KB the 60-day steady
@@ -473,6 +857,22 @@ MODEL_BIAS_CORRECTIONS = {
 # calibration scores resolved rows within days.
 SIGNAL_RETENTION_DAYS = int(os.getenv("SIGNAL_RETENTION_DAYS", "14"))
 SKIP_SIGNAL_RETENTION_DAYS = int(os.getenv("SKIP_SIGNAL_RETENTION_DAYS", "3"))
+# Two carve-outs from the SKIP purge above, kept indefinitely. The skip trail is
+# the largest calibration sample this system produces (~40,000 scored markets a
+# day against 27 settled trades in total), and deleting it wholesale to save disk
+# is why every constant in this file is fitted on a sample too small to support
+# it. The volume has since been extended, so the original reason is gone.
+#
+# Retained rows survive SIGNAL_RETENTION_DAYS too, but shed their raw_models
+# JSON once past the skip window — that JSON is ~2.5KB of a ~2.7KB row and only
+# helps debug a recent scan, while the scalars the calibration fits on are
+# columns. Cost at 5%: ~2,000 rows/day, ~150MB/year rather than ~1.8GB/year.
+SKIP_SIGNAL_SAMPLE_PCT = int(os.getenv("SKIP_SIGNAL_SAMPLE_PCT", "5"))
+# Keep every skip that cleared the edge bar but was stopped by another gate —
+# the counterfactual set that says whether the gates are earning their keep.
+# None/blank disables. Defaults to the entry threshold.
+_nm = os.getenv("SKIP_SIGNAL_NEAR_MISS_EDGE", "").strip()
+SKIP_SIGNAL_NEAR_MISS_EDGE = float(_nm) if _nm else EDGE_THRESHOLD
 SCAN_LOG_RETENTION_DAYS = int(os.getenv("SCAN_LOG_RETENTION_DAYS", "14"))
 NOTIFICATION_RETENTION_DAYS = int(os.getenv("NOTIFICATION_RETENTION_DAYS", "30"))
 
@@ -573,3 +973,62 @@ def daily_loss_limit():
     with _RUNTIME_LOCK:
         stake = _RUNTIME["FIXED_POSITION_SIZE"]
         return -(stake * _RUNTIME["DAILY_LOSS_STAKES"])
+
+
+# --- Stale-environment guard ---------------------------------------------
+# Three constants changed MEANING on 2026-07-31 without changing NAME, so a
+# stale value from an older .env or Fly secret parses fine and silently
+# reinstates the behaviour the change removed. Renaming was the alternative and
+# was used where the units changed (MAX_MODEL_SPREAD -> MAX_MODEL_SPREAD_STD,
+# SHADOW_MAX_SPREAD -> SHADOW_MAX_SPREAD_STD); for these three the name is still
+# right and only the fitted range moved, so they get a boot-time range check
+# instead. Checked at startup via weather.validate_config_tables().
+#
+# The ranges are deliberately loose. They exist to catch the SPECIFIC previous
+# value, not to police tuning.
+def validate_env_ranges():
+    """Return a list of stale-looking config values; empty means clean."""
+    problems = []
+
+    if not -0.5 <= METAR_WARM_CORRECTION_F <= 0.5:
+        problems.append(
+            f"METAR_WARM_CORRECTION_F={METAR_WARM_CORRECTION_F} is outside "
+            f"[-0.5, 0.5]. The pre-2026-07-31 value was +1.3, fitted when the "
+            f"ensemble ran cold against the paying ruler; it no longer does, and "
+            f"restoring it reinstates the largest single bias in the pipeline "
+            f"(it degraded low-side MAE from 1.61°F to 2.30°F). A per-station, "
+            f"per-direction correction is the supported replacement — not a "
+            f"global shift."
+        )
+
+    for hours, value in sorted(BASE_FORECAST_ERROR.items()):
+        if not 0.3 <= value <= 1.5:
+            problems.append(
+                f"BASE_FORECAST_ERROR[{hours}h]={value} is outside [0.3, 1.5]. "
+                f"This is no longer a standalone sigma — since 2026-07-31 it is "
+                f"the INTERCEPT of |error| = a + b*weighted_spread_std, scaled "
+                f"per direction by SIGMA_SCALE_*. The old sigma-valued ramp "
+                f"(1.0/1.5/2.0/2.5) parses fine here and silently inflates every "
+                f"forecast's uncertainty."
+            )
+    if BASE_FORECAST_ERROR:
+        lo, hi = min(BASE_FORECAST_ERROR.values()), max(BASE_FORECAST_ERROR.values())
+        if lo > 0 and hi / lo > 1.5:
+            problems.append(
+                f"BASE_FORECAST_ERROR ramps {lo}->{hi} ({hi/lo:.1f}x across the "
+                f"lead-time table). It was flattened on 2026-07-31 because error "
+                f"is flat in lead time in this bot's own record "
+                f"(Spearman +0.105, n=27); a steep ramp is the old NWS-skill-decay "
+                f"shape and should not be restored without a re-fit."
+            )
+
+    if not 0.5 < MAX_ENTRY_PRICE <= 0.95:
+        problems.append(
+            f"MAX_ENTRY_PRICE={MAX_ENTRY_PRICE} is outside (0.5, 0.95]. 1.00 is "
+            f"the DISABLED sentinel used between 2026-07-28 and 2026-07-31, and "
+            f"it disarms the gate entirely — the 0.80-0.90 fill band is the only "
+            f"losing band in the whole book (-$3.55 over 10 trades). Set it "
+            f"deliberately or leave it at its default."
+        )
+
+    return problems

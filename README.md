@@ -35,7 +35,7 @@ Automated weather market trading bot for [Polymarket](https://polymarket.com), w
 2. **Score** — Ranks candidates by liquidity + price uncertainty; caps at 150 markets per scan to avoid API throttling
 3. **Forecast** — Pulls temperature forecasts from [Open-Meteo](https://open-meteo.com) for up to 4 models per city (ECMWF IFS, GFS 0.25°, ICON Global, JMA GSM / GEM Global for Asia-Pacific)
 4. **Edge** — Fits a normal distribution over the ensemble, computes bucket probabilities, diffs against market-implied odds
-5. **Gate** — Requires ≥ 60% model agreement and spread < 2.7°F before placing a trade
+5. **Gate** — Requires ≥ 75% of ensemble WEIGHT in agreement and weighted spread sd < 1.05°F before placing a trade
 6. **Size** — Fractional Kelly (capped at 8%), hard max $2.00 per position, max 30% total exposure
 7. **Monitor** — Checks open positions every 5 minutes; exits on stop-loss (15%) or edge decay
 
@@ -111,8 +111,8 @@ All settings are environment variables. Copy `.env.example` to `.env` and adjust
 | `DASHBOARD_PASSWORD` | `stormedge` | Dashboard login password |
 | `DASHBOARD_EMAIL` | `donaldemmaogbame@gmail.com` | Dashboard login email |
 | `EDGE_THRESHOLD` | `0.08` | Minimum edge (8%) required to enter a trade |
-| `MIN_MODEL_AGREEMENT` | `0.6` | Minimum fraction of models that must agree |
-| `MAX_MODEL_SPREAD` | `2.7` | Maximum model spread in °F before skipping |
+| `MIN_MODEL_AGREEMENT` | `0.75` | Minimum fraction of ensemble **weight** within 2°F of the raw consensus |
+| `MAX_MODEL_SPREAD_STD` | `1.05` | Maximum weighted spread **standard deviation** in °F before skipping (was `MAX_MODEL_SPREAD`=2.7 in max-min units) |
 | `KELLY_CAP` | `0.08` | Maximum Kelly fraction (8%) |
 | `HARD_MAX_POSITION_SIZE` | `2.0` | Hard dollar cap per position |
 | `MAX_CONCURRENT_POSITIONS` | `3` | Maximum open positions at once |

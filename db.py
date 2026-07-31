@@ -13,6 +13,74 @@ from datetime import datetime, timezone
 _write_lock = threading.Lock()
 
 
+def _backfill_model_accuracy_is_high(conn):
+    """Recover the direction of legacy model_accuracy rows, written before is_high
+    was part of the key. Runs once, immediately after the column is added.
+
+    Two passes, both non-destructive:
+
+    1. A city/date that logged BOTH directions has exactly two distinct
+       actual_temp values under one key — that collision IS the bug. The larger
+       actual is the day's max and the smaller is its min, so the rows separate
+       cleanly. This recovers the conflicting rows rather than dropping them.
+    2. A city/date with a single actual is unambiguous only if the trades table
+       shows one direction traded there; borrow it.
+
+    Anything still unresolved keeps is_high NULL: its direction is genuinely not
+    recoverable, and guessing would put a max under a min's bias fit. Those rows
+    are excluded from the UNIQUE index and should be filtered out by readers."""
+    try:
+        pass1 = conn.execute('''
+            UPDATE model_accuracy AS ma
+               SET is_high = (
+                   SELECT CASE WHEN ma.actual_temp >= MAX(x.actual_temp) THEN 1 ELSE 0 END
+                     FROM model_accuracy x
+                    WHERE x.city = ma.city AND x.target_date = ma.target_date
+               )
+             WHERE ma.actual_temp IS NOT NULL
+               AND EXISTS (
+                   SELECT 1 FROM model_accuracy y
+                    WHERE y.city = ma.city AND y.target_date = ma.target_date
+                    GROUP BY y.city, y.target_date
+                   HAVING COUNT(DISTINCT y.actual_temp) = 2
+               )
+        ''').rowcount
+        pass2 = conn.execute('''
+            UPDATE model_accuracy AS ma
+               SET is_high = (
+                   SELECT MIN(t.is_high) FROM trades t
+                    WHERE t.city = ma.city AND t.target_date = ma.target_date
+               )
+             WHERE ma.is_high IS NULL
+               AND (
+                   SELECT COUNT(DISTINCT t.is_high) FROM trades t
+                    WHERE t.city = ma.city AND t.target_date = ma.target_date
+               ) = 1
+        ''').rowcount
+        # Collapse exact repeats (same city/date/direction/model logged twice by
+        # a re-run) keeping the newest, so the UNIQUE index can be created.
+        dropped = conn.execute('''
+            DELETE FROM model_accuracy
+             WHERE is_high IS NOT NULL
+               AND id NOT IN (
+                   SELECT MAX(id) FROM model_accuracy
+                    WHERE is_high IS NOT NULL
+                    GROUP BY city, target_date, is_high, model
+               )
+        ''').rowcount
+        left = conn.execute(
+            "SELECT COUNT(*) FROM model_accuracy WHERE is_high IS NULL"
+        ).fetchone()[0]
+        logging.info(
+            f"model_accuracy is_high backfill: {pass1} by actual-split, {pass2} from trades, "
+            f"{dropped} duplicate rows collapsed, {left} unresolved (left NULL)"
+        )
+    except sqlite3.Error as e:
+        # A failed backfill must not stop the bot booting — the column exists
+        # either way and new rows are written correctly.
+        logging.error(f"model_accuracy is_high backfill failed: {e}", exc_info=True)
+
+
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
@@ -163,6 +231,28 @@ def init_db():
                 actual_temp REAL
             )
         ''')
+        # is_high belongs in the key. Without it a city's daily MAX and MIN both
+        # land on (city, target_date, model) and overwrite each other's actual —
+        # 24 of 47 verified city-days in the 2026-07-31 export carried two
+        # conflicting "actual" values for this reason. Per-direction bias is the
+        # single largest measured effect in the forecast record (highs run cold,
+        # lows run warm, see MODEL_BIAS_CORRECTIONS), so a table that cannot tell
+        # the two apart cannot fit it.
+        try:
+            conn.execute("ALTER TABLE model_accuracy ADD COLUMN is_high INTEGER")
+        except sqlite3.OperationalError:
+            pass
+        else:
+            _backfill_model_accuracy_is_high(conn)
+        # Partial UNIQUE index: legacy rows whose direction could not be recovered
+        # keep is_high NULL and are excluded (SQLite also treats NULLs as distinct,
+        # so they can never collide). Every new write sets is_high, so from here on
+        # one row per city/date/direction/model is enforced by the database.
+        conn.execute(
+            "CREATE UNIQUE INDEX IF NOT EXISTS idx_model_acc_unique "
+            "ON model_accuracy(city, target_date, is_high, model) "
+            "WHERE is_high IS NOT NULL"
+        )
         conn.execute('''
             CREATE TABLE IF NOT EXISTS bankroll (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -680,16 +770,78 @@ def vacuum_db():
             conn.close()
 
 
-def purge_old_signals(keep_days=60, skip_keep_days=None):
+def purge_old_signals(keep_days=60, skip_keep_days=None, sample_pct=None,
+                      near_miss_edge=None):
     """Delete signal rows older than keep_days. Called once per day to prevent table
     bloat. SKIP rows (the ~120k/day per-market skip diagnostics, each carrying the
     full raw_models JSON) get their own, much shorter skip_keep_days window — at the
-    shared 14-day retention they alone grew the DB to ~950MB and filled the volume."""
-    execute_query("DELETE FROM signals WHERE timestamp < ?", (_iso_cutoff(keep_days),))
-    if skip_keep_days is not None:
+    shared 14-day retention they alone grew the DB to ~950MB and filled the volume.
+
+    Two classes of SKIP row now survive that window indefinitely, because they are
+    the only large calibration sample this bot has. Every constant in config.py is
+    currently fitted on 27 settled trades; the skip trail carries ~40,000 scored
+    counterfactuals a day and was being deleted to save disk on a volume that has
+    since been extended.
+
+      sample_pct      keep a deterministic ~N% sample of ALL skips. Deterministic
+                      on id (not random) so the same row survives every purge —
+                      a random draw per run would erode the sample to nothing.
+      near_miss_edge  keep every skip whose edge cleared the entry threshold but
+                      failed some other gate. These are the counterfactuals that
+                      carry information: "the model wanted this and a gate said
+                      no" is what tells you whether the gate is earning its keep.
+
+    Retained rows survive BOTH windows, including keep_days — a calibration
+    sample that self-deletes after two weeks never accumulates enough to fit on,
+    which is the whole problem being solved. To make that affordable, their
+    raw_models JSON is dropped once they age past skip_keep_days: it is the bulk
+    of the row (~2.5KB of ~2.7KB) and is only useful for debugging a recent
+    scan, while the scalar features the calibration actually fits on — prices,
+    edge, model_prob, spread, agreement — are columns and stay. That turns the
+    sample from ~1.8GB/year into ~150MB/year.
+
+    Pass None/0 to either carve-out to disable it."""
+    carve = []
+    params_carve = []
+    if sample_pct:
+        # id % 100 is stable across runs, so the retained sample is a fixed
+        # cohort rather than a shrinking one.
+        carve.append("(id % 100) < ?")
+        params_carve.append(int(sample_pct))
+    if near_miss_edge is not None:
+        carve.append("(edge IS NOT NULL AND edge >= ?)")
+        params_carve.append(float(near_miss_edge))
+    keep_sql = f"({' OR '.join(carve)})" if carve else None
+
+    # Outer window. Retained rows are exempt, or the sample never accumulates.
+    if keep_sql:
+        execute_query(
+            f"DELETE FROM signals WHERE timestamp < ? AND NOT {keep_sql}",
+            (_iso_cutoff(keep_days), *params_carve),
+        )
+    else:
+        execute_query("DELETE FROM signals WHERE timestamp < ?", (_iso_cutoff(keep_days),))
+
+    if skip_keep_days is None:
+        return
+
+    skip_cutoff = _iso_cutoff(skip_keep_days)
+    if keep_sql:
+        execute_query(
+            f"DELETE FROM signals WHERE signal_type LIKE 'SKIP%' AND timestamp < ? "
+            f"AND NOT {keep_sql}",
+            (skip_cutoff, *params_carve),
+        )
+        # Shed the JSON on the rows we are keeping forever.
+        execute_query(
+            "UPDATE signals SET raw_models = NULL WHERE signal_type LIKE 'SKIP%' "
+            "AND timestamp < ? AND raw_models IS NOT NULL",
+            (skip_cutoff,),
+        )
+    else:
         execute_query(
             "DELETE FROM signals WHERE signal_type LIKE 'SKIP%' AND timestamp < ?",
-            (_iso_cutoff(skip_keep_days),),
+            (skip_cutoff,),
         )
 
 
