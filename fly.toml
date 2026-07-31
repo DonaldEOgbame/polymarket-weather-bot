@@ -9,10 +9,28 @@ primary_region = "arn"
   dockerfile = "Dockerfile"
 
 [env]
-  # LIVE since 2026-07-18: real money, deposit-wallet sig type 3, flat $2 stakes,
-  # hold-to-settlement exits. Paper era archived at /data/paper_archive.db
-  # (dashboard mode-pill toggle). Cutover: cutover_to_live.py.
-  PAPER_MODE = "false"
+  # PAPER since 2026-07-31, reverting the 2026-07-18 live cutover.
+  #
+  # Not a retreat from live trading — a collection run. The recalibration on
+  # this branch (direction-split sigma, per-model per-direction bias) has every
+  # constant fitted on <=27 settled trades, with 95% confidence intervals wider
+  # than the 1.8F buckets they decide. There is no neutral configuration to fall
+  # back to; the previous one was fitted on less. So the parking is a DEPLOYMENT
+  # STATE rather than a config edit: paper mode runs the new configuration
+  # against real markets, writes the replay log, and risks nothing.
+  #
+  # Signals write regardless of mode — only money movement is gated — so the
+  # shadow universe accumulates at full rate. Do not flip this back to "false"
+  # until the step-5 criteria in the ship prompt are met: >=200 resolved
+  # signals, and better calibrated log score AND higher expected P&L per
+  # evaluated market than the incumbent, measured over markets both
+  # configurations saw plus markets only one would have taken.
+  #
+  # NOTE: PAPER_MODE is a managed setting — a dashboard mode switch writes to
+  # the `settings` table, which OVERRIDES this value (config._tunable: DB > env).
+  # There is no settings table in production as of this deploy, so this env var
+  # governs. If one is created later, changing this file alone will do nothing.
+  PAPER_MODE = "true"
   DB_PATH = "/data/bot.db"
   PORT = "8080"
   STARTING_BANKROLL = "18.86"
