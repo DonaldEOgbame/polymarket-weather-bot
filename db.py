@@ -287,6 +287,120 @@ def init_db():
         except sqlite3.OperationalError:
             pass
 
+        # --- Replay log -------------------------------------------------
+        # One row per EVALUATED opportunity — traded, skipped, gate-failed
+        # alike — carrying enough input to recompute the decision under ANY
+        # configuration offline. There is deliberately no second evaluation
+        # path in production: every config question is a replay against these
+        # rows, so N configurations cost nothing at runtime.
+        #
+        # The two columns that made the 2026-07-31 audit possible only by
+        # hand are raw_models_pre_correction and corrections_applied. The
+        # existing signals.raw_models holds POST-correction values, so
+        # reconstructing what the models actually said required hardcoding
+        # which corrections shipped on which date — and MODEL_BIAS_CORRECTIONS
+        # changed twice in one afternoon with no record. Storing the raw
+        # values AND the correction applied to each makes the row
+        # self-describing: replay never needs to know the config history.
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS replay_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                schema_version INTEGER NOT NULL,
+                config_fingerprint TEXT NOT NULL,
+                mode TEXT,
+
+                market_id TEXT,
+                city TEXT,
+                city_key TEXT,
+                station_icao TEXT,
+                region TEXT,
+                target_date TEXT,
+                is_high INTEGER,
+                lead_hours REAL,
+
+                bucket_low REAL,
+                bucket_high REAL,
+                bucket_type TEXT,
+                bucket_width REAL,
+                is_narrow INTEGER,
+
+                raw_models_pre_correction TEXT,
+                corrections_applied TEXT,
+                model_weights TEXT,
+                model_run_init TEXT,
+                model_count INTEGER,
+                weighted_spread_sd REAL,
+                unweighted_range REAL,
+                model_agreement REAL,
+                raw_weighted_mean REAL,
+                ensemble_mean REAL,
+
+                best_bid REAL,
+                best_ask REAL,
+                mid REAL,
+                spread_fraction REAL,
+                volume REAL,
+                ask_depth_usd REAL,
+                bid_depth_usd REAL,
+                yes_price REAL,
+                no_price REAL,
+
+                sigma_base REAL,
+                sigma_post_spread REAL,
+                sigma_post_direction REAL,
+                sigma_post_convective REAL,
+                sigma_post_clamp REAL,
+                sigma_post_narrow REAL,
+                sigma_final REAL,
+
+                prob_raw REAL,
+                prob_post_platt REAL,
+                prob_post_floor REAL,
+
+                edge_raw REAL,
+                edge_post_fee REAL,
+                edge_threshold REAL,
+                side_evaluated TEXT,
+
+                decision TEXT,
+                skip_reason TEXT,
+
+                settled_value REAL,
+                settled_outcome TEXT,
+                settled_at TEXT
+            )
+        ''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_ts ON replay_signals(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_settle "
+                     "ON replay_signals(target_date, city_key, is_high)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_market "
+                     "ON replay_signals(market_id, timestamp)")
+
+        # Structured gate outcomes, one row per gate per signal. NOT a
+        # free-text reason string: the prose `signals.signal_type` field is
+        # what made the survivor-count reconciliation ambiguous, because
+        # "which gate cut this" could only be recovered by parsing English.
+        # observed_value and threshold are stored side by side so a units
+        # error (the MAX_MODEL_SPREAD max-min -> sd change) shows up as a
+        # gate rejecting 0% or 100% rather than as silence.
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS replay_gates (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                signal_id INTEGER NOT NULL,
+                gate TEXT NOT NULL,
+                observed REAL,
+                threshold REAL,
+                passed INTEGER NOT NULL,
+                detail TEXT,
+                FOREIGN KEY (signal_id) REFERENCES replay_signals(id)
+            )
+        ''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_gates_sig "
+                     "ON replay_gates(signal_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_gates_gate "
+                     "ON replay_gates(gate, passed)")
+
         conn.execute('''
             CREATE TABLE IF NOT EXISTS resolutions (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -879,3 +993,91 @@ def get_recent_notifications(limit=100):
 def purge_old_notifications(keep_days=30):
     """Delete notification rows older than keep_days."""
     execute_query("DELETE FROM notifications WHERE timestamp < ?", (_iso_cutoff(keep_days),))
+
+
+def log_replay_signal(row, gates):
+    """Persist one evaluated opportunity plus its structured gate outcomes.
+
+    Best-effort: a logging failure must never stop a scan or block a trade. The
+    replay log is a research artifact, not part of the trading path, and a
+    schema drift here should degrade the dataset rather than the bot.
+
+    `row` is a dict of column -> value; unknown keys are dropped rather than
+    raising, so adding a field to the caller before the migration lands is safe.
+    `gates` is a list of {gate, observed, threshold, passed, detail}."""
+    try:
+        with _write_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=30.0)
+            try:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(replay_signals)")}
+                data = {k: v for k, v in row.items() if k in cols}
+                if not data:
+                    return None
+                names = ", ".join(data)
+                marks = ", ".join("?" * len(data))
+                cur = conn.execute(
+                    f"INSERT INTO replay_signals ({names}) VALUES ({marks})",
+                    tuple(data.values()),
+                )
+                sig_id = cur.lastrowid
+                if gates:
+                    conn.executemany(
+                        "INSERT INTO replay_gates (signal_id, gate, observed, threshold,"
+                        " passed, detail) VALUES (?, ?, ?, ?, ?, ?)",
+                        [(sig_id, g["gate"],
+                          None if g.get("observed") is None else float(g["observed"]),
+                          None if g.get("threshold") is None else float(g["threshold"]),
+                          1 if g["passed"] else 0, g.get("detail"))
+                         for g in gates],
+                    )
+                conn.commit()
+                return sig_id
+            finally:
+                conn.close()
+    except Exception as e:
+        logging.error(f"replay logging failed: {e}", exc_info=True)
+        return None
+
+
+def backfill_replay_outcomes(limit=5000):
+    """Attach settlement to replay rows whose target day has since resolved.
+
+    Runs off the resolutions table rather than re-fetching METAR, so the replay
+    log settles on exactly the ruler the trades settled on. Rows for markets
+    that were never traded stay unsettled until a resolution exists for that
+    city/date — the shadow run's whole purpose is scoring markets nobody bet on,
+    so this is deliberately keyed on (city, target_date, is_high) and not on
+    market_id."""
+    execute_query(
+        """
+        UPDATE replay_signals
+           SET settled_value = (
+                   SELECT r.actual_value FROM resolutions r
+                    WHERE r.city = replay_signals.city
+                      AND r.target_date = replay_signals.target_date
+                      AND r.actual_value IS NOT NULL
+                    ORDER BY r.id DESC LIMIT 1),
+               settled_at = ?
+         WHERE settled_value IS NULL
+           AND target_date IS NOT NULL
+           AND EXISTS (
+                   SELECT 1 FROM resolutions r
+                    WHERE r.city = replay_signals.city
+                      AND r.target_date = replay_signals.target_date
+                      AND r.actual_value IS NOT NULL)
+        """,
+        (datetime.now(timezone.utc).isoformat(),),
+    )
+    # Outcome is derived, not copied: a replay row's bucket is its OWN bucket,
+    # which for an untraded market is not the bucket any resolution row scored.
+    execute_query(
+        """
+        UPDATE replay_signals
+           SET settled_outcome = CASE
+                   WHEN settled_value IS NULL THEN NULL
+                   WHEN settled_value >= COALESCE(bucket_low, -1e9) - 0.5
+                    AND settled_value <= COALESCE(bucket_high, 1e9) + 0.5
+                   THEN 'YES' ELSE 'NO' END
+         WHERE settled_value IS NOT NULL AND settled_outcome IS NULL
+        """
+    )

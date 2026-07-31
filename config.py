@@ -1032,3 +1032,59 @@ def validate_env_ranges():
         )
 
     return problems
+
+
+# --- Replay-log identity --------------------------------------------------
+# Bump when the replay_signals / replay_gates column set changes meaning, so a
+# replay can refuse rows it cannot interpret rather than misreading them.
+REPLAY_SCHEMA_VERSION = 1
+
+# Every constant that can change a probability or a gate outcome. The
+# fingerprint over these is stored on each logged signal, because a replay that
+# cannot tell which configuration produced a row is a replay that will silently
+# mix two. MODEL_BIAS_CORRECTIONS changed twice on 2026-07-31 with no record;
+# the whole point of this column is that such a change can never again be
+# invisible after the fact.
+#
+# Deliberately NOT included: sizing, risk, retention, discovery, alerting. Those
+# change what is bought, not what is believed, and including them would churn
+# the fingerprint for changes a replay does not care about.
+_FINGERPRINT_KEYS = (
+    "EDGE_THRESHOLD", "MIN_MODEL_AGREEMENT", "MAX_MODEL_SPREAD_STD",
+    "MIN_MODEL_COUNT", "MAX_ENTRY_SPREAD_FRACTION", "MAX_ENTRY_PRICE",
+    "FORECAST_MARGIN_F", "YES_MARGIN_WIDTH_FRACTION",
+    "NARROW_BUCKET_WIDTH_F", "NARROW_BUCKET_EDGE_THRESHOLD",
+    "NARROW_BUCKET_STD_INFLATION",
+    "CONVECTIVE_STD_INFLATION", "CONVECTIVE_CITIES",
+    "ENABLE_PROB_CALIBRATION", "PROB_CALIBRATION_INTERCEPT",
+    "PROB_CALIBRATION_SLOPE", "MIN_BUCKET_PROB",
+    "BASE_FORECAST_ERROR", "SIGMA_SPREAD_COEF", "SIGMA_SCALE_HIGH",
+    "SIGMA_SCALE_LOW", "MIN_SIGMA_F", "MAX_SIGMA_F", "SIGMA_STUDENT_T_DF",
+    "METAR_WARM_CORRECTION_F", "GFS_BIAS_CORRECTIONS", "MODEL_BIAS_CORRECTIONS",
+    "TAKER_FEE_RATE", "SLIPPAGE_FRACTION",
+)
+
+
+def config_fingerprint():
+    """Stable short hash over every probability- and gate-affecting constant.
+
+    Sorted and canonicalised so it depends on VALUES, not on dict ordering or
+    float repr drift. Returned as 16 hex chars — long enough that a collision
+    between two real configurations is not a practical concern, short enough to
+    eyeball in a query result."""
+    import hashlib
+    g = globals()
+
+    def canon(v):
+        if isinstance(v, dict):
+            return sorted((canon(k), canon(x)) for k, x in v.items())
+        if isinstance(v, (set, frozenset)):
+            return sorted(canon(x) for x in v)
+        if isinstance(v, tuple):
+            return [canon(x) for x in v]
+        if isinstance(v, float):
+            return f"{v:.10g}"
+        return str(v)
+
+    payload = repr([(k, canon(g[k])) for k in sorted(_FINGERPRINT_KEYS) if k in g])
+    return hashlib.sha256(payload.encode()).hexdigest()[:16]

@@ -102,6 +102,32 @@ def _bucket_cdf(x, loc, scale):
     return _norm_cdf(x, loc, scale)
 
 
+def compute_sigma_stages(spread_std, lead_hours, is_high, city_key=None):
+    """Every intermediate value on the way to sigma, as a dict.
+
+    Exists so the replay log can record WHERE a sigma came from, not just what
+    it ended up as. A sigma of 8.0 tells you nothing; a sigma that was 5.6
+    before the convective step and 8.0 after the clamp tells you which constant
+    to look at."""
+    base = _interpolate_base_error(lead_hours)
+    post_spread = base + SIGMA_SPREAD_COEF * float(spread_std)
+    k = SIGMA_SCALE_HIGH if is_high else SIGMA_SCALE_LOW
+    post_direction = k * post_spread
+    convective = bool(city_key and city_key in CONVECTIVE_CITIES)
+    post_convective = post_direction * (CONVECTIVE_STD_INFLATION if convective else 1.0)
+    post_clamp = min(max(post_convective, MIN_SIGMA_F), MAX_SIGMA_F)
+    return {
+        "base": base,
+        "post_spread": post_spread,
+        "direction_scale": k,
+        "post_direction": post_direction,
+        "convective": convective,
+        "post_convective": post_convective,
+        "post_clamp": post_clamp,
+        "clamped": post_clamp != post_convective,
+    }
+
+
 def compute_sigma(spread_std, lead_hours, is_high, city_key=None):
     """Forecast sigma in °F.
 
@@ -114,18 +140,15 @@ def compute_sigma(spread_std, lead_hours, is_high, city_key=None):
 
     `spread_std` must be the WEIGHTED standard deviation of the members, not
     max-min: the coefficient is fitted against the former precisely because it
-    does not drift as the ensemble grows."""
-    base = _interpolate_base_error(lead_hours)
-    k = SIGMA_SCALE_HIGH if is_high else SIGMA_SCALE_LOW
-    sigma = k * (base + SIGMA_SPREAD_COEF * float(spread_std))
-    if city_key and city_key in CONVECTIVE_CITIES:
-        sigma *= CONVECTIVE_STD_INFLATION
-    # Ceiling guards extrapolation beyond the fitted spread range; by
-    # construction it cannot bind on a market the spread gate would let through.
-    return min(max(sigma, MIN_SIGMA_F), MAX_SIGMA_F)
+    does not drift as the ensemble grows.
+
+    Thin wrapper over compute_sigma_stages so there is exactly one definition of
+    the formula — the replay log and the trading decision cannot disagree."""
+    return compute_sigma_stages(spread_std, lead_hours, is_high, city_key)["post_clamp"]
 
 
-def _build_engine_result(model_temps, region, city_key, lead_hours, is_high):
+def _build_engine_result(model_temps, region, city_key, lead_hours, is_high,
+                         raw_models=None, corrections=None):
     """Assemble the signal-engine dict from a model→temp map.
 
     Single implementation shared by get_signal_engine (one market) and
@@ -156,7 +179,8 @@ def _build_engine_result(model_temps, region, city_key, lead_hours, is_high):
     weighted_mean = raw_weighted_mean + METAR_WARM_CORRECTION_F
 
     model_spread_std = float(_weighted_pstdev(model_temps, weights))
-    combined_std = compute_sigma(model_spread_std, lead_hours, is_high, city_key)
+    sigma_stages = compute_sigma_stages(model_spread_std, lead_hours, is_high, city_key)
+    combined_std = sigma_stages["post_clamp"]
 
     # Agreement is measured against the RAW consensus, not the bias-shifted mean:
     # no model temp contains METAR_WARM_CORRECTION_F, so comparing to the shifted
@@ -185,6 +209,18 @@ def _build_engine_result(model_temps, region, city_key, lead_hours, is_high):
         "model_count": len(model_temps),
         "is_high": bool(is_high),
         "convective_inflated": city_key in CONVECTIVE_CITIES,
+        # --- replay-log payload ---------------------------------------
+        # raw_models here is the PRE-correction Open-Meteo value, unlike the
+        # "raw_models" key above (which is post-correction and kept under that
+        # name only because the signals table and the dashboard already read
+        # it). `corrections` is what applied_corrections returned at fetch
+        # time, so raw + correction == the value actually used, provably,
+        # without a replay needing to know the config history.
+        "raw_models_pre_correction": dict(raw_models) if raw_models else None,
+        "corrections_applied": dict(corrections) if corrections else None,
+        "model_weights": {m: weights[m] for m in model_temps if m in weights},
+        "sigma_stages": sigma_stages,
+        "region": region,
     }
 
 # Cross-scan in-memory forecast cache: {(city, is_high): (fetch_timestamp, result)}
@@ -367,6 +403,8 @@ def fetch_forecasts(city_name, is_high=True, force_refresh=False):
     times = daily.get("time", [])
     
     forecasts_by_date = {}
+    raw_by_date = {}
+    corrections_by_date = {}
     for i, date_str in enumerate(times):
         model_temps = {}
         for model in models:
@@ -375,32 +413,22 @@ def fetch_forecasts(city_name, is_high=True, force_refresh=False):
             val = vals[i] if i < len(vals) else None
             
             if val is not None:
-                # GFS warm bias correction (city-keyed, configured in config.py)
-                if model == "gfs_global" and city_key in GFS_BIAS_CORRECTIONS:
-                    correction = GFS_BIAS_CORRECTIONS[city_key]
-                    val += correction
-                    logging.debug(f"GFS bias correction ({correction:+.1f}°F) for {city_key}")
-
-                # Per-model bias correction, keyed by DIRECTION as well as model.
-                # A model that runs cold on daily maxima generally runs warm on
-                # daily minima — Open-Meteo interpolates coarse-timestep output to
-                # hourly, and smoothing a diurnal curve clips the afternoon peak
-                # and lifts the overnight trough. One signed offset applied to
-                # both directions therefore corrects one of them the wrong way;
-                # for jma_gsm the old flat +1.55 was 3.26°F out on minima. See the
-                # measured table in config.MODEL_BIAS_CORRECTIONS.
-                model_correction = model_bias_correction(model, is_high)
-                if model_correction:
-                    val += model_correction
-                    logging.debug(
-                        f"Model bias correction ({model_correction:+.2f}°F) for "
-                        f"{model} is_high={is_high}"
-                    )
-
                 model_temps[model] = val
-        forecasts_by_date[date_str] = model_temps
-        
-    result = forecasts_by_date, city_key, region
+
+        # Corrections come from ONE place (applied_corrections) so the replay
+        # log records exactly what was applied here — see that function. The
+        # per-model, per-direction split exists because a model that runs cold
+        # on daily maxima generally runs warm on daily minima: Open-Meteo
+        # interpolates coarse-timestep output to hourly, and smoothing a diurnal
+        # curve clips the afternoon peak and lifts the overnight trough. One
+        # signed offset applied to both directions corrects one of them the
+        # wrong way; for jma_gsm the old flat +1.55 was 3.26°F out on minima.
+        corr = applied_corrections(city_key, is_high, model_temps)
+        raw_by_date[date_str] = dict(model_temps)
+        corrections_by_date[date_str] = corr
+        forecasts_by_date[date_str] = {m: v + corr[m] for m, v in model_temps.items()}
+
+    result = (forecasts_by_date, city_key, region, raw_by_date, corrections_by_date)
     _FORECAST_CACHE[cache_key] = (_time.monotonic(), result)
     return result
 
@@ -408,15 +436,17 @@ def get_signal_engine(city_name, target_date, is_high=True, hours_to_resolution=
     res = fetch_forecasts(city_name, is_high)
     if not res:
         return None
-    forecasts_by_date, city_key, region = res
-    
+    forecasts_by_date, city_key, region, raw_by_date, corr_by_date = res
+
     if target_date not in forecasts_by_date:
         logging.warning(f"Target date {target_date} not in forecast range")
         return None
-        
+
     return _build_engine_result(
         forecasts_by_date[target_date], region, city_key,
         hours_to_resolution, is_high,
+        raw_models=raw_by_date.get(target_date),
+        corrections=corr_by_date.get(target_date),
     )
 
 def _calibrate_prob(p):
@@ -446,6 +476,48 @@ def _calibrate_prob(p):
     # keeping the function continuous and monotonic across the whole [0,1] range.
     w = (0.5 - p) / 0.5
     return p + w * (cal - p)
+
+
+def bucket_probability_stages(engine_result, bucket_lower, bucket_upper):
+    """P(YES) at each stage: raw CDF, post-Platt, post-floor.
+
+    Same reason as compute_sigma_stages — a logged probability of exactly 0.05
+    is unreadable without knowing whether the floor bound or the Gaussian
+    genuinely landed there. get_bucket_probability delegates here so there is
+    one implementation."""
+    mean = engine_result["ensemble_mean"]
+    std = max(engine_result["ensemble_std"], 0.5)
+
+    lb = bucket_lower if bucket_lower is not None else -1000.0
+    ub = bucket_upper if bucket_upper is not None else 1000.0
+
+    if bucket_lower is not None and bucket_upper is not None:
+        lb -= 0.5
+        ub += 0.5
+    elif bucket_lower is not None:
+        lb -= 0.5
+    elif bucket_upper is not None:
+        ub += 0.5
+
+    raw = _bucket_cdf(ub, mean, std) - _bucket_cdf(lb, mean, std)
+    raw = max(0.0, min(1.0, float(raw)))
+
+    is_bounded = bucket_lower is not None and bucket_upper is not None
+    post_platt = _calibrate_prob(raw) if is_bounded else raw
+
+    post_floor = post_platt
+    floor_bound = MIN_BUCKET_PROB > 0.0 and post_platt < MIN_BUCKET_PROB
+    if floor_bound:
+        post_floor = MIN_BUCKET_PROB
+    post_floor = max(0.0, min(1.0, float(post_floor)))
+
+    return {
+        "raw": raw,
+        "post_platt": post_platt,
+        "post_floor": post_floor,
+        "platt_applied": is_bounded and ENABLE_PROB_CALIBRATION,
+        "floor_bound": floor_bound,
+    }
 
 
 def get_bucket_probability(engine_result, bucket_lower, bucket_upper):
@@ -493,6 +565,25 @@ def get_bucket_probability(engine_result, bucket_lower, bucket_upper):
         prob = MIN_BUCKET_PROB
     return max(0.0, min(1.0, float(prob)))
 
+
+def applied_corrections(city_key, is_high, models):
+    """The °F added to each model's raw Open-Meteo value, as a dict.
+
+    ONE definition, used by fetch_forecasts to apply the corrections and by the
+    replay logger to record them. They cannot drift apart, which is the entire
+    point: the replay log stores raw + applied, and `applied` has to be what was
+    actually applied, not a later reconstruction of what probably was. The
+    2026-07-31 audit had to hardcode which corrections shipped on which date,
+    and got the ensemble mean wrong on 5 of 27 trades as a result."""
+    out = {}
+    for model in models:
+        c = 0.0
+        if model == "gfs_global" and city_key in GFS_BIAS_CORRECTIONS:
+            c += GFS_BIAS_CORRECTIONS[city_key]
+        c += model_bias_correction(model, is_high)
+        out[model] = c
+    return out
+
 def prefetch_signal_engines(opportunities) -> dict:
     """Fetch weather forecasts for all opportunities, minimising API calls.
 
@@ -538,7 +629,7 @@ def prefetch_signal_engines(opportunities) -> dict:
         if raw is None:
             engine_cache[key] = None
             continue
-        forecasts_by_date, city_key, region = raw
+        forecasts_by_date, city_key, region, raw_by_date, corr_by_date = raw
 
         if opp.date not in forecasts_by_date:
             engine_cache[key] = None
@@ -547,6 +638,8 @@ def prefetch_signal_engines(opportunities) -> dict:
         engine_cache[key] = _build_engine_result(
             forecasts_by_date[opp.date], region, city_key,
             opp.hours_to_resolution, opp.is_high,
+            raw_models=raw_by_date.get(opp.date),
+            corrections=corr_by_date.get(opp.date),
         )
 
     hits = sum(1 for v in engine_cache.values() if v is not None)

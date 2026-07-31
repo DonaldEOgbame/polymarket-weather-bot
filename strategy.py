@@ -1,6 +1,7 @@
 import json
 import logging
-from weather import get_signal_engine, get_bucket_probability
+from weather import (get_signal_engine, get_bucket_probability,
+                     bucket_probability_stages)
 from scanner import get_realtime_price, get_orderbook_depth_usd, PARSER_VERSION
 from db import execute_query
 from datetime import datetime, timezone
@@ -127,6 +128,169 @@ def forecast_direction_agrees(side, raw_weighted_mean, bucket_low, bucket_high):
     return model_predicts_yes if side == "YES" else not model_predicts_yes
 
 
+def _log_replay_row(*, timestamp, opp, engine_res, prob_stages, sigma_final,
+                    bucket_width, is_narrow, no_edge, yes_edge, prob,
+                    edge_threshold, gates, no_spread_frac, decision, skip_reason,
+                    ask_depth_usd, bid_depth_usd):
+    """Write the replay row for one evaluated opportunity.
+
+    Records INPUTS, not conclusions, so any future configuration can be scored
+    against this market offline. There is deliberately no second evaluation in
+    production: dual-config scoring doubles the compute and the failure surface
+    and still only ever compares two configurations.
+
+    Best-effort, and the try/except is load-bearing rather than defensive:
+    log_replay_signal swallows its own DB errors, but everything BEFORE it —
+    the imports, the JSON encoding, reading engine keys that an older cached
+    engine_res may not carry — runs on the trading path. Without this, a replay
+    schema change could stop the bot placing trades. Research telemetry must
+    never be able to do that."""
+    try:
+        _log_replay_row_inner(
+            timestamp=timestamp, opp=opp, engine_res=engine_res,
+            prob_stages=prob_stages, sigma_final=sigma_final,
+            bucket_width=bucket_width, is_narrow=is_narrow, no_edge=no_edge,
+            yes_edge=yes_edge, prob=prob, edge_threshold=edge_threshold,
+            gates=gates, no_spread_frac=no_spread_frac, decision=decision,
+            skip_reason=skip_reason, ask_depth_usd=ask_depth_usd,
+            bid_depth_usd=bid_depth_usd,
+        )
+    except Exception as e:
+        logging.error(f"replay row build failed for {opp.market_id}: {e}", exc_info=True)
+
+
+def _log_replay_row_inner(*, timestamp, opp, engine_res, prob_stages, sigma_final,
+                          bucket_width, is_narrow, no_edge, yes_edge, prob,
+                          edge_threshold, gates, no_spread_frac, decision,
+                          skip_reason, ask_depth_usd, bid_depth_usd):
+    from db import log_replay_signal
+    from config import config_fingerprint, REPLAY_SCHEMA_VERSION, paper_mode
+    from metar import STATION_ICAO
+
+    ss = engine_res.get("sigma_stages") or {}
+    city_key = engine_res.get("city_key")
+    lo, hi = opp.bucket_low, opp.bucket_high
+    bucket_type = ("range" if lo is not None and hi is not None and lo != hi
+                   else "exact" if lo is not None and hi is not None
+                   else "above" if lo is not None
+                   else "below" if hi is not None else "unbounded")
+    icao = (STATION_ICAO.get(city_key) or (None, None))[0]
+
+    row = {
+        "timestamp": timestamp,
+        "schema_version": REPLAY_SCHEMA_VERSION,
+        "config_fingerprint": config_fingerprint(),
+        "mode": "paper" if paper_mode() else "live",
+        "market_id": opp.market_id, "city": opp.city, "city_key": city_key,
+        "station_icao": icao, "region": engine_res.get("region"),
+        "target_date": opp.date, "is_high": int(bool(opp.is_high)),
+        "lead_hours": opp.hours_to_resolution,
+        "bucket_low": lo, "bucket_high": hi, "bucket_type": bucket_type,
+        "bucket_width": bucket_width, "is_narrow": int(bool(is_narrow)),
+        "raw_models_pre_correction": json.dumps(
+            engine_res.get("raw_models_pre_correction") or {}),
+        "corrections_applied": json.dumps(engine_res.get("corrections_applied") or {}),
+        "model_weights": json.dumps(engine_res.get("model_weights") or {}),
+        # Open-Meteo's daily endpoint does not return per-model run init times in
+        # the shape we request, so this is NULL until the request adds them.
+        # The column exists now because backfilling a column is cheap and
+        # backfilling the DATA it would have held is impossible.
+        "model_run_init": None,
+        "model_count": engine_res.get("model_count"),
+        "weighted_spread_sd": engine_res.get("model_spread_std"),
+        "unweighted_range": engine_res.get("model_spread_range"),
+        "model_agreement": engine_res.get("model_agreement"),
+        "raw_weighted_mean": engine_res.get("raw_weighted_mean"),
+        "ensemble_mean": engine_res.get("ensemble_mean"),
+        "yes_price": opp.yes_price, "no_price": opp.no_price,
+        "volume": getattr(opp, "volume", None),
+        "spread_fraction": no_spread_frac,
+        "ask_depth_usd": ask_depth_usd, "bid_depth_usd": bid_depth_usd,
+        "sigma_base": ss.get("base"),
+        "sigma_post_spread": ss.get("post_spread"),
+        "sigma_post_direction": ss.get("post_direction"),
+        "sigma_post_convective": ss.get("post_convective"),
+        "sigma_post_clamp": ss.get("post_clamp"),
+        "sigma_post_narrow": sigma_final,
+        "sigma_final": sigma_final,
+        "prob_raw": prob_stages.get("raw"),
+        "prob_post_platt": prob_stages.get("post_platt"),
+        "prob_post_floor": prob_stages.get("post_floor"),
+        "edge_raw": (1.0 - prob) - opp.no_price,
+        "edge_post_fee": no_edge,
+        "edge_threshold": edge_threshold,
+        "side_evaluated": "NO",
+        "decision": decision or "SKIP",
+        "skip_reason": skip_reason,
+    }
+    log_replay_signal(row, gates)
+
+
+def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
+                   no_spread_frac):
+    """Every NO-side gate as a structured record, in decision order.
+
+    Returns [{gate, observed, threshold, passed, detail}, ...]. `detail` is the
+    human-readable skip reason, so the decision path and the replay log share
+    one wording as well as one condition.
+
+    Order matters and matches the original if/elif chain exactly: the first
+    failure is the one reported, and reordering would change which reason a
+    multiply-blocked market shows.
+
+    Every gate is evaluated regardless of whether an earlier one already failed.
+    That costs a few comparisons and buys the counterfactual: "how often would
+    this gate have bound if the one before it hadn't?" is the question the
+    shadow run exists to answer, and short-circuit evaluation destroys it."""
+    mean = engine_res["ensemble_mean"]
+    lo, hi = opp.bucket_low, opp.bucket_high
+    price = opp.no_price
+    payoff = ((1.0 - price) / price) if price else float("inf")
+
+    return [
+        {"gate": "edge_threshold", "observed": no_edge, "threshold": edge_threshold,
+         "passed": no_edge >= edge_threshold,
+         "detail": f"Insufficient NO edge ({no_edge:.3f} < {edge_threshold})"},
+        {"gate": "model_agreement", "observed": agreement, "threshold": MIN_MODEL_AGREEMENT,
+         "passed": agreement >= MIN_MODEL_AGREEMENT,
+         "detail": f"NO edge {no_edge:.3f} but agreement too low "
+                   f"({agreement:.2f} < {MIN_MODEL_AGREEMENT})"},
+        {"gate": "model_spread_sd", "observed": spread, "threshold": MAX_MODEL_SPREAD_STD,
+         "passed": spread <= MAX_MODEL_SPREAD_STD,
+         "detail": f"NO edge {no_edge:.3f} but spread too wide "
+                   f"({spread:.2f}°F sd > {MAX_MODEL_SPREAD_STD}°F sd)"},
+        # Fail CLOSED on an unreadable book: empty/one-sided/error is most likely
+        # exactly the thin market this gate exists to block. Observed is None
+        # rather than 0.0 so a replay can tell "unreadable" from "zero spread".
+        {"gate": "book_readable", "observed": no_spread_frac, "threshold": None,
+         "passed": no_spread_frac is not None,
+         "detail": f"NO edge {no_edge:.3f} but order-book spread unreadable — "
+                   f"cannot verify entry cost"},
+        {"gate": "market_spread_frac", "observed": no_spread_frac,
+         "threshold": MAX_ENTRY_SPREAD_FRACTION,
+         "passed": no_spread_frac is not None and no_spread_frac <= MAX_ENTRY_SPREAD_FRACTION,
+         "detail": f"NO edge {no_edge:.3f} but market spread too wide "
+                   f"({(no_spread_frac or 0):.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"},
+        # Payoff asymmetry: at price p the trade risks 1 to win (1-p)/p.
+        {"gate": "entry_price", "observed": price, "threshold": MAX_ENTRY_PRICE,
+         "passed": price < MAX_ENTRY_PRICE,
+         "detail": f"NO edge {no_edge:.3f} but entry price too high "
+                   f"({price:.3f} >= {MAX_ENTRY_PRICE:.2f}): risks $1.00 to win "
+                   f"${payoff:.2f}"},
+        {"gate": "forecast_margin", "observed": mean, "threshold": FORECAST_MARGIN_F,
+         "passed": forecast_margin_ok("NO", mean, lo, hi, FORECAST_MARGIN_F),
+         "detail": f"NO edge {no_edge:.3f} but forecast too close to bucket edge "
+                   f"(mean {mean:.1f}°F, need ≥{FORECAST_MARGIN_F}°F clear of bucket)"},
+        {"gate": "forecast_direction", "observed": engine_res.get("raw_weighted_mean"),
+         "threshold": None,
+         "passed": forecast_direction_agrees(
+             "NO", engine_res.get("raw_weighted_mean"), lo, hi),
+         "detail": f"NO edge {no_edge:.3f} but raw model forecast points the other way "
+                   f"(bet requires models to predict missing the bucket, before "
+                   f"resolution-source correction)"},
+    ]
+
+
 def calculate_kelly(edge, price):
     """Fractional Kelly criterion for binary prediction markets.
     
@@ -190,6 +354,12 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     # Use elevated edge threshold for narrow buckets (Fix 1)
     effective_edge_threshold = NARROW_BUCKET_EDGE_THRESHOLD if is_narrow else EDGE_THRESHOLD
 
+    # Stages, then the value. bucket_probability_stages and
+    # get_bucket_probability share an implementation, so `prob` below is
+    # exactly prob_stages["post_floor"] — the log cannot record a different
+    # number from the one that was traded on.
+    prob_stages = bucket_probability_stages(engine_res, opp.bucket_low, opp.bucket_high)
+    sigma_final = engine_res["ensemble_std"]
     prob = get_bucket_probability(engine_res, opp.bucket_low, opp.bucket_high)
 
     # Real live spread at evaluation time, replacing the flat SLIPPAGE_FRACTION guess.
@@ -225,34 +395,20 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     if yes_edge >= effective_edge_threshold:
         skip_reason = f"YES edge {yes_edge:.3f} but YES entries are disabled"
     
+    # Every NO-side gate, evaluated independently and in decision order. The
+    # decision below consumes this list rather than re-testing the conditions,
+    # so what gets LOGGED and what actually gated the trade cannot diverge —
+    # which is what made "which gate cut this trade?" unanswerable from the old
+    # free-text skip_reason during the 2026-07-31 reconciliation.
+    no_gates = _no_side_gates(opp, engine_res, no_edge, effective_edge_threshold,
+                              agreement, spread, no_spread_frac)
+
     # Evaluate NO side (independent check)
     if signal is None and no_edge >= effective_edge_threshold:
-        if agreement < MIN_MODEL_AGREEMENT:
-            skip_reason = f"NO edge {no_edge:.3f} but agreement too low ({agreement:.2f} < {MIN_MODEL_AGREEMENT})"
-        elif spread > MAX_MODEL_SPREAD_STD:
-            skip_reason = (f"NO edge {no_edge:.3f} but spread too wide "
-                           f"({spread:.2f}°F sd > {MAX_MODEL_SPREAD_STD}°F sd)")
-        elif no_spread_frac is None:
-            # Fail CLOSED: an unreadable book (empty/one-sided/error) is most
-            # likely exactly the thin market this gate exists to block — skipping
-            # the check here let trades fire on Gamma-mid "edge" no real fill
-            # could capture.
-            skip_reason = f"NO edge {no_edge:.3f} but order-book spread unreadable — cannot verify entry cost"
-        elif no_spread_frac > MAX_ENTRY_SPREAD_FRACTION:
-            skip_reason = f"NO edge {no_edge:.3f} but market spread too wide ({no_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"
-        elif opp.no_price >= MAX_ENTRY_PRICE:
-            # Payoff asymmetry gate: at price p the trade risks 1 to win (1-p)/p.
-            # Above 0.75 that is worse than 1:3 and demands a hit rate the model
-            # cannot reliably clear. See MAX_ENTRY_PRICE in config.py.
-            skip_reason = (
-                f"NO edge {no_edge:.3f} but entry price too high "
-                f"({opp.no_price:.3f} >= {MAX_ENTRY_PRICE:.2f}): risks ${1.0:.2f} to win "
-                f"${(1.0 - opp.no_price) / opp.no_price:.2f}"
-            )
-        elif not forecast_margin_ok("NO", engine_res["ensemble_mean"], opp.bucket_low, opp.bucket_high, FORECAST_MARGIN_F):
-            skip_reason = f"NO edge {no_edge:.3f} but forecast too close to bucket edge (mean {engine_res['ensemble_mean']:.1f}°F, need ≥{FORECAST_MARGIN_F}°F clear of bucket)"
-        elif not forecast_direction_agrees("NO", engine_res.get("raw_weighted_mean"), opp.bucket_low, opp.bucket_high):
-            skip_reason = f"NO edge {no_edge:.3f} but raw model forecast points the other way (bet requires models to predict missing the bucket, before resolution-source correction)"
+        failed = next((g for g in no_gates if not g["passed"]
+                       and g["gate"] != "edge_threshold"), None)
+        if failed is not None:
+            skip_reason = failed["detail"]
         else:
             signal = "BUY_NO"
             side = "NO"
@@ -438,6 +594,16 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         signal or f"SKIP: {skip_reason}", logged_spread_frac, PARSER_VERSION,
         ask_depth_usd, bid_depth_usd
     ))
+
+    _log_replay_row(
+        timestamp=timestamp, opp=opp, engine_res=engine_res,
+        prob_stages=prob_stages, sigma_final=sigma_final,
+        bucket_width=bucket_width, is_narrow=is_narrow,
+        no_edge=no_edge, yes_edge=yes_edge, prob=prob,
+        edge_threshold=effective_edge_threshold, gates=no_gates,
+        no_spread_frac=no_spread_frac, decision=signal, skip_reason=skip_reason,
+        ask_depth_usd=ask_depth_usd, bid_depth_usd=bid_depth_usd,
+    )
 
     if not signal:
         inflations = []
