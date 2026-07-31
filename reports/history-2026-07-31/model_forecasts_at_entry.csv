@@ -1,0 +1,237 @@
+t_id,era,city,date,is_high,model,forecast_f,actual_f,error_f,weight_region
+1,paper,Tel Aviv,2026-07-06,1,ecmwf_ifs025,91.29,,,GLOBAL
+1,paper,Tel Aviv,2026-07-06,1,icon_global,88.93,,,GLOBAL
+1,paper,Tel Aviv,2026-07-06,1,gem_global,90.62,,,GLOBAL
+1,paper,Tel Aviv,2026-07-06,1,jma_gsm,90.25,,,GLOBAL
+2,paper,Chicago,2026-07-05,1,ecmwf_ifs025,80.39,,,US
+2,paper,Chicago,2026-07-05,1,gfs_global,80.9,,,US
+2,paper,Chicago,2026-07-05,1,icon_global,79.03,,,US
+2,paper,Chicago,2026-07-05,1,gem_global,79.72,,,US
+3,paper,Chicago,2026-07-05,1,ecmwf_ifs025,80.39,,,US
+3,paper,Chicago,2026-07-05,1,gfs_global,80.9,,,US
+3,paper,Chicago,2026-07-05,1,icon_global,79.03,,,US
+3,paper,Chicago,2026-07-05,1,gem_global,79.72,,,US
+4,paper,Tel Aviv,2026-07-07,1,ecmwf_ifs025,88.39,,,GLOBAL
+4,paper,Tel Aviv,2026-07-07,1,icon_global,87.23,,,GLOBAL
+4,paper,Tel Aviv,2026-07-07,1,gem_global,88.92,,,GLOBAL
+4,paper,Tel Aviv,2026-07-07,1,jma_gsm,88.75,,,GLOBAL
+5,paper,Dallas,2026-07-06,1,ecmwf_ifs025,97.79,,,US
+5,paper,Dallas,2026-07-06,1,gfs_global,97.0,,,US
+5,paper,Dallas,2026-07-06,1,icon_global,96.83,,,US
+5,paper,Dallas,2026-07-06,1,gem_global,99.52,,,US
+6,paper,Dallas,2026-07-06,1,ecmwf_ifs025,100.29,,,US
+6,paper,Dallas,2026-07-06,1,gfs_global,100.2,,,US
+6,paper,Dallas,2026-07-06,1,icon_global,99.23,,,US
+6,paper,Dallas,2026-07-06,1,gem_global,99.52,,,US
+8,paper,London,2026-07-08,0,ecmwf_ifs025,67.89,,,EU
+8,paper,London,2026-07-08,0,icon_global,67.13,,,EU
+8,paper,London,2026-07-08,0,gfs_global,67.9,,,EU
+8,paper,London,2026-07-08,0,gem_global,67.42,,,EU
+9,paper,London,2026-07-08,0,ecmwf_ifs025,67.89,,,EU
+9,paper,London,2026-07-08,0,icon_global,67.13,,,EU
+9,paper,London,2026-07-08,0,gfs_global,67.9,,,EU
+9,paper,London,2026-07-08,0,gem_global,67.42,,,EU
+10,paper,New York,2026-07-07,0,ecmwf_ifs025,67.59,,,US
+10,paper,New York,2026-07-07,0,gfs_global,66.2,,,US
+10,paper,New York,2026-07-07,0,icon_global,67.33,,,US
+10,paper,New York,2026-07-07,0,gem_global,67.22,,,US
+11,paper,London,2026-07-08,0,ecmwf_ifs025,68.79,,,EU
+11,paper,London,2026-07-08,0,icon_global,67.63,,,EU
+11,paper,London,2026-07-08,0,gfs_global,67.9,,,EU
+11,paper,London,2026-07-08,0,gem_global,69.62,,,EU
+12,paper,Miami,2026-07-08,0,ecmwf_ifs025,82.49,,,US
+12,paper,Miami,2026-07-08,0,gfs_global,83.0,,,US
+12,paper,Miami,2026-07-08,0,icon_global,82.53,,,US
+12,paper,Miami,2026-07-08,0,gem_global,83.42,,,US
+14,paper,Guangzhou,2026-07-09,1,ecmwf_ifs025,87.19,,,AP
+14,paper,Guangzhou,2026-07-09,1,jma_gsm,88.45,,,AP
+14,paper,Guangzhou,2026-07-09,1,icon_global,87.03,,,AP
+14,paper,Guangzhou,2026-07-09,1,gem_global,87.52,,,AP
+25,paper,Tokyo,2026-07-13,0,ecmwf_ifs025,76.59,,,AP
+25,paper,Tokyo,2026-07-13,0,jma_gsm,77.75,,,AP
+25,paper,Tokyo,2026-07-13,0,icon_global,77.83,,,AP
+25,paper,Tokyo,2026-07-13,0,gem_global,77.32,,,AP
+26,paper,Tokyo,2026-07-14,0,ecmwf_ifs025,76.49,,,AP
+26,paper,Tokyo,2026-07-14,0,jma_gsm,77.05,,,AP
+26,paper,Tokyo,2026-07-14,0,icon_global,77.63,,,AP
+26,paper,Tokyo,2026-07-14,0,gem_global,77.72,,,AP
+27,paper,Seoul,2026-07-14,0,ecmwf_ifs025,77.49,,,AP
+27,paper,Seoul,2026-07-14,0,jma_gsm,78.85,,,AP
+27,paper,Seoul,2026-07-14,0,icon_global,77.93,,,AP
+27,paper,Seoul,2026-07-14,0,gem_global,76.92,,,AP
+28,paper,Madrid,2026-07-13,1,ecmwf_ifs025,91.29,,,EU
+28,paper,Madrid,2026-07-13,1,icon_global,89.73,,,EU
+28,paper,Madrid,2026-07-13,1,gfs_global,90.9,,,EU
+28,paper,Madrid,2026-07-13,1,gem_global,91.02,,,EU
+29,paper,Seoul,2026-07-15,1,ecmwf_ifs025,79.99,,,AP
+29,paper,Seoul,2026-07-15,1,jma_gsm,79.35,,,AP
+29,paper,Seoul,2026-07-15,1,icon_global,81.53,,,AP
+29,paper,Seoul,2026-07-15,1,gem_global,79.62,,,AP
+30,paper,Tokyo,2026-07-15,0,ecmwf_ifs025,80.19,,,AP
+30,paper,Tokyo,2026-07-15,0,jma_gsm,78.95,,,AP
+30,paper,Tokyo,2026-07-15,0,icon_global,78.13,,,AP
+30,paper,Tokyo,2026-07-15,0,gem_global,79.22,,,AP
+31,paper,Guangzhou,2026-07-14,1,ecmwf_ifs025,85.29,,,AP
+31,paper,Guangzhou,2026-07-14,1,jma_gsm,86.15,,,AP
+31,paper,Guangzhou,2026-07-14,1,icon_global,87.53,,,AP
+31,paper,Guangzhou,2026-07-14,1,gem_global,85.62,,,AP
+32,paper,Munich,2026-07-15,1,ecmwf_ifs025,77.99,,,EU
+32,paper,Munich,2026-07-15,1,icon_global,79.43,,,EU
+32,paper,Munich,2026-07-15,1,gfs_global,80.6,,,EU
+32,paper,Munich,2026-07-15,1,gem_global,79.72,,,EU
+33,paper,London,2026-07-16,0,ecmwf_ifs025,64.19,,,EU
+33,paper,London,2026-07-16,0,icon_global,62.23,,,EU
+33,paper,London,2026-07-16,0,gfs_global,64.1,,,EU
+33,paper,London,2026-07-16,0,gem_global,63.52,,,EU
+34,paper,Seoul,2026-07-16,1,ecmwf_ifs025,80.19,,,AP
+34,paper,Seoul,2026-07-16,1,jma_gsm,80.45,,,AP
+34,paper,Seoul,2026-07-16,1,icon_global,82.83,,,AP
+34,paper,Seoul,2026-07-16,1,gem_global,81.92,,,AP
+35,paper,Paris,2026-07-15,1,ecmwf_ifs025,87.39,,,EU
+35,paper,Paris,2026-07-15,1,icon_global,89.83,,,EU
+35,paper,Paris,2026-07-15,1,gfs_global,89.7,,,EU
+35,paper,Paris,2026-07-15,1,gem_global,89.12,,,EU
+36,paper,Tokyo,2026-07-17,0,ecmwf_ifs025,77.69,,,AP
+36,paper,Tokyo,2026-07-17,0,jma_gsm,78.45,,,AP
+36,paper,Tokyo,2026-07-17,0,icon_global,78.63,,,AP
+36,paper,Tokyo,2026-07-17,0,gem_global,78.22,,,AP
+37,paper,Tokyo,2026-07-17,0,ecmwf_ifs025,77.69,,,AP
+37,paper,Tokyo,2026-07-17,0,jma_gsm,78.45,,,AP
+37,paper,Tokyo,2026-07-17,0,icon_global,78.63,,,AP
+37,paper,Tokyo,2026-07-17,0,gem_global,78.22,,,AP
+38,paper,Seoul,2026-07-17,1,ecmwf_ifs025,85.59,,,AP
+38,paper,Seoul,2026-07-17,1,jma_gsm,83.65,,,AP
+38,paper,Seoul,2026-07-17,1,icon_global,85.13,,,AP
+38,paper,Seoul,2026-07-17,1,gem_global,84.32,,,AP
+39,paper,Tokyo,2026-07-18,0,ecmwf_ifs025,78.39,77.0,1.39,AP
+39,paper,Tokyo,2026-07-18,0,jma_gsm,78.05,77.0,1.05,AP
+39,paper,Tokyo,2026-07-18,0,icon_global,79.03,77.0,2.03,AP
+39,paper,Tokyo,2026-07-18,0,gem_global,78.12,77.0,1.12,AP
+40,paper,Tokyo,2026-07-18,0,ecmwf_ifs025,78.39,77.0,1.39,AP
+40,paper,Tokyo,2026-07-18,0,jma_gsm,78.05,77.0,1.05,AP
+40,paper,Tokyo,2026-07-18,0,icon_global,79.03,77.0,2.03,AP
+40,paper,Tokyo,2026-07-18,0,gem_global,78.12,77.0,1.12,AP
+41,paper,London,2026-07-18,0,ecmwf_ifs025,61.49,64.4,-2.91,EU
+41,paper,London,2026-07-18,0,icon_global,60.53,64.4,-3.87,EU
+41,paper,London,2026-07-18,0,gfs_global,61.0,64.4,-3.4,EU
+41,paper,London,2026-07-18,0,gem_global,59.32,64.4,-5.08,EU
+42,paper,Taipei,2026-07-18,1,ecmwf_ifs025,92.89,86.0,6.89,AP
+42,paper,Taipei,2026-07-18,1,jma_gsm,92.65,86.0,6.65,AP
+42,paper,Taipei,2026-07-18,1,icon_global,94.73,86.0,8.73,AP
+42,paper,Taipei,2026-07-18,1,gem_global,92.42,86.0,6.42,AP
+43,paper,Hong Kong,2026-07-17,1,ecmwf_ifs025,86.69,,,AP
+43,paper,Hong Kong,2026-07-17,1,jma_gsm,87.55,,,AP
+43,paper,Hong Kong,2026-07-17,1,icon_global,85.53,,,AP
+43,paper,Hong Kong,2026-07-17,1,gem_global,86.32,,,AP
+44,paper,Hong Kong,2026-07-17,1,ecmwf_ifs025,85.59,,,AP
+44,paper,Hong Kong,2026-07-17,1,jma_gsm,87.55,,,AP
+44,paper,Hong Kong,2026-07-17,1,icon_global,85.53,,,AP
+44,paper,Hong Kong,2026-07-17,1,gem_global,86.32,,,AP
+45,paper,Munich,2026-07-19,1,ecmwf_ifs025,67.19,,,EU
+45,paper,Munich,2026-07-19,1,icon_global,67.83,,,EU
+45,paper,Munich,2026-07-19,1,gfs_global,68.1,,,EU
+45,paper,Munich,2026-07-19,1,gem_global,67.92,,,EU
+46,paper,New York,2026-07-18,1,ecmwf_ifs025,81.09,75.2,5.89,US
+46,paper,New York,2026-07-18,1,gfs_global,80.6,75.2,5.4,US
+46,paper,New York,2026-07-18,1,icon_global,80.03,75.2,4.83,US
+46,paper,New York,2026-07-18,1,gem_global,81.72,75.2,6.52,US
+47,paper,Miami,2026-07-18,0,ecmwf_ifs025,80.59,82.4,-1.81,US
+47,paper,Miami,2026-07-18,0,gfs_global,82.0,82.4,-0.4,US
+47,paper,Miami,2026-07-18,0,icon_global,81.33,82.4,-1.07,US
+47,paper,Miami,2026-07-18,0,gem_global,81.42,82.4,-0.98,US
+48,paper,Lucknow,2026-07-18,1,ecmwf_ifs025,89.49,84.2,5.29,AP
+48,paper,Lucknow,2026-07-18,1,jma_gsm,90.65,84.2,6.45,AP
+48,paper,Lucknow,2026-07-18,1,icon_global,89.73,84.2,5.53,AP
+48,paper,Lucknow,2026-07-18,1,gem_global,91.22,84.2,7.02,AP
+49,live,Wuhan,2026-07-20,1,ecmwf_ifs025,90.69,91.4,-0.71,AP
+49,live,Wuhan,2026-07-20,1,jma_gsm,88.25,91.4,-3.15,AP
+49,live,Wuhan,2026-07-20,1,icon_global,89.53,91.4,-1.87,AP
+49,live,Wuhan,2026-07-20,1,gem_global,90.82,91.4,-0.58,AP
+50,live,Miami,2026-07-20,0,ecmwf_ifs025,82.69,82.4,0.29,US
+50,live,Miami,2026-07-20,0,gfs_global,83.2,82.4,0.8,US
+50,live,Miami,2026-07-20,0,icon_global,82.83,82.4,0.43,US
+50,live,Miami,2026-07-20,0,gem_global,84.02,82.4,1.62,US
+51,live,London,2026-07-20,1,ecmwf_ifs025,77.39,77.0,0.39,EU
+51,live,London,2026-07-20,1,icon_global,77.03,77.0,0.03,EU
+51,live,London,2026-07-20,1,gfs_global,78.5,77.0,1.5,EU
+51,live,London,2026-07-20,1,gem_global,77.02,77.0,0.02,EU
+52,live,Taipei,2026-07-23,1,ecmwf_ifs025,90.19,93.2,-3.01,AP
+52,live,Taipei,2026-07-23,1,jma_gsm,88.55,93.2,-4.65,AP
+52,live,Taipei,2026-07-23,1,icon_global,90.33,93.2,-2.87,AP
+52,live,Taipei,2026-07-23,1,gem_global,90.72,93.2,-2.48,AP
+53,live,Guangzhou,2026-07-23,1,ecmwf_ifs025,92.49,,,AP
+53,live,Guangzhou,2026-07-23,1,jma_gsm,90.65,,,AP
+53,live,Guangzhou,2026-07-23,1,icon_global,92.13,,,AP
+53,live,Guangzhou,2026-07-23,1,gem_global,91.92,,,AP
+54,live,Guangzhou,2026-07-24,1,ecmwf_ifs025,93.79,96.8,-3.01,AP
+54,live,Guangzhou,2026-07-24,1,jma_gsm,94.65,96.8,-2.15,AP
+54,live,Guangzhou,2026-07-24,1,icon_global,92.53,96.8,-4.27,AP
+54,live,Guangzhou,2026-07-24,1,gem_global,94.12,96.8,-2.68,AP
+55,live,Guangzhou,2026-07-24,1,ecmwf_ifs025,94.09,96.8,-2.71,AP
+55,live,Guangzhou,2026-07-24,1,jma_gsm,93.65,96.8,-3.15,AP
+55,live,Guangzhou,2026-07-24,1,icon_global,92.73,96.8,-4.07,AP
+55,live,Guangzhou,2026-07-24,1,gem_global,94.12,96.8,-2.68,AP
+56,live,Taipei,2026-07-25,1,ecmwf_ifs025,91.69,96.8,-5.11,AP
+56,live,Taipei,2026-07-25,1,jma_gsm,91.85,96.8,-4.95,AP
+56,live,Taipei,2026-07-25,1,icon_global,93.63,96.8,-3.17,AP
+56,live,Taipei,2026-07-25,1,gem_global,93.32,96.8,-3.48,AP
+57,live,Chongqing,2026-07-25,1,ecmwf_ifs025,98.19,102.2,-4.01,AP
+57,live,Chongqing,2026-07-25,1,jma_gsm,98.85,102.2,-3.35,AP
+57,live,Chongqing,2026-07-25,1,icon_global,100.23,102.2,-1.97,AP
+57,live,Chongqing,2026-07-25,1,gem_global,100.62,102.2,-1.58,AP
+58,live,Seoul,2026-07-25,1,ecmwf_ifs025,81.79,87.8,-6.01,AP
+58,live,Seoul,2026-07-25,1,jma_gsm,82.15,87.8,-5.65,AP
+58,live,Seoul,2026-07-25,1,icon_global,82.33,87.8,-5.47,AP
+58,live,Seoul,2026-07-25,1,gem_global,82.42,87.8,-5.38,AP
+59,live,Hong Kong,2026-07-26,0,ecmwf_ifs025,78.99,77.0,1.99,AP
+59,live,Hong Kong,2026-07-26,0,jma_gsm,79.65,77.0,2.65,AP
+59,live,Hong Kong,2026-07-26,0,icon_global,78.73,77.0,1.73,AP
+59,live,Hong Kong,2026-07-26,0,gem_global,80.02,77.0,3.02,AP
+60,live,Tel Aviv,2026-07-27,1,ecmwf_ifs025,92.59,,,GLOBAL
+60,live,Tel Aviv,2026-07-27,1,icon_global,90.33,,,GLOBAL
+60,live,Tel Aviv,2026-07-27,1,gem_global,91.12,,,GLOBAL
+60,live,Tel Aviv,2026-07-27,1,jma_gsm,92.75,,,GLOBAL
+61,live,New York,2026-07-26,1,ecmwf_ifs025,85.09,,,US
+61,live,New York,2026-07-26,1,gfs_global,85.8,,,US
+61,live,New York,2026-07-26,1,icon_global,85.23,,,US
+61,live,New York,2026-07-26,1,gem_global,83.52,,,US
+62,live,Sao Paulo,2026-07-26,1,ecmwf_ifs025,74.69,77.0,-2.31,GLOBAL
+62,live,Sao Paulo,2026-07-26,1,icon_global,75.53,77.0,-1.47,GLOBAL
+62,live,Sao Paulo,2026-07-26,1,gem_global,76.52,77.0,-0.48,GLOBAL
+62,live,Sao Paulo,2026-07-26,1,jma_gsm,74.05,77.0,-2.95,GLOBAL
+63,live,Hong Kong,2026-07-26,0,ecmwf_ifs025,79.09,77.0,2.09,AP
+63,live,Hong Kong,2026-07-26,0,jma_gsm,80.05,77.0,3.05,AP
+63,live,Hong Kong,2026-07-26,0,icon_global,78.93,77.0,1.93,AP
+63,live,Hong Kong,2026-07-26,0,gem_global,78.22,77.0,1.22,AP
+64,live,Shenzhen,2026-07-27,1,ecmwf_ifs025,86.09,86.0,0.09,AP
+64,live,Shenzhen,2026-07-27,1,jma_gsm,85.95,86.0,-0.05,AP
+64,live,Shenzhen,2026-07-27,1,icon_global,87.03,86.0,1.03,AP
+64,live,Shenzhen,2026-07-27,1,gem_global,87.22,86.0,1.22,AP
+65,live,Shenzhen,2026-07-27,1,ecmwf_ifs025,86.09,86.0,0.09,AP
+65,live,Shenzhen,2026-07-27,1,jma_gsm,87.05,86.0,1.05,AP
+65,live,Shenzhen,2026-07-27,1,icon_global,86.73,86.0,0.73,AP
+65,live,Shenzhen,2026-07-27,1,gem_global,87.22,86.0,1.22,AP
+66,live,Hong Kong,2026-07-27,1,ecmwf_ifs025,84.79,86.0,-1.21,AP
+66,live,Hong Kong,2026-07-27,1,jma_gsm,85.95,86.0,-0.05,AP
+66,live,Hong Kong,2026-07-27,1,icon_global,86.23,86.0,0.23,AP
+66,live,Hong Kong,2026-07-27,1,gem_global,86.12,86.0,0.12,AP
+67,live,Seoul,2026-07-28,0,ecmwf_ifs025,79.29,78.8,0.49,AP
+67,live,Seoul,2026-07-28,0,jma_gsm,79.55,78.8,0.75,AP
+67,live,Seoul,2026-07-28,0,icon_global,78.43,78.8,-0.37,AP
+67,live,Seoul,2026-07-28,0,gem_global,79.12,78.8,0.32,AP
+68,live,Houston,2026-07-28,1,ecmwf_ifs025,96.09,95.0,1.09,US
+68,live,Houston,2026-07-28,1,gfs_global,97.6,95.0,2.6,US
+68,live,Houston,2026-07-28,1,icon_global,97.83,95.0,2.83,US
+68,live,Houston,2026-07-28,1,gem_global,98.02,95.0,3.02,US
+69,live,Chengdu,2026-07-29,1,ecmwf_ifs025,85.09,93.2,-8.11,AP
+69,live,Chengdu,2026-07-29,1,jma_gsm,87.25,93.2,-5.95,AP
+69,live,Chengdu,2026-07-29,1,icon_global,86.63,93.2,-6.57,AP
+69,live,Chengdu,2026-07-29,1,gem_global,86.72,93.2,-6.48,AP
+70,live,Sao Paulo,2026-07-29,1,ecmwf_ifs025,87.29,86.0,1.29,GLOBAL
+70,live,Sao Paulo,2026-07-29,1,icon_global,85.93,86.0,-0.07,GLOBAL
+70,live,Sao Paulo,2026-07-29,1,gem_global,86.72,86.0,0.72,GLOBAL
+70,live,Sao Paulo,2026-07-29,1,jma_gsm,86.55,86.0,0.55,GLOBAL
+71,live,Sao Paulo,2026-07-29,1,ecmwf_ifs025,87.29,86.0,1.29,GLOBAL
+71,live,Sao Paulo,2026-07-29,1,icon_global,85.63,86.0,-0.37,GLOBAL
+71,live,Sao Paulo,2026-07-29,1,gem_global,87.32,86.0,1.32,GLOBAL
+71,live,Sao Paulo,2026-07-29,1,jma_gsm,86.25,86.0,0.25,GLOBAL
