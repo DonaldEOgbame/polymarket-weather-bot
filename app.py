@@ -41,6 +41,13 @@ DB_PATH = os.path.abspath(DB_PATH)
 
 from weather import STATIONS
 
+# Placeholder entry price for the settings panel's upside readout, used only
+# until the current mode has a fill to average. Set from the 59-trade history in
+# reports/history-2026-07-31 (mean fill $0.696; live $0.671, paper $0.711, range
+# $0.41-$0.89). The previous $0.45 sat below every fill ever taken and inflated
+# the quoted upside roughly eightfold on a fresh era.
+ASSUMED_ENTRY_PRICE = 0.70
+
 MODEL_META = {
     'ecmwf_ifs025':  (0.40, 'global', 'ECMWF IFS 0.25°'),
     'gfs_global':    (0.30, 'global', 'GFS Global'),
@@ -224,15 +231,19 @@ def api_settings_get():
     available_cash = cash_rows[0]['balance'] if cash_rows else STARTING_BANKROLL
     pos_rows = _q('SELECT size_usdc FROM positions WHERE mode = ?', (_mode(),))
     locked = sum(r['size_usdc'] for r in pos_rows)
-    # Typical entry price, so the settings panel can express the take-profit
-    # upside in dollars. Averaged over settled trades because that is what the
-    # bot has actually paid; the 0.45 fallback keeps a fresh era from showing a
-    # nonsense figure before any trade has closed.
+    # Typical entry price, so the settings panel can seed the take-profit upside
+    # readout. fill_price is written once at entry (db.record_trade) and exits
+    # update the same row, so this really is an average of entries, open ones
+    # included. Scoped by mode, so it is empty on every fresh era, not just the
+    # first one — hence avg_entry_n, which lets the UI say whether the number is
+    # measured or assumed instead of presenting the placeholder as fact. The user
+    # can override the figure outright in the panel.
     entry_rows = _q(
-        'SELECT AVG(fill_price) AS avg_entry FROM trades '
+        'SELECT AVG(fill_price) AS avg_entry, COUNT(*) AS n FROM trades '
         'WHERE fill_price IS NOT NULL AND fill_price > 0 AND mode = ?', (_mode(),)
     )
-    avg_entry = (entry_rows[0]['avg_entry'] if entry_rows else None) or 0.45
+    avg_entry_n = entry_rows[0]['n'] if entry_rows else 0
+    avg_entry = (entry_rows[0]['avg_entry'] if entry_rows else None) or ASSUMED_ENTRY_PRICE
     return jsonify({
         'values': _live_settings(),
         'meta': {k: {'type': t, 'min': lo, 'max': hi, 'label': label}
@@ -244,6 +255,7 @@ def api_settings_get():
             'open_positions': len(pos_rows),
             'min_position_size': MIN_POSITION_SIZE,
             'avg_entry_price': avg_entry,
+            'avg_entry_n': avg_entry_n,
             'total_deposited': get_total_deposited(),
             'paper_mode': _config.paper_mode(),
             'daily_loss_limit': _config.daily_loss_limit(),

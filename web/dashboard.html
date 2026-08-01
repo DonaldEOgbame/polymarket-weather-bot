@@ -4,6 +4,7 @@
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width,initial-scale=1" />
 <title>stormedge — desk</title>
+<link rel="icon" type="image/svg+xml" href="/favicon.svg" />
 <link rel="preconnect" href="https://fonts.googleapis.com" />
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
 <link href="https://fonts.googleapis.com/css2?family=Instrument+Serif:ital@0;1&family=Manrope:wght@400;500;600;700&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
@@ -1071,6 +1072,24 @@
   .outcome-cell .v.down { color: var(--negative); }
   .outcome-cell .v.up   { color: var(--positive); }
   .outcome-cell .n { font-size: 10.5px; color: var(--dim); margin-top: 4px; }
+
+  /* The entry price the upside is quoted from — an editable assumption, so it
+     reads as a sentence with a field in it rather than a settings row. The
+     stepper is shrunk to sit inside the small outcome cell; the overrides beat
+     the mobile .stepper rules on specificity, so it stays compact there too. */
+  .entry-assump { display: flex; align-items: center; gap: 6px; margin-top: 7px; }
+  .entry-lead { font-size: 10.5px; color: var(--dim); white-space: nowrap; }
+  .entry-assump .stepper { border-radius: 8px; }
+  .entry-assump .stepper button { width: 24px; height: 26px; font-size: 13px; }
+  .entry-assump .stepper-val { width: 52px; gap: 2px; }
+  .entry-assump .stepper input { width: 32px; font-size: 12px; }
+  .entry-assump .stepper-affix { font-size: 10px; }
+  .linkish {
+    border: 0; padding: 0; background: none;
+    color: var(--signal); font: inherit; cursor: pointer;
+    text-decoration: underline; text-underline-offset: 2px;
+  }
+  .linkish:hover { color: var(--text); }
 
   .save-bar {
     flex: 0 0 auto;

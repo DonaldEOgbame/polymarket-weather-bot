@@ -1077,9 +1077,16 @@ function SliderField({ label, help, value, onChange, min, max, step = 1,
 // hide the fact that only a handful of settings make sense.
 const POS_OPTIONS = [2, 3, 4, 6, 8];
 
+// Fallback entry price for the upside readout, matching app.ASSUMED_ENTRY_PRICE.
+// Only reached if the server omits the field outright — the server already
+// substitutes its own placeholder when the mode has no fills to average.
+const ASSUMED_ENTRY_PRICE = 0.70;
+
 // What the bot will ACTUALLY do with a given set of values. Recomputed on every
-// keystroke — this is the "show me the value as I tweak it" part.
-function deriveImpact(v, ctx) {
+// keystroke — this is the "show me the value as I tweak it" part. `entry` is the
+// price the upside is quoted from: the mode's average fill, or whatever the user
+// typed into the outcome card instead.
+function deriveImpact(v, ctx, entry) {
   const equity = ctx.total_equity || 0;
   // The stake IS the per-trade size: strategy.py has no second knob that can
   // reduce it, so what the user types is what every trade costs.
@@ -1101,16 +1108,15 @@ function deriveImpact(v, ctx) {
     dailyLossDollars: effective * lossStakes,
     lossesToHalt: Math.ceil(lossStakes),
     stopLossPerTrade: v.ENABLE_STOP_LOSS ? effective * (Number(v.STOP_LOSS_PCT) || 0) : effective,
-    // Upside if a trade runs from a typical entry to the take-profit price.
-    // The stake buys stake/entry shares; selling them at tp returns
-    // stake * (tp/entry), so the gain is stake * (tp/entry - 1). Measured
-    // against the average fill the bot has actually paid — pricing it off the
-    // take-profit price itself would imply buying at ~$0.98 and report a few
-    // cents of upside against a full-stake downside.
+    // Upside if a trade runs from `entry` to the take-profit price. The stake
+    // buys stake/entry shares; selling them at tp returns stake * (tp/entry),
+    // so the gain is stake * (tp/entry - 1). Quoted against a real fill price —
+    // pricing it off the take-profit price itself would imply buying at ~$0.98
+    // and report a few cents of upside against a full-stake downside.
     upside: (() => {
       const tp = Number(v.TAKE_PROFIT_PRICE);
-      const entry = Number(ctx.avg_entry_price) || 0.45;
-      return tp > 0 && entry > 0 ? Math.max(0, effective * (tp / entry - 1)) : 0;
+      const e = Number(entry);
+      return tp > 0 && e > 0 ? Math.max(0, effective * (tp / e - 1)) : 0;
     })(),
   };
 }
@@ -1122,6 +1128,10 @@ function SettingsPanel() {
   const [fieldErrors, setFieldErrors] = useState({});
   const [banner, setBanner] = useState(null);
   const [saved, setSaved] = useState(false);
+  // What-if entry price for the upside readout. Deliberately NOT part of `draft`:
+  // it changes no bot behaviour, so it must not mark the form dirty or get POSTed
+  // to /api/settings. null means "use the server's figure".
+  const [entryOverride, setEntryOverride] = useState(null);
 
   const load = async () => {
     try {
@@ -1149,7 +1159,15 @@ function SettingsPanel() {
     return out;
   })();
   const ctx = server.context;
-  const impact = deriveImpact(realValues, ctx);
+  // The entry price feeding the upside cell: the user's figure when they have
+  // typed one, otherwise the server's (a real average when the mode has fills,
+  // a placeholder when it does not — avg_entry_n says which).
+  const serverEntry = Number(ctx.avg_entry_price) || ASSUMED_ENTRY_PRICE;
+  const entryFills = Number(ctx.avg_entry_n) || 0;
+  const entryEdited = entryOverride != null;
+  const entryShown = entryEdited ? entryOverride : serverEntry.toFixed(2);
+  const entryPrice = Number(entryShown) > 0 ? Number(entryShown) : serverEntry;
+  const impact = deriveImpact(realValues, ctx, entryPrice);
 
   // Compare numerically where both sides are numbers: the steppers normalise to
   // two decimals, so a value nudged up and back down lands on "2.00" against a
@@ -1394,7 +1412,26 @@ function SettingsPanel() {
             <div className="outcome-cell">
               <div className="k">IF IT GOES RIGHT</div>
               <div className="v up">+{fmtUSD(impact.upside)}</div>
-              <div className="n">from a {fmtUSD(Number(ctx.avg_entry_price) || 0.45)} entry</div>
+              {/* The entry price is an assumption, so it is editable rather than
+                  asserted — type the fill you want to price the upside from. */}
+              <div className="entry-assump">
+                <span className="entry-lead">from a</span>
+                <Stepper
+                  label="Entry price for this estimate" prefix="$" step={0.01} dp={2}
+                  min={0.01} max={0.99}
+                  value={entryShown}
+                  onChange={setEntryOverride}
+                />
+                <span className="entry-lead">entry</span>
+              </div>
+              <div className="n">
+                {entryEdited
+                  ? <>your figure · <button type="button" className="linkish"
+                        onClick={() => setEntryOverride(null)}>use actual</button></>
+                  : entryFills > 0
+                    ? `average of ${entryFills} fill${entryFills === 1 ? '' : 's'} this era`
+                    : 'assumed — no fills this era yet'}
+              </div>
             </div>
           </div>
         </section>

@@ -323,6 +323,7 @@ def _print_startup_summary():
         MIN_VOLUME, MARKET_DISCOVERY_MAX_PAGES, MARKET_DISCOVERY_LIMIT,
         SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD_STD, SHADOW_MAX_SIZE_USDC,
         ENABLE_SHADOW_EXPLORATION, TAKER_FEE_RATE, SLIPPAGE_FRACTION,
+        HARD_MAX_POSITION_SIZE,
         setting, daily_loss_limit, paper_mode,
     )
     portfolio = get_portfolio_state()
@@ -338,7 +339,7 @@ def _print_startup_summary():
         "=" * 52,
         f"  Bankroll     : ${portfolio['total_equity']:.2f}  (cash ${portfolio['available_cash']:.2f}  locked ${portfolio['locked_cash']:.2f})",
         f"  Open pos     : {open_pos} / {setting('MAX_CONCURRENT_POSITIONS')}  |  Daily loss limit: ${daily_loss_limit():.2f} ({setting('DAILY_LOSS_STAKES'):g} stakes)",
-        f"  Edge thresh  : {EDGE_THRESHOLD:.0%} (net of taker fee {TAKER_FEE_RATE:.0%}·p·(1-p) + {SLIPPAGE_FRACTION:.1%} slippage)  |  Kelly cap: {KELLY_CAP:.0%}  |  Max size: ${setting('HARD_MAX_POSITION_SIZE'):.2f}",
+        f"  Edge thresh  : {EDGE_THRESHOLD:.0%} (net of taker fee {TAKER_FEE_RATE:.0%}·p·(1-p) + {SLIPPAGE_FRACTION:.1%} slippage)  |  Kelly cap: {KELLY_CAP:.0%}  |  Kelly-path max size: ${HARD_MAX_POSITION_SIZE:.2f}",
         f"  Strict gates : agreement ≥ {MIN_MODEL_AGREEMENT:.0%} (weighted)  |  spread < {MAX_MODEL_SPREAD_STD}°F sd",
         f"  Shadow gates : agreement ≥ {SHADOW_MIN_AGREEMENT:.0%}  |  spread < {SHADOW_MAX_SPREAD_STD}°F sd  |  {shadow_label}",
         f"  Market filter: vol ≥ ${MIN_VOLUME:,.0f}  |  ≤ {MAX_HOURS_TO_RESOLUTION:.0f}h to resolution",
