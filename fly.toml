@@ -1,64 +1,43 @@
-app = "stormedge"
-# arn (Stockholm): Polymarket GEOBLOCKS order placement from the UK (and US, DE,
-# FR, SG, AU, BR, most of CA) — reads work anywhere, so paper mode never noticed.
-# Sweden is fully unrestricted. Do not move this app to a region without checking
-# https://docs.polymarket.com/developers/CLOB/geoblock first.
-primary_region = "arn"
+# fly.toml app configuration file generated for stormedgev2 on 2026-08-04T07:24:09+01:00
+#
+# See https://fly.io/docs/reference/configuration/ for information about how to use this file.
+#
+
+app = 'stormedgev2'
+primary_region = 'arn'
 
 [build]
-  dockerfile = "Dockerfile"
+  dockerfile = 'Dockerfile'
 
 [env]
-  # PAPER since 2026-07-31, reverting the 2026-07-18 live cutover.
-  #
-  # Not a retreat from live trading — a collection run. The recalibration on
-  # this branch (direction-split sigma, per-model per-direction bias) has every
-  # constant fitted on <=27 settled trades, with 95% confidence intervals wider
-  # than the 1.8F buckets they decide. There is no neutral configuration to fall
-  # back to; the previous one was fitted on less. So the parking is a DEPLOYMENT
-  # STATE rather than a config edit: paper mode runs the new configuration
-  # against real markets, writes the replay log, and risks nothing.
-  #
-  # Signals write regardless of mode — only money movement is gated — so the
-  # shadow universe accumulates at full rate. Do not flip this back to "false"
-  # until the step-5 criteria in the ship prompt are met: >=200 resolved
-  # signals, and better calibrated log score AND higher expected P&L per
-  # evaluated market than the incumbent, measured over markets both
-  # configurations saw plus markets only one would have taken.
-  #
-  # NOTE: PAPER_MODE is a managed setting — a dashboard mode switch writes to
-  # the `settings` table, which OVERRIDES this value (config._tunable: DB > env).
-  # There is no settings table in production as of this deploy, so this env var
-  # governs. If one is created later, changing this file alone will do nothing.
-  PAPER_MODE = "true"
-  DB_PATH = "/data/bot.db"
-  PORT = "8080"
-  STARTING_BANKROLL = "18.86"
-
-[[mounts]]
-  source = "bot_data"
-  destination = "/data"
+  DB_PATH = '/data/bot.db'
+  PAPER_MODE = 'true'
+  PORT = '8080'
+  STARTING_BANKROLL = '18.86'
 
 [processes]
-  app = "python app.py"
+  app = 'python app.py'
+
+[[mounts]]
+  source = 'bot_data'
+  destination = '/data'
 
 [http_service]
   internal_port = 8080
   force_https = true
-  auto_stop_machines = false
+  auto_stop_machines = 'off'
   auto_start_machines = true
   min_machines_running = 1
-  processes = ["app"]
+  processes = ['app']
 
-  # Real liveness: /healthz checks the BOT THREAD heartbeat, not just the port.
-  # Without this, a dead bot thread behind a live Flask server looks healthy
-  # to Fly forever (no restart, no alert) while positions go unmonitored.
   [[http_service.checks]]
-    interval = "30s"
-    timeout = "5s"
-    grace_period = "2m"
-    method = "GET"
-    path = "/healthz"
+    interval = '30s'
+    timeout = '5s'
+    grace_period = '2m0s'
+    method = 'GET'
+    path = '/healthz'
 
 [[vm]]
-  memory = "512mb"
+  memory = '512mb'
+  cpus = 1
+  memory_mb = 512
