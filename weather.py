@@ -11,7 +11,10 @@ from config import (
     METAR_WARM_CORRECTION_F, MIN_BUCKET_PROB,
     SIGMA_SPREAD_COEF, SIGMA_SCALE_HIGH, SIGMA_SCALE_LOW, MIN_SIGMA_F, MAX_SIGMA_F,
     SIGMA_STUDENT_T_DF,
+    ENABLE_FAMILY_WEIGHTING, FAMILY_WEIGHT_CAP, GATE_ACROSS_FAMILIES,
 )
+from families import (cap_weights_by_family, family_agreement, family_spread,
+                      describe as describe_families, validate_families)
 
 def _pstdev(data):
     """Calculate the population standard deviation of data (equivalent to np.std(data))."""
@@ -185,6 +188,16 @@ def _build_engine_result(model_temps, region, city_key, lead_hours, is_high,
         return None
 
     weights = WEIGHTS[region]
+    # Cap any one forecasting centre's share of the blend BEFORE anything is
+    # computed from it. icon_global/icon_eu/icon_d2 are one model at three
+    # resolutions; without this they would carry three members' worth of weight
+    # and three members' worth of apparent agreement. Restricted to the members
+    # actually present, so a family that returned only one of its resolutions
+    # today is not penalised for the ones that were out of domain.
+    if ENABLE_FAMILY_WEIGHTING:
+        present = {m: weights[m] for m in model_temps if m in weights}
+        weights = cap_weights_by_family(present, FAMILY_WEIGHT_CAP) or weights
+
     total_weight = sum(weights[m] for m in model_temps if m in weights)
     if total_weight == 0:
         return None
@@ -198,18 +211,28 @@ def _build_engine_result(model_temps, region, city_key, lead_hours, is_high,
     # approximate with one global number. Kept as a knob, not a default.
     weighted_mean = raw_weighted_mean + METAR_WARM_CORRECTION_F
 
-    model_spread_std = float(_weighted_pstdev(model_temps, weights))
+    # Both gated statistics, computed ACROSS FAMILIES rather than across
+    # members. The question MIN_MODEL_AGREEMENT and MAX_MODEL_SPREAD_STD are
+    # asking is whether the world's forecasting centres agree — not whether
+    # ICON's three resolutions agree with each other, which they will, and which
+    # would read as rising confidence while adding no information.
+    member_spread_std = float(_weighted_pstdev(model_temps, weights))
+    if GATE_ACROSS_FAMILIES:
+        model_spread_std = float(family_spread(model_temps, weights))
+        model_agreement = family_agreement(model_temps, weights, raw_weighted_mean)
+    else:
+        model_spread_std = member_spread_std
+        # Agreement is measured against the RAW consensus, not the bias-shifted
+        # mean: no model temp contains METAR_WARM_CORRECTION_F, so comparing to
+        # the shifted mean made the band asymmetric and could fail a perfectly
+        # agreeing ensemble. WEIGHTED so that adding a low-weight regional
+        # member cannot swing the gate as hard as ECMWF.
+        agree_w = sum(weights.get(m, 0.0) for m, t in model_temps.items()
+                      if abs(t - raw_weighted_mean) < 2.0)
+        model_agreement = agree_w / total_weight if total_weight else 0.0
+
     sigma_stages = compute_sigma_stages(model_spread_std, lead_hours, is_high, city_key)
     combined_std = sigma_stages["post_clamp"]
-
-    # Agreement is measured against the RAW consensus, not the bias-shifted mean:
-    # no model temp contains METAR_WARM_CORRECTION_F, so comparing to the shifted
-    # mean made the band asymmetric and could fail a perfectly agreeing ensemble.
-    # WEIGHTED so that adding a low-weight regional member cannot swing the gate
-    # as hard as ECMWF — see the n-invariance note on MIN_MODEL_AGREEMENT.
-    agree_w = sum(weights.get(m, 0.0) for m, t in model_temps.items()
-                  if abs(t - raw_weighted_mean) < 2.0)
-    model_agreement = agree_w / total_weight if total_weight else 0.0
 
     return {
         "ensemble_mean": weighted_mean,
@@ -225,6 +248,12 @@ def _build_engine_result(model_temps, region, city_key, lead_hours, is_high,
         # ensemble SIZE rather than on disagreement.
         "model_spread": model_spread_std,
         "model_spread_range": max(model_temps.values()) - min(model_temps.values()),
+        # Member-level spread, kept alongside the family-level one that gates.
+        # A replay needs both to answer "did the family grouping change this
+        # decision", which is the question Phase 2.1 exists to make answerable.
+        "member_spread_std": member_spread_std,
+        "family_count": len({__import__("families").family_of(m) for m in model_temps}),
+        "families": describe_families(model_temps, weights),
         "lead_time_hours": lead_hours,
         "model_count": len(model_temps),
         "is_high": bool(is_high),
@@ -902,6 +931,15 @@ def validate_city_tables():
     return problems
 
 
+def validate_family_tables():
+    """Every model in every blend must have a family and a native timestep.
+
+    A model with no MODEL_FAMILY entry silently becomes its own family and
+    escapes the weight cap — which is precisely the failure families.py exists
+    to prevent, so it fails the boot rather than defaulting."""
+    return validate_families(WEIGHTS, FAMILY_WEIGHT_CAP)
+
+
 def validate_model_tables():
     """Every model in WEIGHTS must carry an explicit bias correction.
 
@@ -933,7 +971,8 @@ def validate_config_tables(raise_on_problem=True):
     from config import validate_env_ranges
     from risk import validate_synoptic_groups
     problems = (validate_city_tables() + validate_model_tables()
-                + validate_synoptic_groups() + validate_env_ranges())
+                + validate_family_tables() + validate_synoptic_groups()
+                + validate_env_ranges())
     for p in problems:
         logging.error(f"Config validation: {p}")
     if problems and raise_on_problem:

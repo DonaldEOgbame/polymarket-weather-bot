@@ -152,6 +152,22 @@ MAX_ENTRY_SPREAD_FRACTION = float(os.getenv("MAX_ENTRY_SPREAD_FRACTION", "0.15")
 # Two models that agree proves nothing — ECMWF dropping out silently leaves only 2.
 MIN_MODEL_COUNT = int(os.getenv("MIN_MODEL_COUNT", "3"))
 
+# --- Model families (see families.py) ---
+# Most "independent" members are not. icon_global/icon_eu/icon_d2 are one model
+# at three resolutions; ecmwf_ifs025 and ecmwf_aifs025_single share initial
+# conditions. Counting them separately manufactures agreement, and the two
+# gates that decide almost every trade read exactly the statistics that fake
+# agreement inflates.
+ENABLE_FAMILY_WEIGHTING = os.getenv("ENABLE_FAMILY_WEIGHTING", "true").lower() == "true"
+# No forecasting centre may carry more than this share of the blend, however
+# many of its resolutions are present.
+FAMILY_WEIGHT_CAP = float(os.getenv("FAMILY_WEIGHT_CAP", "0.35"))
+# Compute agreement and spread ACROSS FAMILIES rather than across members. Off
+# would keep the member-level statistics the current thresholds were fitted
+# against; on is correct once a family can contribute several members, which is
+# what Phase 2 introduces.
+GATE_ACROSS_FAMILIES = os.getenv("GATE_ACROSS_FAMILIES", "true").lower() == "true"
+
 # --- Open-Meteo → METAR resolution-source correction (°F) ---
 # SET TO 0 on 2026-07-31. This was +1.3, fitted on the first 19 traded station-days
 # when the ensemble genuinely ran cold against the paying ruler. It no longer does,
@@ -1211,7 +1227,9 @@ REPLAY_SCHEMA_VERSION = 1
 #      plus a fitted remaining-rise term (Phase 1.3). The largest behavioural
 #      change in this rollout — probabilities move materially, so no
 #      calibration may pool across this boundary.
-FORECAST_PIPELINE_VERSION = 3
+#   4  family weight caps, and agreement/spread computed across families
+#      rather than across members (Phase 2.1)
+FORECAST_PIPELINE_VERSION = 4
 
 # Every constant that can change a probability or a gate outcome. The
 # fingerprint over these is stored on each logged signal, because a replay that
@@ -1237,6 +1255,12 @@ _FINGERPRINT_KEYS = (
     "SIGMA_SCALE_LOW", "MIN_SIGMA_F", "MAX_SIGMA_F", "SIGMA_STUDENT_T_DF",
     "METAR_WARM_CORRECTION_F", "GFS_BIAS_CORRECTIONS", "MODEL_BIAS_CORRECTIONS",
     "TAKER_FEE_RATE", "SLIPPAGE_FRACTION",
+    # Family grouping changes both gated statistics and the blend weights, so
+    # it changes what is believed — the fingerprint's stated criterion.
+    "ENABLE_FAMILY_WEIGHTING", "FAMILY_WEIGHT_CAP", "GATE_ACROSS_FAMILIES",
+    # Intraday conditioning moves probabilities materially.
+    "ENABLE_INTRADAY_CONDITIONING", "INTRADAY_MIN_HOURS_ELAPSED",
+    "INTRADAY_SIGMA_FLOOR_F",
 )
 
 
