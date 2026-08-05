@@ -131,12 +131,37 @@ have this in place before 2.3–2.5.
 
 ## Still to do (not in this branch)
 
-**2.2 coverage matrix** has been written (`coverage_matrix.py`) and run; the
-result is in `reports/coverage-matrix.md`. It is ground truth for the rest.
+**2.2 coverage matrix** is written (`coverage_matrix.py`) and run for 21 of 32
+candidate models; `reports/coverage-matrix.md` has the results. It is ground
+truth for the rest. Four findings change the plan:
+
+- **`gfs_global` works at 51/51 cities**, including Wellington, Cape Town,
+  Buenos Aires and Sao Paulo. The "GFS unavailable in the Southern Hemisphere"
+  belief that moved those cities onto a GFS-less `GLOBAL` blend is false. That
+  is a free improvement available to those cities today.
+- **`bom_access_global` serves nothing.** HTTP 200 with nulls at all 51
+  coordinates — not an invalid ID, not a domain limit. The plan's Southeast Asia
+  and Wellington recommendations lean on it and need a different member.
+- **`gfs_graphcast025` also serves nothing**, same signature. Of the three AI
+  members only `ecmwf_aifs025_single` and `ncep_aigfs025` are actually available.
+- **Three of the four proposed new globals work everywhere** —
+  `ukmo_global_deterministic_10km`, `meteofrance_arpege_world` and
+  `cma_grapes_global` are all 51/51. UKMO was the plan's first priority and it
+  is available.
+
+Horizon limits are recorded and matter for per-city lists: `gfs_hrrr`,
+`icon_d2`, `gem_hrdps_continental` and `meteofrance_arome_france_hd` all return
+nothing at 72h.
+
+To finish the matrix (eleven European/Asian limited-area models remain):
+
+```bash
+python coverage_matrix.py     # results are checkpointed per model
+```
 
 **2.3, 2.4, 2.5** — new globals, AI members, and per-city `extra_models` — are
-NOT implemented. They depend on the coverage matrix, and shipping them is a
-substantial change to every city's blend that should follow the same one-phase
+NOT implemented. They depend on the matrix being complete, and shipping them is
+a substantial change to every city's blend that should follow the same one-phase
 discipline. When they land:
 
 - every new member enters at **explicit 0.0 bias correction, both directions,
