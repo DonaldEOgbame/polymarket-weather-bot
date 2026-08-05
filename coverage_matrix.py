@@ -56,6 +56,30 @@ CANDIDATE_MODELS = [
 
 LEADS = (24, 48, 72)
 
+# A probe result is only evidence if the failure was DEFINITIVE. Three times
+# now this script has drawn a wrong conclusion from an error:
+#
+#   1. batching by model  — one bad ID 400s the whole request, so every model in
+#      the batch reads as unavailable (the "GFS unavailable in the Southern
+#      Hemisphere" belief)
+#   2. batching by coordinate — a 400 means OUT OF DOMAIN, so one out-of-domain
+#      city condemned every limited-area model to 0/51
+#   3. transient errors — `bad_json` is what a rate-limited HTML error page
+#      looks like, and it was rendered as "NO DATA ANYWHERE". Five working
+#      models (ukmo_uk_deterministic_2km, both KNMI HARMONIE variants,
+#      dmi_harmonie_arome_europe, italia_meteo_arpae_icon_2i) were reported as
+#      dead; all five return data when probed individually.
+#
+# So: 200-with-nulls means the model genuinely serves nothing there, and 400
+# means out of domain. EVERYTHING ELSE IS UNKNOWN, and unknown must never be
+# rendered as absence.
+DEFINITIVE_STATUSES = {200, "200", 400, "400", "no_series"}
+
+
+def is_inconclusive(status):
+    """True when a failure says nothing about availability."""
+    return status not in DEFINITIVE_STATUSES
+
 
 # Coordinates per request. 51 in one request times out on the slower models
 # (measured: jma_gsm, cma_grapes_global, icon_eu all exceeded 60s), and one
@@ -64,7 +88,7 @@ LEADS = (24, 48, 72)
 CHUNK = 12
 
 
-def _request(model, cities, timeout, max_retries=3):
+def _request(model, cities, timeout, max_retries=5):
     """One request for one model over up to CHUNK coordinates."""
     lats = ",".join(str(STATIONS[c]["lat"]) for c in cities)
     lons = ",".join(str(STATIONS[c]["lon"]) for c in cities)
@@ -233,12 +257,21 @@ def render(results, cities):
         # models that plainly did. Accept both.
         at = {ld: sum(1 for c in cities
                       if _lead(per_city[c]["leads"], ld)) for ld in LEADS}
+        unknown = [c for c in cities if not per_city[c]["ok"]
+                   and is_inconclusive(per_city[c].get("status"))]
         statuses = {str(per_city[c].get("status")) for c in cities if not per_city[c]["ok"]}
         note = ""
-        if not ok:
+        if not ok and unknown:
+            # Never "no data" — a transient error is not evidence of absence.
+            note = (f"**INCONCLUSIVE** — {len(unknown)} cities failed with "
+                    f"{', '.join(sorted({str(per_city[c].get('status')) for c in unknown}))}; "
+                    f"re-probe before concluding anything")
+        elif not ok:
             note = f"NO DATA ANYWHERE (statuses: {', '.join(sorted(statuses))})"
         elif len(ok) < len(cities):
             note = f"limited domain — {len(cities) - len(ok)} cities null"
+            if unknown:
+                note += f"; {len(unknown)} INCONCLUSIVE"
         if ok and at[72] < at[24]:
             note += ("; " if note else "") + f"horizon-limited (72h at {at[72]} vs 24h at {at[24]})"
         lines.append(f"| `{model}` | {len(ok)}/{len(cities)} | {at[24]} | {at[48]} | "

@@ -165,3 +165,51 @@ class TestHorizon:
         assert out["leads"][48] is True
         assert out["leads"][72] is False
         assert out["horizon_h"] == 48
+
+
+class TestInconclusiveIsNeverReportedAsAbsence:
+    """The third time this script drew a wrong conclusion from an error.
+
+    `bad_json` is what a rate-limited HTML error page looks like, and the report
+    rendered it as "NO DATA ANYWHERE". Five working models —
+    ukmo_uk_deterministic_2km, both KNMI HARMONIE variants,
+    dmi_harmonie_arome_europe and italia_meteo_arpae_icon_2i — were written down
+    as dead. All five return data when probed individually.
+
+    Only two failures are evidence: 200-with-nulls (the model genuinely serves
+    nothing there) and 400 (out of domain). Everything else is unknown.
+    """
+
+    def test_definitive_and_inconclusive_are_distinguished(self):
+        assert not CM.is_inconclusive(200)
+        assert not CM.is_inconclusive(400)
+        assert not CM.is_inconclusive("no_series")
+        for st in ("bad_json", "ReadTimeout", "ConnectionError", 503, 429):
+            assert CM.is_inconclusive(st), st
+
+    def test_an_all_inconclusive_model_is_not_called_no_data(self):
+        results = {"ukmo_uk_deterministic_2km": {
+            "London": {"ok": False, "status": "bad_json", "leads": {}},
+            "Paris": {"ok": False, "status": "bad_json", "leads": {}}}}
+        md = CM.render(results, ["London", "Paris"])
+        assert "INCONCLUSIVE" in md
+        assert "NO DATA ANYWHERE" not in md
+
+    def test_a_genuinely_empty_model_is_still_called_no_data(self):
+        """The complement — kma_gdps returns HTTP 200 and nulls everywhere, and
+        that IS evidence. Softening every verdict would make the report
+        useless."""
+        results = {"kma_gdps": {
+            "Seoul": {"ok": False, "status": 200, "leads": {}},
+            "Busan": {"ok": False, "status": 200, "leads": {}}}}
+        md = CM.render(results, ["Seoul", "Busan"])
+        assert "NO DATA ANYWHERE" in md
+        assert "INCONCLUSIVE" not in md
+
+    def test_a_partly_inconclusive_model_says_so_alongside_its_domain(self):
+        results = {"icon_eu": {
+            "Berlin": {"ok": True, "status": 200, "leads": {24: True}},
+            "Tokyo": {"ok": False, "status": 400, "leads": {}},
+            "Milan": {"ok": False, "status": "bad_json", "leads": {}}}}
+        md = CM.render(results, ["Berlin", "Tokyo", "Milan"])
+        assert "limited domain" in md and "INCONCLUSIVE" in md
