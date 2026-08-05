@@ -1137,6 +1137,25 @@ def validate_env_ranges():
 # replay can refuse rows it cannot interpret rather than misreading them.
 REPLAY_SCHEMA_VERSION = 1
 
+# --- Forecast-pipeline identity -------------------------------------------
+# Bump whenever what the models are ASKED FOR changes: the endpoint, the
+# aggregation, the member list, or any conditioning applied to the distribution
+# before a bucket is priced.
+#
+# The fingerprint below covers constants, and constants alone. Every phase in
+# the current rollout changes forecast INPUTS while touching no constant at all
+# — the hourly migration, the added ensemble members, the intraday conditioning
+# — so without this the replay log would carry an identical fingerprint across a
+# boundary where the inputs changed completely, and a later calibration would
+# silently pool the two. That is precisely the failure the fingerprint column
+# was added to prevent, arriving through a door it did not cover.
+#
+#   1  daily=temperature_2m_max / _min, 4-member regional blends (through
+#      2026-08-05)
+#   2  hourly=temperature_2m aggregated locally to the audited settlement
+#      window; both directions from one request (Phase 1.2)
+FORECAST_PIPELINE_VERSION = 2
+
 # Every constant that can change a probability or a gate outcome. The
 # fingerprint over these is stored on each logged signal, because a replay that
 # cannot tell which configuration produced a row is a replay that will silently
@@ -1148,6 +1167,7 @@ REPLAY_SCHEMA_VERSION = 1
 # change what is bought, not what is believed, and including them would churn
 # the fingerprint for changes a replay does not care about.
 _FINGERPRINT_KEYS = (
+    "FORECAST_PIPELINE_VERSION",
     "EDGE_THRESHOLD", "MIN_MODEL_AGREEMENT", "MAX_MODEL_SPREAD_STD",
     "MIN_MODEL_COUNT", "MAX_ENTRY_SPREAD_FRACTION", "MAX_ENTRY_PRICE",
     "FORECAST_MARGIN_F", "YES_MARGIN_WIDTH_FRACTION",

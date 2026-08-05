@@ -405,59 +405,110 @@ def _interpolate_base_error(lead_hours):
             return BASE_FORECAST_ERROR[lo] + t * (BASE_FORECAST_ERROR[hi] - BASE_FORECAST_ERROR[lo])
     return BASE_FORECAST_ERROR[breakpoints[-1]]
 
+# A local day must be this well covered by hourly values before its max/min is
+# trusted. Open-Meteo returns whole local days, but a truncated response, a
+# model that starts mid-day, or a DST transition can leave a day with a handful
+# of hours — and max() over 3 morning hours is a "daily maximum" that is simply
+# wrong, in the direction that makes a NO bet look safe. 20 of 24 tolerates the
+# 23-hour spring-forward day without tolerating a genuinely partial one.
+MIN_HOURLY_COVERAGE = 20
+
+
+def _aggregate_local_days(times, values):
+    """(max, min) per LOCAL calendar day from an hourly series.
+
+    `times` are Open-Meteo's local-time stamps (timezone=auto), so the first ten
+    characters ARE the local date — which is the window every market settles on
+    per the 2026-08-05 audit. Days with too few hours are dropped rather than
+    aggregated; see MIN_HOURLY_COVERAGE."""
+    buckets = {}
+    for t, v in zip(times, values):
+        if v is None:
+            continue
+        buckets.setdefault(t[:10], []).append(v)
+    return {day: (max(vals), min(vals))
+            for day, vals in buckets.items() if len(vals) >= MIN_HOURLY_COVERAGE}
+
+
+def _fetch_hourly(city_key, station, force_refresh=False):
+    """Hourly temperature per model, aggregated to local-day (max, min).
+
+    Returns {date: {model: (max_f, min_f)}} or None.
+
+    HOURLY rather than daily=temperature_2m_max, for two reasons — and NOT for
+    the reason it looks like:
+
+      * It is NOT to remove the diurnal-compression artifact. Measured
+        2026-08-05: daily=temperature_2m_max equals max(hourly) to 0.000°F for
+        all five members INCLUDING 6-hourly jma_gsm, because Open-Meteo
+        interpolates upstream of both endpoints. See
+        tests/test_hourly_aggregation.py, which asserts this rather than
+        leaving it as a comment nobody re-checks. The only real lever on the
+        diurnal artifact is preferring natively-hourly members (Phase 2.1).
+      * It IS the prerequisite for intraday observation conditioning, which
+        needs the shape of the day and not just its peak.
+
+    It also halves the request count. Both directions come out of one series,
+    where the daily endpoint needed a separate call for max and for min — and on
+    this API latency is dominated by round trips, not payload (measured: 979ms /
+    746B for one daily field, 1597ms / 4780B for the whole hourly series)."""
+    cached = _FORECAST_CACHE.get(city_key) if not force_refresh else None
+    if cached:
+        age = _time.monotonic() - cached[0]
+        if age < _FORECAST_TTL_SECONDS:
+            logging.debug(f"Forecast cache hit for {city_key} (age={age:.0f}s)")
+            return cached[1]
+
+    models = list(WEIGHTS[station["region"]].keys())
+    params = {
+        "latitude": station["lat"],
+        "longitude": station["lon"],
+        "hourly": "temperature_2m",
+        "models": ",".join(models),
+        # Local time, so t[:10] is the local calendar day the market settles on.
+        "timezone": "auto",
+        "temperature_unit": "fahrenheit",
+        "forecast_days": 4,
+    }
+    try:
+        resp = get_session().get(OPEN_METEO_URL, params=params, timeout=10)
+        if resp.status_code != 200:
+            logging.error(f"Open-Meteo error ({resp.status_code}): {resp.text[:300]}")
+            return None
+    except Exception as e:
+        logging.error(f"Open-Meteo request failed: {e}")
+        return None
+
+    hourly = resp.json().get("hourly", {})
+    times = hourly.get("time", [])
+    by_date = {}
+    for model in models:
+        series = hourly.get(f"temperature_2m_{model}")
+        if not series:
+            continue          # out-of-domain member; the caller drops nulls
+        for day, (mx, mn) in _aggregate_local_days(times, series).items():
+            by_date.setdefault(day, {})[model] = (mx, mn)
+
+    _FORECAST_CACHE[city_key] = (_time.monotonic(), by_date)
+    return by_date
+
+
 def fetch_forecasts(city_name, is_high=True, force_refresh=False):
     city_key, station = get_station_coords(city_name)
     if not station:
         logging.warning(f"No station mapping found for {city_name}")
         return None
 
-    cache_key = (city_key, is_high)
-    if not force_refresh:
-        cached = _FORECAST_CACHE.get(cache_key)
-        if cached:
-            age = _time.monotonic() - cached[0]
-            if age < _FORECAST_TTL_SECONDS:
-                logging.debug(f"Forecast cache hit for {city_key} is_high={is_high} (age={age:.0f}s)")
-                return cached[1]
-
     region = station["region"]
-    models = list(WEIGHTS[region].keys())
-    
-    params = {
-        "latitude": station["lat"],
-        "longitude": station["lon"],
-        "daily": "temperature_2m_max" if is_high else "temperature_2m_min",
-        "models": ",".join(models),
-        "timezone": "auto",
-        "temperature_unit": "fahrenheit",
-        "forecast_days": 4
-    }
-    
-    try:
-        resp = get_session().get(OPEN_METEO_URL, params=params, timeout=6)
-        if resp.status_code != 200:
-            logging.error(f"Open-Meteo error ({resp.status_code}): {resp.text}")
-            return None
-    except Exception as e:
-        logging.error(f"Open-Meteo request failed: {e}")
+    by_date = _fetch_hourly(city_key, station, force_refresh)
+    if by_date is None:
         return None
-        
-    data = resp.json()
-    daily = data.get("daily", {})
-    times = daily.get("time", [])
-    
+
     forecasts_by_date = {}
     raw_by_date = {}
     corrections_by_date = {}
-    for i, date_str in enumerate(times):
-        model_temps = {}
-        for model in models:
-            key = f"temperature_2m_{'max' if is_high else 'min'}_{model}"
-            vals = daily.get(key, [])
-            val = vals[i] if i < len(vals) else None
-            
-            if val is not None:
-                model_temps[model] = val
+    for date_str, per_model in by_date.items():
+        model_temps = {m: (mx if is_high else mn) for m, (mx, mn) in per_model.items()}
 
         # Corrections come from ONE place (applied_corrections) so the replay
         # log records exactly what was applied here — see that function. The
@@ -472,9 +523,11 @@ def fetch_forecasts(city_name, is_high=True, force_refresh=False):
         corrections_by_date[date_str] = corr
         forecasts_by_date[date_str] = {m: v + corr[m] for m, v in model_temps.items()}
 
-    result = (forecasts_by_date, city_key, region, raw_by_date, corrections_by_date)
-    _FORECAST_CACHE[cache_key] = (_time.monotonic(), result)
-    return result
+    # Not cached here: _fetch_hourly caches the direction-INDEPENDENT series, so
+    # both is_high values are served from one HTTP call. Caching the corrected
+    # output too would double the memory for a per-direction dict comprehension
+    # over four dates.
+    return (forecasts_by_date, city_key, region, raw_by_date, corrections_by_date)
 
 def get_signal_engine(city_name, target_date, is_high=True, hours_to_resolution=48.0):
     res = fetch_forecasts(city_name, is_high)
