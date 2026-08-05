@@ -208,6 +208,13 @@ def run(models, cities, pause=0.5, partial_path=None):
     return results
 
 
+def _lead(leads, ld):
+    """leads[ld], tolerating the string keys a JSON round-trip produces."""
+    if not leads:
+        return False
+    return bool(leads.get(ld, leads.get(str(ld), False)))
+
+
 def render(results, cities):
     lines = ["# Open-Meteo coverage matrix", "",
              f"{len(results)} candidate models x {len(cities)} cities, probed "
@@ -220,7 +227,12 @@ def render(results, cities):
              "|---|---|---|---|---|---|"]
     for model, per_city in results.items():
         ok = [c for c in cities if per_city[c]["ok"]]
-        at = {ld: sum(1 for c in cities if per_city[c]["leads"].get(ld)) for ld in LEADS}
+        # A JSON round-trip turns the integer lead keys into strings, so
+        # leads.get(24) silently returns None and every horizon column reads 0
+        # — which looked exactly like "this model has no data at any lead" for
+        # models that plainly did. Accept both.
+        at = {ld: sum(1 for c in cities
+                      if _lead(per_city[c]["leads"], ld)) for ld in LEADS}
         statuses = {str(per_city[c].get("status")) for c in cities if not per_city[c]["ok"]}
         note = ""
         if not ok:
