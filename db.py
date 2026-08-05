@@ -316,6 +316,27 @@ def init_db():
         # changed twice in one afternoon with no record. Storing the raw
         # values AND the correction applied to each makes the row
         # self-describing: replay never needs to know the config history.
+        # Buckets that cannot settle YES on their station's reporting grid.
+        # A manual-review queue, not an opportunity list: given that every
+        # market's quoting unit matches its station's grid, a firing here says
+        # our parser is wrong far more loudly than it says the market is
+        # mispriced. See lattice.py and scanner's impossible_bucket skip.
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS impossible_buckets (
+                market_id TEXT PRIMARY KEY,
+                question TEXT,
+                city TEXT,
+                bucket_low REAL,
+                bucket_high REAL,
+                lattice TEXT,
+                detail_json TEXT,
+                first_seen TEXT,
+                last_seen TEXT,
+                times_seen INTEGER DEFAULT 1,
+                reviewed INTEGER DEFAULT 0
+            )
+        ''')
+
         conn.execute('''
             CREATE TABLE IF NOT EXISTS replay_signals (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1253,6 +1274,41 @@ def log_replay_signal(row, gates):
     except Exception as e:
         logging.error(f"replay logging failed: {e}", exc_info=True)
         return None
+
+
+def flag_impossible_bucket(market_id, question, city, bucket_low, bucket_high,
+                           detail):
+    """Archive a bucket that cannot settle YES on its station's grid.
+
+    An archive rather than a log line, because the value is in the ACCUMULATION:
+    one firing is probably a parser bug in a single question, while a run of them
+    sharing a phrasing is the bug's signature. UPSERT on market_id so a market
+    re-seen every scan cycle stays one row with a bumped count instead of
+    thousands.
+
+    Deliberately not a `notifications` row per sighting — that table is the
+    dashboard feed and a persistently mispriced market would flood it."""
+    import json as _json
+    execute_query('''
+        INSERT INTO impossible_buckets
+            (market_id, question, city, bucket_low, bucket_high, lattice,
+             detail_json, first_seen, last_seen, times_seen, reviewed)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, 1, 0)
+        ON CONFLICT (market_id) DO UPDATE SET
+            last_seen = excluded.last_seen,
+            times_seen = impossible_buckets.times_seen + 1
+    ''', (market_id, question, city, bucket_low, bucket_high,
+          detail.get("lattice"), _json.dumps(detail),
+          datetime.now(timezone.utc).isoformat(),
+          datetime.now(timezone.utc).isoformat()))
+
+
+def get_impossible_buckets(limit=100, include_reviewed=False):
+    """The manual-review queue, newest first."""
+    where = "" if include_reviewed else "WHERE reviewed = 0"
+    return fetch_query(
+        f"SELECT * FROM impossible_buckets {where} ORDER BY last_seen DESC LIMIT ?",
+        (limit,))
 
 
 def backfill_replay_outcomes(limit=5000):

@@ -1140,6 +1140,31 @@ def _start_bot():
     os._exit(1)
 
 
+@app.get('/api/impossible-buckets')
+@require_auth
+def api_impossible_buckets():
+    """The manual-review queue: buckets that cannot settle YES on their
+    station's reporting grid.
+
+    Deliberately a review queue and not an opportunity list. Every market's
+    quoting unit matches its station's grid (US markets quote °F against
+    °F-reporting stations, the rest °C against °C), so a real impossible bucket
+    should never occur — 0 across 20,988 live markets on 2026-08-05. A row here
+    is therefore evidence that parse_bucket is wrong, not that the market is."""
+    from db import get_impossible_buckets
+    rows = get_impossible_buckets(limit=int(request.args.get('limit', 100)))
+    return jsonify({"count": len(rows), "buckets": rows})
+
+
+@app.post('/api/impossible-buckets/<market_id>/reviewed')
+@require_auth
+def api_mark_bucket_reviewed(market_id):
+    from db import execute_query
+    execute_query("UPDATE impossible_buckets SET reviewed=1 WHERE market_id=?",
+                  (market_id,))
+    return jsonify(ok=True)
+
+
 @app.get('/api/backup/status')
 @require_auth
 def api_backup_status():

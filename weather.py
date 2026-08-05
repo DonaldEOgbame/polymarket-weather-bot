@@ -266,50 +266,50 @@ from utils import get_session
 # model-weight blend and is independent of the exact coordinate.
 STATIONS = {
     # North America
-    "NYC": {"lat": 40.7772, "lon": -73.8726, "region": "US", "window": "local"},          # LaGuardia (KLGA)
-    "New York": {"lat": 40.7772, "lon": -73.8726, "region": "US", "window": "local"},     # LaGuardia (KLGA)
-    "Chicago": {"lat": 41.9742, "lon": -87.9073, "region": "US", "window": "local"},      # O'Hare (KORD)
-    "Miami": {"lat": 25.7932, "lon": -80.2906, "region": "US", "window": "local"},        # Miami Intl (KMIA)
-    "Dallas": {"lat": 32.8471, "lon": -96.8518, "region": "US", "window": "local"},       # Love Field (KDAL)
-    "Los Angeles": {"lat": 33.9416, "lon": -118.4085, "region": "US", "window": "local"}, # LAX (KLAX)
-    "San Francisco": {"lat": 37.6213, "lon": -122.3790, "region": "US", "window": "local"}, # SFO (KSFO)
-    "Austin": {"lat": 30.1975, "lon": -97.6664, "region": "US", "window": "local"},       # Austin-Bergstrom (KAUS)
-    "Houston": {"lat": 29.6454, "lon": -95.2789, "region": "US", "window": "local"},      # Hobby (KHOU)
-    "Seattle": {"lat": 47.4502, "lon": -122.3088, "region": "US", "window": "local"},     # Sea-Tac (KSEA)
-    "Denver": {"lat": 39.7017, "lon": -104.7527, "region": "US", "window": "local"},      # Buckley SFB (KBKF)
-    "Atlanta": {"lat": 33.6407, "lon": -84.4277, "region": "US", "window": "local"},      # Hartsfield (KATL)
-    "Toronto": {"lat": 43.6777, "lon": -79.6248, "region": "US", "window": "local"},      # Pearson (CYYZ)
-    "Mexico City": {"lat": 19.4363, "lon": -99.0721, "region": "US", "window": "local"},  # Benito Juárez (MMMX)
-    "Panama": {"lat": 8.9733, "lon": -79.5556, "region": "US", "window": "local"},        # Marcos A. Gelabert (MPMG)
+    "NYC": {"lat": 40.7772, "lon": -73.8726, "region": "US", "window": "local", "lattice": "F"},          # LaGuardia (KLGA)
+    "New York": {"lat": 40.7772, "lon": -73.8726, "region": "US", "window": "local", "lattice": "F"},     # LaGuardia (KLGA)
+    "Chicago": {"lat": 41.9742, "lon": -87.9073, "region": "US", "window": "local", "lattice": "F"},      # O'Hare (KORD)
+    "Miami": {"lat": 25.7932, "lon": -80.2906, "region": "US", "window": "local", "lattice": "F"},        # Miami Intl (KMIA)
+    "Dallas": {"lat": 32.8471, "lon": -96.8518, "region": "US", "window": "local", "lattice": "F"},       # Love Field (KDAL)
+    "Los Angeles": {"lat": 33.9416, "lon": -118.4085, "region": "US", "window": "local", "lattice": "F"}, # LAX (KLAX)
+    "San Francisco": {"lat": 37.6213, "lon": -122.3790, "region": "US", "window": "local", "lattice": "F"}, # SFO (KSFO)
+    "Austin": {"lat": 30.1975, "lon": -97.6664, "region": "US", "window": "local", "lattice": "F"},       # Austin-Bergstrom (KAUS)
+    "Houston": {"lat": 29.6454, "lon": -95.2789, "region": "US", "window": "local", "lattice": "F"},      # Hobby (KHOU)
+    "Seattle": {"lat": 47.4502, "lon": -122.3088, "region": "US", "window": "local", "lattice": "F"},     # Sea-Tac (KSEA)
+    "Denver": {"lat": 39.7017, "lon": -104.7527, "region": "US", "window": "local", "lattice": "F"},      # Buckley SFB (KBKF)
+    "Atlanta": {"lat": 33.6407, "lon": -84.4277, "region": "US", "window": "local", "lattice": "F"},      # Hartsfield (KATL)
+    "Toronto": {"lat": 43.6777, "lon": -79.6248, "region": "US", "window": "local", "lattice": "C"},      # Pearson (CYYZ)
+    "Mexico City": {"lat": 19.4363, "lon": -99.0721, "region": "US", "window": "local", "lattice": "C"},  # Benito Juárez (MMMX)
+    "Panama": {"lat": 8.9733, "lon": -79.5556, "region": "US", "window": "local", "lattice": "C"},        # Marcos A. Gelabert (MPMG)
     # South America (GFS unavailable here — GLOBAL blend, no GFS)
-    "Buenos Aires": {"lat": -34.8222, "lon": -58.5358, "region": "GLOBAL", "window": "local"}, # Ezeiza/Pistarini (SAEZ)
-    "Sao Paulo": {"lat": -23.4356, "lon": -46.4731, "region": "GLOBAL", "window": "local"},    # Guarulhos (SBGR)
+    "Buenos Aires": {"lat": -34.8222, "lon": -58.5358, "region": "GLOBAL", "window": "local", "lattice": "C"}, # Ezeiza/Pistarini (SAEZ)
+    "Sao Paulo": {"lat": -23.4356, "lon": -46.4731, "region": "GLOBAL", "window": "local", "lattice": "C"},    # Guarulhos (SBGR)
     # Europe
-    "London": {"lat": 51.5048, "lon": 0.0495, "region": "EU", "window": "local"},         # London City Airport (EGLC) — NOT Heathrow
-    "Paris": {"lat": 48.9694, "lon": 2.4414, "region": "EU", "window": "local"},          # Le Bourget (LFPB)
-    "Berlin": {"lat": 52.3667, "lon": 13.5033, "region": "EU", "window": "local"},        # BER (EDDB)
-    "Amsterdam": {"lat": 52.3105, "lon": 4.7683, "region": "EU", "window": "local"},      # Schiphol (EHAM)
-    "Helsinki": {"lat": 60.3172, "lon": 24.9633, "region": "EU", "window": "local"},      # Vantaa (EFHK)
-    "Istanbul": {"lat": 41.2753, "lon": 28.7519, "region": "EU", "window": "local"},      # Istanbul Airport (LTFM)
-    "Madrid": {"lat": 40.4936, "lon": -3.5668, "region": "EU", "window": "local"},        # Barajas (LEMD)
-    "Milan": {"lat": 45.6306, "lon": 8.7231, "region": "EU", "window": "local"},          # Malpensa (LIMC)
+    "London": {"lat": 51.5048, "lon": 0.0495, "region": "EU", "window": "local", "lattice": "C"},         # London City Airport (EGLC) — NOT Heathrow
+    "Paris": {"lat": 48.9694, "lon": 2.4414, "region": "EU", "window": "local", "lattice": "C"},          # Le Bourget (LFPB)
+    "Berlin": {"lat": 52.3667, "lon": 13.5033, "region": "EU", "window": "local", "lattice": "C"},        # BER (EDDB)
+    "Amsterdam": {"lat": 52.3105, "lon": 4.7683, "region": "EU", "window": "local", "lattice": "C"},      # Schiphol (EHAM)
+    "Helsinki": {"lat": 60.3172, "lon": 24.9633, "region": "EU", "window": "local", "lattice": "C"},      # Vantaa (EFHK)
+    "Istanbul": {"lat": 41.2753, "lon": 28.7519, "region": "EU", "window": "local", "lattice": "C"},      # Istanbul Airport (LTFM)
+    "Madrid": {"lat": 40.4936, "lon": -3.5668, "region": "EU", "window": "local", "lattice": "C"},        # Barajas (LEMD)
+    "Milan": {"lat": 45.6306, "lon": 8.7231, "region": "EU", "window": "local", "lattice": "C"},          # Malpensa (LIMC)
     # Vnukovo, NOT Domodedovo: Moscow markets resolve on NOAA's feed for Vnukovo
     # International (weather.gov/wrh/timeseries?site=UUWW per the market description).
     # The airport-convention default picked Domodedovo, ~40km away — same class of
     # bug as the Hong Kong Observatory fix. Audited across all Gamma weather markets
     # 2026-07-28; every other city's station matched.
-    "Moscow": {"lat": 55.5915, "lon": 37.2615, "region": "EU", "window": "local"},        # Vnukovo (UUWW)
-    "Munich": {"lat": 48.3537, "lon": 11.7750, "region": "EU", "window": "local"},        # Munich (EDDM)
-    "Warsaw": {"lat": 52.1657, "lon": 20.9671, "region": "EU", "window": "local"},        # Chopin (EPWA)
+    "Moscow": {"lat": 55.5915, "lon": 37.2615, "region": "EU", "window": "local", "lattice": "C"},        # Vnukovo (UUWW)
+    "Munich": {"lat": 48.3537, "lon": 11.7750, "region": "EU", "window": "local", "lattice": "C"},        # Munich (EDDM)
+    "Warsaw": {"lat": 52.1657, "lon": 20.9671, "region": "EU", "window": "local", "lattice": "C"},        # Chopin (EPWA)
     # Middle East / Africa (GFS unavailable — GLOBAL blend, no GFS).
     # Ankara stays EU: ecmwf_ifs025 + gfs_global both return data there.
-    "Tel Aviv": {"lat": 32.0114, "lon": 34.8867, "region": "GLOBAL", "window": "local"},  # Ben Gurion (LLBG)
-    "Ankara": {"lat": 40.1281, "lon": 32.9951, "region": "EU", "window": "local"},        # Esenboğa (LTAC)
-    "Jeddah": {"lat": 21.6796, "lon": 39.1566, "region": "GLOBAL", "window": "local"},    # King Abdulaziz (OEJN)
-    "Lagos": {"lat": 6.5774, "lon": 3.3212, "region": "GLOBAL", "window": "local"},       # Murtala Muhammed (DNMM)
-    "Cape Town": {"lat": -33.9648, "lon": 18.6017, "region": "GLOBAL", "window": "local"}, # Cape Town Intl (FACT)
+    "Tel Aviv": {"lat": 32.0114, "lon": 34.8867, "region": "GLOBAL", "window": "local", "lattice": "C"},  # Ben Gurion (LLBG)
+    "Ankara": {"lat": 40.1281, "lon": 32.9951, "region": "EU", "window": "local", "lattice": "C"},        # Esenboğa (LTAC)
+    "Jeddah": {"lat": 21.6796, "lon": 39.1566, "region": "GLOBAL", "window": "local", "lattice": "C"},    # King Abdulaziz (OEJN)
+    "Lagos": {"lat": 6.5774, "lon": 3.3212, "region": "GLOBAL", "window": "local", "lattice": "C"},       # Murtala Muhammed (DNMM)
+    "Cape Town": {"lat": -33.9648, "lon": 18.6017, "region": "GLOBAL", "window": "local", "lattice": "C"}, # Cape Town Intl (FACT)
     # Asia-Pacific
-    "Tokyo": {"lat": 35.5523, "lon": 139.7798, "region": "AP", "window": "local"},        # Haneda (RJTT)
+    "Tokyo": {"lat": 35.5523, "lon": 139.7798, "region": "AP", "window": "local", "lattice": "C"},        # Haneda (RJTT)
     # HK Observatory HQ, Tsim Sha Tsui — NOT the airport. Every other city in this
     # table resolves on an airport station, so the airport convention was applied
     # here by default and was wrong: HK markets resolve on the Hong Kong Observatory
@@ -317,22 +317,22 @@ STATIONS = {
     # description text. HKG (22.3080, 113.9185) sits ~26km west on reclaimed land
     # surrounded by water; HKO is inland urban Kowloon and reads warmer on hot days.
     # On the 1°C buckets these markets use, that bias decides the outcome.
-    "Hong Kong": {"lat": 22.3022, "lon": 114.1746, "region": "AP", "window": "local"},    # HK Observatory HQ
-    "Seoul": {"lat": 37.4602, "lon": 126.4407, "region": "AP", "window": "local"},        # INCHEON (RKSI) — NOT the city centre
-    "Shanghai": {"lat": 31.1443, "lon": 121.8083, "region": "AP", "window": "local"},     # Pudong (ZSPD)
-    "Beijing": {"lat": 40.0799, "lon": 116.5847, "region": "AP", "window": "local"},      # Capital (ZBAA)
-    "Guangzhou": {"lat": 23.3924, "lon": 113.2988, "region": "AP", "window": "local"},    # Baiyun (ZGGG)
-    "Shenzhen": {"lat": 22.6393, "lon": 113.8107, "region": "AP", "window": "local"},     # Bao'an (ZGSZ)
-    "Chengdu": {"lat": 30.5785, "lon": 103.9469, "region": "AP", "window": "local"},      # Shuangliu (ZUUU)
-    "Chongqing": {"lat": 29.7192, "lon": 106.6417, "region": "AP", "window": "local"},    # Jiangbei (ZUCK)
-    "Wuhan": {"lat": 30.7838, "lon": 114.2081, "region": "AP", "window": "local"},        # Tianhe (ZHHH)
-    "Qingdao": {"lat": 36.3319, "lon": 120.3742, "region": "AP", "window": "local"},      # Jiaodong (ZSQD)
-    "Busan": {"lat": 35.1795, "lon": 128.9380, "region": "AP", "window": "local"},        # Gimhae (RKPK)
-    "Taipei": {"lat": 25.0694, "lon": 121.5525, "region": "AP", "window": "local"},       # Songshan (RCSS)
-    "Singapore": {"lat": 1.3644, "lon": 103.9915, "region": "AP", "window": "local"},     # Changi (WSSS)
-    "Kuala Lumpur": {"lat": 2.7456, "lon": 101.7072, "region": "AP", "window": "local"},  # KLIA (WMKK)
-    "Jakarta": {"lat": -6.1256, "lon": 106.6559, "region": "AP", "window": "local"},      # Soekarno-Hatta (WIII)
-    "Manila": {"lat": 14.5086, "lon": 121.0197, "region": "AP", "window": "local"},       # NAIA (RPLL)
+    "Hong Kong": {"lat": 22.3022, "lon": 114.1746, "region": "AP", "window": "local", "lattice": "C"},    # HK Observatory HQ
+    "Seoul": {"lat": 37.4602, "lon": 126.4407, "region": "AP", "window": "local", "lattice": "C"},        # INCHEON (RKSI) — NOT the city centre
+    "Shanghai": {"lat": 31.1443, "lon": 121.8083, "region": "AP", "window": "local", "lattice": "C"},     # Pudong (ZSPD)
+    "Beijing": {"lat": 40.0799, "lon": 116.5847, "region": "AP", "window": "local", "lattice": "C"},      # Capital (ZBAA)
+    "Guangzhou": {"lat": 23.3924, "lon": 113.2988, "region": "AP", "window": "local", "lattice": "C"},    # Baiyun (ZGGG)
+    "Shenzhen": {"lat": 22.6393, "lon": 113.8107, "region": "AP", "window": "local", "lattice": "C"},     # Bao'an (ZGSZ)
+    "Chengdu": {"lat": 30.5785, "lon": 103.9469, "region": "AP", "window": "local", "lattice": "C"},      # Shuangliu (ZUUU)
+    "Chongqing": {"lat": 29.7192, "lon": 106.6417, "region": "AP", "window": "local", "lattice": "C"},    # Jiangbei (ZUCK)
+    "Wuhan": {"lat": 30.7838, "lon": 114.2081, "region": "AP", "window": "local", "lattice": "C"},        # Tianhe (ZHHH)
+    "Qingdao": {"lat": 36.3319, "lon": 120.3742, "region": "AP", "window": "local", "lattice": "C"},      # Jiaodong (ZSQD)
+    "Busan": {"lat": 35.1795, "lon": 128.9380, "region": "AP", "window": "local", "lattice": "C"},        # Gimhae (RKPK)
+    "Taipei": {"lat": 25.0694, "lon": 121.5525, "region": "AP", "window": "local", "lattice": "C"},       # Songshan (RCSS)
+    "Singapore": {"lat": 1.3644, "lon": 103.9915, "region": "AP", "window": "local", "lattice": "C"},     # Changi (WSSS)
+    "Kuala Lumpur": {"lat": 2.7456, "lon": 101.7072, "region": "AP", "window": "local", "lattice": "C"},  # KLIA (WMKK)
+    "Jakarta": {"lat": -6.1256, "lon": 106.6559, "region": "AP", "window": "local", "lattice": "C"},      # Soekarno-Hatta (WIII)
+    "Manila": {"lat": 14.5086, "lon": 121.0197, "region": "AP", "window": "local", "lattice": "C"},       # NAIA (RPLL)
     # Karachi REMOVED (untradeable until resolved): Polymarket's own market description
     # contradicts itself — the text names "Masroor Airbase Station" (OPMR) but the
     # resolution URL in the same description points at wunderground .../pk/karachi/OPKC
@@ -340,8 +340,8 @@ STATIONS = {
     # text; a wrong guess is the Hong Kong bug all over again. Re-add once a resolved
     # Karachi market's outcome is checked against both stations' readings.
     # "Karachi": {"lat": 24.8936, "lon": 66.9385, "region": "AP", "window": "local"},     # Masroor Airbase (OPMR)
-    "Lucknow": {"lat": 26.7606, "lon": 80.8893, "region": "AP", "window": "local"},       # CCS Intl (VILK)
-    "Wellington": {"lat": -41.3272, "lon": 174.8053, "region": "AP", "window": "local"},  # Wellington Intl (NZWN)
+    "Lucknow": {"lat": 26.7606, "lon": 80.8893, "region": "AP", "window": "local", "lattice": "C"},       # CCS Intl (VILK)
+    "Wellington": {"lat": -41.3272, "lon": 174.8053, "region": "AP", "window": "local", "lattice": "C"},  # Wellington Intl (NZWN)
 }
 
 # Two rules for this table:

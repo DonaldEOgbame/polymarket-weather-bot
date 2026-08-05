@@ -252,8 +252,15 @@ def resolved_extreme_f(city_key, date_str, is_high):
     val_c = mx_c if is_high else mn_c
     if val_c is None:
         return None
-    rounded_c = round_half_away(val_c)  # whole-°C resolution precision
-    return rounded_c * 9.0 / 5.0 + 32.0
+    # Quantise onto the grid this city's market actually settles on, which is
+    # NOT whole °C everywhere. Until 2026-08-05 this rounded every city to a
+    # whole °C, and for the eleven North American cities that was a round trip
+    # through a grid coarser than the observation: US ASOS reports whole °F, so
+    # IEM's 27.78°C is exactly 82°F, rounded to 28°C and returned as 82.4°F.
+    # US markets settle on 2°F-wide buckets, so up to 0.9°F of purely
+    # self-inflicted error was deciding outcomes. See lattice.py.
+    from lattice import quantise_c
+    return quantise_c(val_c, city_key)
 
 
 def day_extremes_f(city_key, date_str):
@@ -265,12 +272,17 @@ def day_extremes_f(city_key, date_str):
     icao, tz = get_station(city_key)
     if not icao or not day_complete(tz, date_str):
         return (None, None)
+    from lattice import quantise_c
     if city_key in HKO_CITIES:
         mx_c, mn_c = hko_day_extremes_c(date_str)
+        # HKO publishes one decimal and the market takes the integer range that
+        # CONTAINS it, so floor — not the station grid.
         to_f = lambda c: math.floor(c) * 9.0 / 5.0 + 32.0 if c is not None else None
     else:
         mx_c, mn_c = fetch_day_extremes(icao, tz, date_str)
-        to_f = lambda c: round_half_away(c) * 9.0 / 5.0 + 32.0 if c is not None else None
+        # Same per-city grid as resolved_extreme_f — these two must not disagree
+        # about what a settled value is.
+        to_f = lambda c: quantise_c(c, city_key) if c is not None else None
     return (to_f(mx_c), to_f(mn_c))
 
 

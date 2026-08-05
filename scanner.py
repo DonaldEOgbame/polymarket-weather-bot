@@ -8,6 +8,7 @@ from dataclasses import dataclass
 from datetime import datetime, timezone
 from weather import (get_station_coords, STATIONS, is_tradeable_window,
                      settlement_window)
+from lattice import star_tag
 from db import execute_query, fetch_query
 from config import (
     MIN_VOLUME, MAX_HOURS_TO_RESOLUTION, GAMMA_EVENTS_URL, GAMMA_API_URL, CLOB_BASE_URL,
@@ -1166,6 +1167,26 @@ def scan_markets():
             # Use the immutably-stored bucket for this market_id, not a fresh
             # re-parse — see get_or_store_bucket's docstring for why this matters.
             lb, ub = get_or_store_bucket(market_id, question, city_key, target_date)
+
+            # Can this bucket settle YES at all? A bucket containing no value
+            # the station can report cannot pay, whatever the weather does.
+            #
+            # Routed for manual review rather than traded, and deliberately so:
+            # US markets quote °F against °F-reporting stations and the rest
+            # quote °C against °C-reporting stations, so a real impossible
+            # bucket should never occur. One firing therefore says our PARSER is
+            # wrong far more loudly than it says the market maker is — the
+            # 2026-06 Celsius zero-width bucket bug is exactly this shape — and
+            # betting real money on the opposite reading is the wrong way round
+            # given that history.
+            impossible, lattice_detail = star_tag(lb, ub, city_key, market_id, question)
+            if impossible:
+                flag_impossible_bucket(market_id, question, city_key, lb, ub,
+                                       lattice_detail)
+                do_skip(f"Impossible bucket [{lb}, {ub}]°F on {city_key}'s "
+                        f"{lattice_detail['lattice']} grid — flagged for manual "
+                        f"review, not traded", "impossible_bucket")
+                continue
 
             token_yes, token_no = _resolve_token_sides(m)
             if not token_yes or not token_no:
