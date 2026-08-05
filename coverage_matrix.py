@@ -22,7 +22,6 @@ import logging
 import os
 import sys
 import time
-from collections import defaultdict
 
 import requests
 
@@ -58,68 +57,154 @@ CANDIDATE_MODELS = [
 LEADS = (24, 48, 72)
 
 
-def probe(model, lat, lon, timeout=25):
-    """Non-null coverage for one model at one coordinate, by lead hour.
+# Coordinates per request. 51 in one request times out on the slower models
+# (measured: jma_gsm, cma_grapes_global, icon_eu all exceeded 60s), and one
+# timeout loses the whole model rather than one city. Chunking bounds the blast
+# radius of a slow response and keeps each request inside a sane deadline.
+CHUNK = 12
 
-    Returns {"ok": bool, "status": int|str, "leads": {24: bool, 48: bool, 72: bool},
-             "horizon_h": int|None}. `horizon_h` is the furthest lead that
-    returned a value — the practical statement of a limited-area model's reach
-    (icon_d2 simply stops past 48h)."""
+
+def _request(model, cities, timeout, max_retries=3):
+    """One request for one model over up to CHUNK coordinates."""
+    lats = ",".join(str(STATIONS[c]["lat"]) for c in cities)
+    lons = ",".join(str(STATIONS[c]["lon"]) for c in cities)
     params = {
-        "latitude": lat, "longitude": lon,
+        "latitude": lats, "longitude": lons,
         "hourly": "temperature_2m",
         "models": model,
         "timezone": "UTC",
         "temperature_unit": "fahrenheit",
         "forecast_days": 4,
     }
-    try:
-        r = requests.get(OPEN_METEO_URL, params=params, timeout=timeout)
-    except requests.RequestException as e:
-        return {"ok": False, "status": type(e).__name__, "leads": {}, "horizon_h": None}
-
-    if r.status_code != 200:
-        # 400 here means the model ID is invalid FOR THIS REQUEST, which with a
-        # single model is unambiguous — the reason this probe is one-at-a-time.
-        detail = ""
+    backoff = 4.0
+    last = "unknown"
+    for _ in range(max_retries):
         try:
-            detail = r.json().get("reason", "")[:120]
-        except Exception:
-            pass
-        return {"ok": False, "status": r.status_code, "reason": detail,
-                "leads": {}, "horizon_h": None}
+            r = requests.get(OPEN_METEO_URL, params=params, timeout=timeout)
+        except requests.RequestException as e:
+            last = type(e).__name__
+            time.sleep(backoff)
+            backoff *= 1.8
+            continue
+        if r.status_code == 429:
+            last = 429
+            time.sleep(backoff)
+            backoff *= 1.8
+            continue
+        if r.status_code != 200:
+            # With a single model this is unambiguous: the ID is invalid for
+            # these coordinates, full stop. Not JSON-decoded blindly — an error
+            # page is not JSON, and calling .json() on it crashed the first run
+            # partway through and lost every result before it.
+            detail = r.text[:150]
+            try:
+                detail = r.json().get("reason", detail)[:150]
+            except ValueError:
+                pass
+            return None, r.status_code, detail
+        try:
+            return r.json(), 200, ""
+        except ValueError:
+            last = "bad_json"
+            time.sleep(backoff)
+            backoff *= 1.8
+    return None, last, "exhausted retries"
 
-    series = r.json().get("hourly", {}).get(f"temperature_2m_{model}") \
-        or r.json().get("hourly", {}).get("temperature_2m")
+
+def _read_location(loc, model):
+    """Coverage verdict for one location object."""
+    hourly = loc.get("hourly", {}) or {}
+    series = hourly.get(f"temperature_2m_{model}") or hourly.get("temperature_2m")
     if not series:
         return {"ok": False, "status": "no_series", "leads": {}, "horizon_h": None}
-
     leads = {ld: (ld < len(series) and series[ld] is not None) for ld in LEADS}
     horizon = None
-    for i, v in enumerate(series):
+    for j, v in enumerate(series):
         if v is not None:
-            horizon = i
+            horizon = j
     return {"ok": any(leads.values()), "status": 200, "leads": leads,
             "horizon_h": horizon}
 
 
-def run(models, cities, pause=0.15):
-    """One row per (model, city). Serial: Open-Meteo's free tier rate-limits
-    parallel probes, and a rate-limited probe reports a false negative — which
-    in this script would become a permanent belief about model availability."""
-    results = defaultdict(dict)
-    total = len(models) * len(cities)
-    done = 0
+def probe_model(model, cities, timeout=90):
+    """Non-null coverage for ONE model across ALL cities.
+
+    Open-Meteo accepts comma-separated latitude/longitude and returns a LIST of
+    location objects in the order asked, so this costs a handful of requests per
+    model rather than one per city. The sequential per-coordinate version was
+    measured at roughly six hours, most of it spent waiting out timeouts on
+    model/coordinate pairs that were never going to return anything.
+
+    Still ONE MODEL AT A TIME, which is the part that matters. A request naming
+    several models returns HTTP 400 for ALL of them if any single ID is invalid,
+    so a batched-by-model probe reports "no data" for every model in the batch
+    and attributes the failure to the wrong thing. That is the origin of the
+    "GFS unavailable in the Southern Hemisphere" belief. Batching by COORDINATE
+    has no such failure mode: an out-of-domain coordinate returns nulls for that
+    location only, which is exactly the signal being measured.
+    """
+    out = {}
+    for i in range(0, len(cities), CHUNK):
+        chunk = cities[i:i + CHUNK]
+        payload, status, reason = _request(model, chunk, timeout)
+        if payload is None:
+            # A 400 saying "No data is available for this location" is
+            # OUT-OF-DOMAIN, not an invalid model ID — verified 2026-08-05:
+            # gfs_hrrr, ncep_nbm_conus and ncep_nam_conus all return 200 at
+            # Chicago and 400 at Tokyo. So one out-of-domain coordinate 400s
+            # the whole chunk, which is the SAME failure this script exists to
+            # avoid, just on the coordinate axis instead of the model axis:
+            # batching would report "no data anywhere" for every limited-area
+            # model and attribute it to the model rather than to the
+            # coordinate. Fall back to probing the chunk one coordinate at a
+            # time so a limited-area model gets a correct domain map.
+            if status == 400:
+                for c in chunk:
+                    one, st1, rs1 = _request(model, [c], timeout)
+                    if one is None:
+                        out[c] = {"ok": False, "status": st1, "reason": rs1,
+                                  "leads": {}, "horizon_h": None}
+                    else:
+                        loc = one[0] if isinstance(one, list) else one
+                        out[c] = _read_location(loc, model)
+                    time.sleep(0.2)
+                continue
+            for c in chunk:
+                out[c] = {"ok": False, "status": status, "reason": reason,
+                          "leads": {}, "horizon_h": None}
+            continue
+        locs = payload if isinstance(payload, list) else [payload]
+        for city, loc in zip(chunk, locs):
+            out[city] = _read_location(loc, model)
+        for city in chunk[len(locs):]:
+            out[city] = {"ok": False, "status": "missing_location", "leads": {},
+                         "horizon_h": None}
+        time.sleep(0.3)
+    return out
+
+
+def run(models, cities, pause=0.5, partial_path=None):
+    """One row per (model, city). Writes partial results as it goes.
+
+    The partial write is not decoration: the first run crashed on model 20 of 32
+    and lost every result before it, having already spent an hour."""
+    results = {}
     for model in models:
-        for city in cities:
-            st = STATIONS[city]
-            results[model][city] = probe(model, st["lat"], st["lon"])
-            done += 1
-            if done % 50 == 0:
-                logging.info(f"  {done}/{total}")
-            time.sleep(pause)
+        try:
+            results[model] = probe_model(model, cities)
+        except Exception as e:
+            logging.error(f"{model}: {type(e).__name__}: {e}")
+            results[model] = {c: {"ok": False, "status": type(e).__name__,
+                                  "leads": {}, "horizon_h": None} for c in cities}
         n_ok = sum(1 for c in cities if results[model][c]["ok"])
-        logging.info(f"{model:34s} {n_ok:3d}/{len(cities)} cities")
+        statuses = {str(results[model][c].get("status"))
+                    for c in cities if not results[model][c]["ok"]}
+        note = f"  ({', '.join(sorted(statuses))})" if statuses else ""
+        logging.info(f"{model:34s} {n_ok:3d}/{len(cities)}{note}")
+        if partial_path:
+            with open(partial_path, "w") as fh:
+                json.dump(results, fh)
+        time.sleep(pause)
     return results
 
 
@@ -173,7 +258,7 @@ def main():
             seen.add(key)
             cities.append(c)
 
-    results = run(models, cities)
+    results = run(models, cities, partial_path=args.json_out)
     os.makedirs(os.path.dirname(args.out), exist_ok=True)
     with open(args.json_out, "w") as fh:
         json.dump(results, fh, indent=2)
