@@ -131,9 +131,9 @@ have this in place before 2.3–2.5.
 
 ## Still to do (not in this branch)
 
-**2.2 coverage matrix** is written (`coverage_matrix.py`) and run for 21 of 32
+**2.2 coverage matrix** is written (`coverage_matrix.py`) and run for all 31
 candidate models; `reports/coverage-matrix.md` has the results. It is ground
-truth for the rest. Four findings change the plan:
+truth for the rest. Findings that change the plan:
 
 - **`gfs_global` works at 51/51 cities**, including Wellington, Cape Town,
   Buenos Aires and Sao Paulo. The "GFS unavailable in the Southern Hemisphere"
@@ -148,15 +148,29 @@ truth for the rest. Four findings change the plan:
   `ukmo_global_deterministic_10km`, `meteofrance_arpege_world` and
   `cma_grapes_global` are all 51/51. UKMO was the plan's first priority and it
   is available.
+- **`kma_ldps` and `kma_gdps` serve nothing** (HTTP 200, zero non-null values at
+  Seoul). The plan proposes both for Seoul and Busan; neither is available.
+- **`arpae_cosmo_2i` is retired** — HTTP 400, "ARPAE COSMO models are not
+  available anymore". The plan proposes it for Milan.
+- **`metno_seamless` is available at 51/51**, but note `families.py` advises
+  against `*_seamless` members whose bias is being measured: the underlying
+  model changes with lead time, so the correction becomes a mixture.
+- **`jma_msm` works at 6 cities including Tokyo** — the plan's natively-hourly
+  Tokyo recommendation is available.
 
 Horizon limits are recorded and matter for per-city lists: `gfs_hrrr`,
 `icon_d2`, `gem_hrdps_continental` and `meteofrance_arome_france_hd` all return
 nothing at 72h.
 
-To finish the matrix (eleven European/Asian limited-area models remain):
+Five models came back **INCONCLUSIVE** — the bulk run hit the rate limiter and
+every city returned an HTML error page. Probed individually they all work
+(`ukmo_uk_deterministic_2km` 67/96 non-null at London, both KNMI HARMONIE
+variants 77/96 at Amsterdam, `dmi_harmonie_arome_europe` 75/96 at Helsinki,
+`italia_meteo_arpae_icon_2i` 85/96 at Milan), but their full domain maps are
+unmeasured. Fill them in one at a time before using them:
 
 ```bash
-python coverage_matrix.py     # results are checkpointed per model
+python coverage_matrix.py --models ukmo_uk_deterministic_2km
 ```
 
 **2.3, 2.4, 2.5** — new globals, AI members, and per-city `extra_models` — are
