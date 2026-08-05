@@ -147,8 +147,28 @@ def compute_sigma(spread_std, lead_hours, is_high, city_key=None):
     return compute_sigma_stages(spread_std, lead_hours, is_high, city_key)["post_clamp"]
 
 
+def _diurnal_range(model_temps, opposite_temps, weights, is_high):
+    """Weighted-mean max minus weighted-mean min, in °F, or None.
+
+    Both means use the SAME weights as the traded forecast, so the range is
+    consistent with the mean it will be added to. Only members present in both
+    directions contribute — a member that returns a max but no min would
+    otherwise shift one end of the range and not the other, inventing diurnal
+    amplitude out of a coverage gap."""
+    if not opposite_temps:
+        return None
+    shared = set(model_temps) & set(opposite_temps) & set(weights)
+    tw = sum(weights[m] for m in shared)
+    if tw <= 0:
+        return None
+    this_mean = sum(model_temps[m] * weights[m] for m in shared) / tw
+    other_mean = sum(opposite_temps[m] * weights[m] for m in shared) / tw
+    rng = (this_mean - other_mean) if is_high else (other_mean - this_mean)
+    return rng if rng > 0 else None
+
+
 def _build_engine_result(model_temps, region, city_key, lead_hours, is_high,
-                         raw_models=None, corrections=None):
+                         raw_models=None, corrections=None, opposite_temps=None):
     """Assemble the signal-engine dict from a model→temp map.
 
     Single implementation shared by get_signal_engine (one market) and
@@ -216,6 +236,14 @@ def _build_engine_result(model_temps, region, city_key, lead_hours, is_high,
         # it). `corrections` is what applied_corrections returned at fetch
         # time, so raw + correction == the value actually used, provably,
         # without a replay needing to know the config history.
+        # The diurnal range the ensemble expects for this day, in °F. Free since
+        # Phase 1.2 returns both directions from one request. Intraday
+        # conditioning needs it to turn the dimensionless fitted remaining-rise
+        # fraction into degrees — a fraction of a range is meaningless without
+        # the range. None when the opposite direction is unavailable, which
+        # makes conditioning fall through rather than guess.
+        "forecast_diurnal_range_f": _diurnal_range(model_temps, opposite_temps,
+                                                   weights, is_high),
         "raw_models_pre_correction": dict(raw_models) if raw_models else None,
         "corrections_applied": dict(corrections) if corrections else None,
         "model_weights": {m: weights[m] for m in model_temps if m in weights},
@@ -539,12 +567,37 @@ def get_signal_engine(city_name, target_date, is_high=True, hours_to_resolution=
         logging.warning(f"Target date {target_date} not in forecast range")
         return None
 
-    return _build_engine_result(
+    # The other direction, for the diurnal range. Free: it comes out of the same
+    # cached hourly series that produced this one.
+    opposite = fetch_forecasts(city_name, not is_high)
+    opposite_temps = opposite[0].get(target_date) if opposite else None
+
+    engine = _build_engine_result(
         forecasts_by_date[target_date], region, city_key,
         hours_to_resolution, is_high,
         raw_models=raw_by_date.get(target_date),
         corrections=corr_by_date.get(target_date),
+        opposite_temps=opposite_temps,
     )
+    return _condition_on_observations(engine, target_date)
+
+
+def _condition_on_observations(engine, target_date):
+    """Apply intraday conditioning, never letting it break the trading path.
+
+    intraday.condition reads live METAR. That is a network call on the
+    evaluation path, and the whole point of the fallback design is that a slow
+    or broken observation feed degrades to the unconditioned forecast rather
+    than to no trading at all."""
+    if engine is None:
+        return None
+    try:
+        from intraday import condition
+        return condition(engine, target_date)
+    except Exception as e:
+        logging.error(f"intraday conditioning failed for "
+                      f"{engine.get('city_key')} {target_date}: {e}", exc_info=True)
+        return engine
 
 def _calibrate_prob(p):
     """Platt-scale the raw Gaussian bucket probability onto the empirically observed
@@ -575,6 +628,45 @@ def _calibrate_prob(p):
     return p + w * (cal - p)
 
 
+def _truncated_cdf(x, mean, std, bound, bound_is_floor):
+    """CDF of the forecast distribution truncated at an OBSERVED extreme.
+
+    The final daily max cannot be below the max already observed today, and the
+    final daily min cannot be above the min already observed. That is
+    arithmetic, not a probabilistic statement, so it is applied as a hard
+    truncation and renormalisation rather than as a shifted mean — a bucket
+    entirely below an observed maximum must price at exactly zero, not at
+    something small.
+
+    Renormalisation is numerically safe here because intraday.condition sets the
+    conditioned mean to at least the bound, which keeps CDF(bound) <= 0.5. The
+    guard below covers the case where a caller sets a bound without doing that.
+    """
+    if bound is None:
+        return _bucket_cdf(x, mean, std)
+
+    if bound_is_floor:
+        if x <= bound:
+            return 0.0
+        c_bound = _bucket_cdf(bound, mean, std)
+        denom = 1.0 - c_bound
+        if denom <= 1e-9:
+            # The model is so far below the observation that essentially all of
+            # its mass is already excluded. Renormalising would divide by ~0;
+            # the honest reading is that everything above the bound is possible
+            # and the model has no view left, so fall back to untruncated.
+            return _bucket_cdf(x, mean, std)
+        return min(1.0, (_bucket_cdf(x, mean, std) - c_bound) / denom)
+
+    # Ceiling: no mass above an observed minimum.
+    if x >= bound:
+        return 1.0
+    c_bound = _bucket_cdf(bound, mean, std)
+    if c_bound <= 1e-9:
+        return _bucket_cdf(x, mean, std)
+    return max(0.0, _bucket_cdf(x, mean, std) / c_bound)
+
+
 def bucket_probability_stages(engine_result, bucket_lower, bucket_upper):
     """P(YES) at each stage: raw CDF, post-Platt, post-floor.
 
@@ -596,14 +688,26 @@ def bucket_probability_stages(engine_result, bucket_lower, bucket_upper):
     elif bucket_upper is not None:
         ub += 0.5
 
-    raw = _bucket_cdf(ub, mean, std) - _bucket_cdf(lb, mean, std)
+    # Truncated at today's observed extreme when intraday conditioning applied.
+    bound = engine_result.get("hard_bound")
+    is_floor = engine_result.get("hard_bound_is_floor", True)
+    raw = (_truncated_cdf(ub, mean, std, bound, is_floor)
+           - _truncated_cdf(lb, mean, std, bound, is_floor))
     raw = max(0.0, min(1.0, float(raw)))
 
     is_bounded = bucket_lower is not None and bucket_upper is not None
     post_platt = _calibrate_prob(raw) if is_bounded else raw
 
+    # The tail floor is a statement about FORECAST noise: no bucket is truly
+    # less than ~5% likely when the forecast could be a degree off. It is not a
+    # statement about observed facts. When today's observations have already
+    # excluded the bucket, the answer is exactly zero, and flooring it back to
+    # 0.05 would throw away the single most valuable thing intraday
+    # conditioning produces — a bucket that CANNOT pay, priced as such.
+    excluded_by_observation = bound is not None and raw <= 0.0
     post_floor = post_platt
-    floor_bound = MIN_BUCKET_PROB > 0.0 and post_platt < MIN_BUCKET_PROB
+    floor_bound = (MIN_BUCKET_PROB > 0.0 and post_platt < MIN_BUCKET_PROB
+                   and not excluded_by_observation)
     if floor_bound:
         post_floor = MIN_BUCKET_PROB
     post_floor = max(0.0, min(1.0, float(post_floor)))
@@ -638,7 +742,10 @@ def get_bucket_probability(engine_result, bucket_lower, bucket_upper):
     elif bucket_upper is not None and bucket_lower is None:
         ub += 0.5
 
-    prob = _bucket_cdf(ub, mean, std) - _bucket_cdf(lb, mean, std)
+    bound = engine_result.get("hard_bound")
+    is_floor = engine_result.get("hard_bound_is_floor", True)
+    prob = (_truncated_cdf(ub, mean, std, bound, is_floor)
+            - _truncated_cdf(lb, mean, std, bound, is_floor))
     prob = max(0.0, min(1.0, float(prob)))
 
     # Calibrate ONLY closed (bounded) buckets — exact-degree and narrow ranges. Those
@@ -658,7 +765,11 @@ def get_bucket_probability(engine_result, bucket_lower, bucket_upper):
     # tail below the entry gate. The entry decision uses only the traded side's
     # probability, so flooring that side is sufficient; open-ended complementarity
     # isn't relied on downstream (each side is fetched independently).
-    if MIN_BUCKET_PROB > 0.0 and prob < MIN_BUCKET_PROB:
+    # ...but never over a bucket that today's observations have already ruled
+    # out. See bucket_probability_stages: the floor models forecast noise, and
+    # an observed extreme is not noise.
+    excluded_by_observation = bound is not None and prob <= 0.0
+    if MIN_BUCKET_PROB > 0.0 and prob < MIN_BUCKET_PROB and not excluded_by_observation:
         prob = MIN_BUCKET_PROB
     return max(0.0, min(1.0, float(prob)))
 
@@ -708,7 +819,10 @@ def prefetch_signal_engines(opportunities) -> dict:
     # connection (~1-2s), each subsequent city takes ~0.5s. Parallel connections
     # from the same IP trigger timeouts and are slower overall.
     forecast_cache: dict[tuple, object] = {}
-    for city, is_high in city_is_high_keys:
+    # Both directions for every city, not just the one an opportunity asked for:
+    # the diurnal range needs the opposite direction, and since Phase 1.2 both
+    # come out of one cached HTTP response, so the second is free.
+    for city, is_high in {(c, d) for c, _ in city_is_high_keys for d in (True, False)}:
         try:
             _, res = _fetch_city(city, is_high)
             forecast_cache[(city, is_high)] = res
@@ -732,17 +846,26 @@ def prefetch_signal_engines(opportunities) -> dict:
             engine_cache[key] = None
             continue
 
-        engine_cache[key] = _build_engine_result(
+        opposite = forecast_cache.get((opp.city, not opp.is_high))
+        opposite_temps = opposite[0].get(opp.date) if opposite else None
+
+        engine = _build_engine_result(
             forecasts_by_date[opp.date], region, city_key,
             opp.hours_to_resolution, opp.is_high,
             raw_models=raw_by_date.get(opp.date),
             corrections=corr_by_date.get(opp.date),
+            opposite_temps=opposite_temps,
         )
+        engine_cache[key] = _condition_on_observations(engine, opp.date)
 
     hits = sum(1 for v in engine_cache.values() if v is not None)
+    conditioned = sum(1 for v in engine_cache.values()
+                      if v and v.get("intraday", {}).get("applied"))
     logging.info(
         f"Weather prefetch: {len(city_is_high_keys)} city fetches → "
         f"{hits}/{len(engine_cache)} opportunity keys populated"
+        + (f" | {conditioned} conditioned on today's observations"
+           if conditioned else "")
     )
     return engine_cache
 

@@ -931,6 +931,59 @@ def model_bias_correction(model, is_high):
 # 14d default (was 60): at ~2,100 signal rows/day × ~2.5KB the 60-day steady
 # state is ~320MB and filled the original 1GB volume; 14d is plenty because
 # calibration scores resolved rows within days.
+# --- Intraday observation conditioning (see intraday.py) ---
+# Nothing conditioned on observations already in hand before 2026-08-05: at
+# 15:00 local with the station reading 91°F, the bot was still pricing
+# "will the max be below 91?" off a 00Z forecast.
+ENABLE_INTRADAY_CONDITIONING = os.getenv(
+    "ENABLE_INTRADAY_CONDITIONING", "true").lower() == "true"
+# Before this local hour the running extreme carries almost no information about
+# the day's peak — pre-dawn the "max so far" is just the overnight low. 6 is
+# roughly sunrise across the traded latitudes in either season.
+INTRADAY_MIN_HOURS_ELAPSED = float(os.getenv("INTRADAY_MIN_HOURS_ELAPSED", "6"))
+# Floor on the conditioned sigma. Late in the day the fitted remaining-rise sd
+# approaches zero, and a sigma of literally zero would price every bucket at 0
+# or 1 — betting the farm on a single METAR reading and on the assumption that
+# no correction will ever be issued. 0.5°F is under the °C settlement
+# quantisation, so it does not blunt the edge that conditioning creates.
+INTRADAY_SIGMA_FLOOR_F = float(os.getenv("INTRADAY_SIGMA_FLOOR_F", "0.5"))
+
+# Fitted fraction of the day's diurnal range still to come at each local hour.
+# f = still to RISE (conditions a daily max), g = still to FALL (a daily min).
+# Dimensionless, so it travels across climates and hemispheres; multiplied at
+# runtime by the diurnal range the ensemble forecasts for that day.
+#
+# Fitted by fit_remaining_rise.py over 12 months of METAR from ten stations
+# spanning the traded climate zones. Regenerate with that script; do not hand-
+# edit. See reports/remaining-rise.md for the per-station curves and whether
+# pooling across climates is defensible.
+REMAINING_RISE_TABLE = {
+     0: {"f_mean": 0.6974, "f_sd": 0.2425, "g_mean": 0.2789, "g_sd": 0.2361},
+     1: {"f_mean": 0.6863, "f_sd": 0.2421, "g_mean": 0.2268, "g_sd": 0.2229},
+     2: {"f_mean": 0.6786, "f_sd": 0.2414, "g_mean": 0.1848, "g_sd": 0.2095},
+     3: {"f_mean": 0.6742, "f_sd": 0.2401, "g_mean": 0.1446, "g_sd": 0.1939},
+     4: {"f_mean": 0.6699, "f_sd": 0.2396, "g_mean": 0.1124, "g_sd": 0.1841},
+     5: {"f_mean": 0.6660, "f_sd": 0.2391, "g_mean": 0.0864, "g_sd": 0.1718},
+     6: {"f_mean": 0.6577, "f_sd": 0.2370, "g_mean": 0.0678, "g_sd": 0.1617},
+     7: {"f_mean": 0.6286, "f_sd": 0.2286, "g_mean": 0.0595, "g_sd": 0.1531},
+     8: {"f_mean": 0.5430, "f_sd": 0.2143, "g_mean": 0.0555, "g_sd": 0.1465},
+     9: {"f_mean": 0.4151, "f_sd": 0.1980, "g_mean": 0.0531, "g_sd": 0.1419},
+    10: {"f_mean": 0.2848, "f_sd": 0.1759, "g_mean": 0.0511, "g_sd": 0.1379},
+    11: {"f_mean": 0.1793, "f_sd": 0.1537, "g_mean": 0.0489, "g_sd": 0.1337},
+    12: {"f_mean": 0.1046, "f_sd": 0.1255, "g_mean": 0.0467, "g_sd": 0.1298},
+    13: {"f_mean": 0.0539, "f_sd": 0.0962, "g_mean": 0.0452, "g_sd": 0.1264},
+    14: {"f_mean": 0.0258, "f_sd": 0.0723, "g_mean": 0.0432, "g_sd": 0.1233},
+    15: {"f_mean": 0.0123, "f_sd": 0.0560, "g_mean": 0.0413, "g_sd": 0.1187},
+    16: {"f_mean": 0.0065, "f_sd": 0.0430, "g_mean": 0.0393, "g_sd": 0.1150},
+    17: {"f_mean": 0.0043, "f_sd": 0.0357, "g_mean": 0.0371, "g_sd": 0.1099},
+    18: {"f_mean": 0.0030, "f_sd": 0.0301, "g_mean": 0.0331, "g_sd": 0.1011},
+    19: {"f_mean": 0.0024, "f_sd": 0.0271, "g_mean": 0.0285, "g_sd": 0.0915},
+    20: {"f_mean": 0.0019, "f_sd": 0.0241, "g_mean": 0.0229, "g_sd": 0.0777},
+    21: {"f_mean": 0.0012, "f_sd": 0.0183, "g_mean": 0.0157, "g_sd": 0.0593},
+    22: {"f_mean": 0.0006, "f_sd": 0.0107, "g_mean": 0.0092, "g_sd": 0.0428},
+    23: {"f_mean": 0.0000, "f_sd": 0.0000, "g_mean": 0.0000, "g_sd": 0.0000},
+}
+
 SIGNAL_RETENTION_DAYS = int(os.getenv("SIGNAL_RETENTION_DAYS", "14"))
 SKIP_SIGNAL_RETENTION_DAYS = int(os.getenv("SKIP_SIGNAL_RETENTION_DAYS", "3"))
 # Two carve-outs from the SKIP purge above, kept indefinitely. The skip trail is
@@ -1154,7 +1207,11 @@ REPLAY_SCHEMA_VERSION = 1
 #      2026-08-05)
 #   2  hourly=temperature_2m aggregated locally to the audited settlement
 #      window; both directions from one request (Phase 1.2)
-FORECAST_PIPELINE_VERSION = 2
+#   3  intraday observation conditioning: hard bound at the observed extreme
+#      plus a fitted remaining-rise term (Phase 1.3). The largest behavioural
+#      change in this rollout — probabilities move materially, so no
+#      calibration may pool across this boundary.
+FORECAST_PIPELINE_VERSION = 3
 
 # Every constant that can change a probability or a gate outcome. The
 # fingerprint over these is stored on each logged signal, because a replay that
