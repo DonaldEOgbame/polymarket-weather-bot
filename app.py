@@ -1140,6 +1140,47 @@ def _start_bot():
     os._exit(1)
 
 
+@app.get('/api/backup/status')
+@require_auth
+def api_backup_status():
+    """What the off-box backup situation actually is, not what it is assumed to be."""
+    from backup import backup_status
+    return jsonify(backup_status())
+
+
+@app.post('/api/backup/run')
+@require_auth
+def api_backup_run():
+    """Take a snapshot now. Synchronous — the caller wants to know it worked."""
+    from backup import run_backup
+    res = run_backup()
+    return jsonify(res), (200 if res["ok"] else 500)
+
+
+@app.get('/api/backup/latest')
+@require_auth
+def api_backup_latest():
+    """Stream the newest verified snapshot.
+
+    This is the zero-configuration off-box path: a cron on a laptop that curls
+    this endpoint with a session cookie IS the off-box destination, with no
+    bucket, no credentials and no SDK. Authenticated, because the file contains
+    the entire trade ledger.
+
+    Takes a fresh snapshot when none exists yet, so the first pull after a
+    deploy does not 404 and get read as "backups are broken"."""
+    from backup import latest_local_snapshot, run_backup
+    path = latest_local_snapshot()
+    if not path:
+        res = run_backup()
+        if not res["ok"]:
+            return jsonify(error=res["error"]), 500
+        path = res["path"]
+    directory, name = os.path.dirname(path), os.path.basename(path)
+    return send_from_directory(directory, name, as_attachment=True,
+                               mimetype='application/gzip')
+
+
 @app.route('/healthz')
 def healthz():
     """Unauthenticated liveness probe for the fly.io health check: bot thread

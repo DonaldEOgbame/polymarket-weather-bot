@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from db import (
     init_db, fetch_query, get_portfolio_state, get_daily_pnl, execute_query,
     purge_old_signals, purge_old_scan_log, purge_old_notifications, vacuum_db,
-    purge_old_position_trail, current_mode,
+    purge_old_position_trail, current_mode, backfill_replay_outcomes,
 )
 from scanner import scan_markets, verify_parser_fixtures, prefetch_order_books
 from strategy import evaluate_opportunity
@@ -167,6 +167,22 @@ def check_resolutions():
                 logging.error(f"Error fetching historical resolution for {city} {target_date}: {e}")
     except Exception as e:
         logging.error(f"Error in check_resolutions: {e}", exc_info=True)
+    finally:
+        # Settle the replay log against whatever resolutions now exist.
+        #
+        # In its own finally, and last: the replay log is the shadow run's entire
+        # output — every market the bot SCORED, including the ~99% it never
+        # traded — and it is worthless unscored. It was written, tested, and
+        # then never called from production, so since the shadow run began
+        # every replay row has sat with settled_value NULL. Running it here (a)
+        # keys off the resolutions table that the loop above has just topped up,
+        # so it settles on exactly the ruler the trades settled on, and (b)
+        # cannot be skipped by an exception raised while scoring an individual
+        # trade above.
+        try:
+            backfill_replay_outcomes()
+        except Exception as e:
+            logging.error(f"Replay-outcome backfill failed: {e}", exc_info=True)
 
 # Heartbeat for /healthz: UTC timestamp of the last completed scan or monitor
 # cycle. If this goes stale while the process lives, the bot thread is a zombie.
@@ -272,6 +288,25 @@ def _daily_purge():
         logging.info("Daily DB purge + vacuum complete.")
     except Exception as e:
         logging.error(f"Error in daily purge: {e}", exc_info=True)
+
+
+def _daily_backup():
+    """Snapshot + verify + push the DB off-box.
+
+    Scheduled BEFORE _daily_purge (02:30 vs 03:00) deliberately: the purge
+    deletes signal rows and then VACUUMs, so a backup taken after it has already
+    lost the day's skip trail. Backing up the pre-purge state costs nothing
+    (it compresses) and is the only copy that still contains what was purged."""
+    from backup import run_backup
+    res = run_backup()
+    if res["ok"]:
+        logging.info(
+            f"Backup complete — {res['bytes']:,} bytes, sha256 {res['sha256'][:12]}, "
+            f"off-box={'yes' if res['pushed'] else 'NO (local only)'}"
+        )
+    else:
+        logging.error(f"Backup failed: {res['error']}")
+    return res
 
 
 def daily_summary():
@@ -391,7 +426,17 @@ def run_bot(in_thread=False):
     schedule.every(MONITOR_INTERVAL_MINUTES).minutes.do(run_monitor_cycle)
     schedule.every(60).minutes.do(check_resolutions)
     schedule.every().day.at("08:00").do(daily_summary)
+    # 02:30 — before the 03:00 purge+vacuum. See _daily_backup.
+    schedule.every().day.at("02:30").do(_daily_backup)
     schedule.every().day.at("03:00").do(_daily_purge)
+
+    # One backup per process start, off the critical path. Every deploy is a
+    # restore point worth having — and during a staged rollout like Phases 1-2
+    # the deploy boundary is exactly where a bad config change would need to be
+    # rolled back from. Threaded because gzipping a few hundred MB on a 1-CPU
+    # machine would otherwise delay the first scan by tens of seconds.
+    import threading as _threading
+    _threading.Thread(target=_daily_backup, name="boot-backup", daemon=True).start()
 
     while True:
         schedule.run_pending()

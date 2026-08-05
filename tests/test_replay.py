@@ -260,3 +260,35 @@ class TestOutcomeBackfill:
         wired.backfill_replay_outcomes()
         row = wired.fetch_query("SELECT settled_outcome FROM replay_signals")[0]
         assert row["settled_outcome"] == "NO"
+
+
+class TestBackfillIsWiredIntoProduction:
+    """The backfill existed, was correct, was tested — and was never called.
+
+    Every replay row written since the shadow run began therefore sat with
+    settled_value NULL, which makes the entire log unscorable. Correctness tests
+    could not catch that, because the function they exercised was fine. Only a
+    wiring test can, so these assert the call site rather than the behaviour."""
+
+    def test_check_resolutions_calls_the_backfill(self, wired, monkeypatch):
+        import main as M
+        called = []
+        monkeypatch.setattr(M, "backfill_replay_outcomes", lambda *a, **k: called.append(1))
+        monkeypatch.setattr(M, "fetch_query", lambda *a, **k: [])
+        monkeypatch.setattr(M, "executor", types.SimpleNamespace(
+            settle_unscored_trades=lambda: None))
+        M.check_resolutions()
+        assert called, "check_resolutions must settle the replay log"
+
+    def test_backfill_runs_even_when_trade_scoring_raises(self, wired, monkeypatch):
+        """The replay log is the shadow run's whole output and must not be held
+        hostage by an exception raised while scoring one traded market."""
+        import main as M
+        called = []
+        monkeypatch.setattr(M, "backfill_replay_outcomes", lambda *a, **k: called.append(1))
+        monkeypatch.setattr(M, "fetch_query",
+                            lambda *a, **k: (_ for _ in ()).throw(RuntimeError("db boom")))
+        monkeypatch.setattr(M, "executor", types.SimpleNamespace(
+            settle_unscored_trades=lambda: None))
+        M.check_resolutions()          # must not raise
+        assert called, "a failure scoring trades must not skip the replay backfill"
