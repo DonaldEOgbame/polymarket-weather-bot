@@ -1253,6 +1253,21 @@ REPLAY_SCHEMA_VERSION = 1
 #      rather than across members (Phase 2.1)
 FORECAST_PIPELINE_VERSION = 4
 
+# --- Settlement-ruler identity --------------------------------------------
+# Bump when what counts as the SETTLED VALUE changes. Distinct from the pipeline
+# version above, which is about what is believed: this is about the ruler the
+# belief is scored against, and a change here invalidates comparisons in a
+# different and arguably worse way. A forecast change splits the history into
+# "before" and "after"; a ruler change makes the OUTCOMES themselves
+# incomparable, so a Brier score pooled across the boundary is measuring two
+# different questions.
+#
+#   1  every city rounded to a whole °C (through 2026-08-05)
+#   2  per-city settlement lattice — whole °F for the eleven North American
+#      cities whose stations report °F, whole °C elsewhere (Phase 1.4). US
+#      resolutions before and after this differ by up to 0.9°F.
+SETTLEMENT_RULER_VERSION = 2
+
 # Every constant that can change a probability or a gate outcome. The
 # fingerprint over these is stored on each logged signal, because a replay that
 # cannot tell which configuration produced a row is a replay that will silently
@@ -1264,7 +1279,7 @@ FORECAST_PIPELINE_VERSION = 4
 # change what is bought, not what is believed, and including them would churn
 # the fingerprint for changes a replay does not care about.
 _FINGERPRINT_KEYS = (
-    "FORECAST_PIPELINE_VERSION",
+    "FORECAST_PIPELINE_VERSION", "SETTLEMENT_RULER_VERSION",
     "EDGE_THRESHOLD", "MIN_MODEL_AGREEMENT", "MAX_MODEL_SPREAD_STD",
     "MIN_MODEL_COUNT", "MAX_ENTRY_SPREAD_FRACTION", "MAX_ENTRY_PRICE",
     "FORECAST_MARGIN_F", "YES_MARGIN_WIDTH_FRACTION",

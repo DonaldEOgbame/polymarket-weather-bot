@@ -208,3 +208,30 @@ class TestTheReviewQueue:
         db.execute_query("UPDATE impossible_buckets SET reviewed=1 WHERE market_id=?", ("0xa",))
         assert db.get_impossible_buckets() == []
         assert len(db.get_impossible_buckets(include_reviewed=True)) == 1
+
+
+class TestTheRulerChangeIsQueryable:
+    def test_the_settlement_ruler_version_is_in_the_fingerprint(self):
+        """A ruler change invalidates comparisons differently — and arguably
+        worse — than a forecast change. A forecast change splits the history
+        into before and after; a ruler change makes the OUTCOMES incomparable,
+        so a Brier score pooled across the boundary is measuring two different
+        questions. US resolutions before and after Phase 1.4 differ by up to
+        0.9°F."""
+        import config as C
+        assert "SETTLEMENT_RULER_VERSION" in C._FINGERPRINT_KEYS
+        before = C.config_fingerprint()
+        original = C.SETTLEMENT_RULER_VERSION
+        try:
+            C.SETTLEMENT_RULER_VERSION = original + 1
+            assert C.config_fingerprint() != before
+        finally:
+            C.SETTLEMENT_RULER_VERSION = original
+
+    def test_it_is_distinct_from_the_pipeline_version(self):
+        """Two different kinds of invalidation need two different markers, or a
+        replay cannot tell 'we changed what we believe' from 'we changed what
+        counts as being right'."""
+        import config as C
+        assert C.SETTLEMENT_RULER_VERSION >= 2
+        assert "FORECAST_PIPELINE_VERSION" in C._FINGERPRINT_KEYS
