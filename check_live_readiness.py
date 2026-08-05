@@ -33,6 +33,49 @@ def _check(cid, label, ok, detail, blocking=True):
             "blocking": bool(blocking)}
 
 
+def deployed_settings_check():
+    """Compare the settings table against the pin checked into the test suite.
+
+    The pin lives in tests/test_deployed_settings.py, and CI cannot reach the
+    deployed DB to enforce it — but this module runs ON the box, where DB_PATH
+    IS the deployed DB. Reading the pin from the test file rather than
+    duplicating the numbers keeps one source of truth; a second copy here would
+    be the very drift the pin exists to prevent.
+
+    Advisory (blocking=False): a mismatch means the record is stale, which is
+    worth saying loudly, but it is not a credential fault and must not be able
+    to strand the operator outside a switch they are entitled to make.
+    """
+    import sqlite3
+    try:
+        sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
+        from tests.test_deployed_settings import DEPLOYED_PIN
+        import config as _cfg
+        conn = sqlite3.connect(f"file:{_cfg.DB_PATH}?mode=ro", uri=True, timeout=2.0)
+        try:
+            rows = dict(conn.execute("SELECT key, value FROM settings").fetchall())
+        finally:
+            conn.close()
+    except Exception as e:
+        return _check("settings_pin", "Deployed settings match the pin", False,
+                      f"could not compare: {type(e).__name__}: {e}", blocking=False)
+
+    drift = []
+    for key, pinned in DEPLOYED_PIN.items():
+        actual = rows.get(key)
+        same = (str(actual).strip().lower() == str(pinned).strip().lower()
+                if isinstance(pinned, str)
+                else actual is not None and float(actual) == float(pinned))
+        if not same:
+            drift.append(f"{key}: deployed={actual!r} pinned={pinned!r}")
+    return _check(
+        "settings_pin", "Deployed settings match the pin", not drift,
+        "settings table matches tests/test_deployed_settings.py::DEPLOYED_PIN"
+        if not drift else
+        "; ".join(drift) + " — update DEPLOYED_PIN in a commit, with the reason",
+        blocking=False)
+
+
 def preflight():
     """Run every credential/funding check. Never raises.
 
@@ -44,7 +87,7 @@ def preflight():
     Non-blocking checks are advisory (e.g. zero allowances, which the relayer
     sets on a proxy account's first trade).
     """
-    checks = []
+    checks = [deployed_settings_check()]
     pk = os.getenv("POLYMARKET_PK", "")
     try:
         sig = int(os.getenv("POLYMARKET_SIG_TYPE", "0"))

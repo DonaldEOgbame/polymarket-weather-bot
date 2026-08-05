@@ -1,0 +1,68 @@
+name: tests
+
+on:
+  push:
+  pull_request:
+
+# A second push to the same branch cancels the first: the only run that matters
+# is the one for the code that is actually there now.
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    # No secrets, no network fixtures, no deployed DB. The suite is fully
+    # hermetic, and it must stay that way: a test that reaches Open-Meteo or
+    # Polymarket would make CI fail on their outages rather than on this
+    # repository's changes.
+    env:
+      PAPER_MODE: "true"
+      DB_PATH: "ci-scratch.db"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+          pip install pytest
+
+      - name: Run tests
+        run: pytest tests/ -q --durations=10
+
+      # The parser fixtures are checked at process start in production
+      # (verify_parser_fixtures raises and refuses to boot). Running them here
+      # too means a bucket-math regression fails the push rather than the
+      # deploy — the 2026-06 Celsius zero-width bucket bug reached production
+      # and cost a multi-hour forensic audit to even notice.
+      - name: Verify parser fixtures boot-check
+        run: python -c "from scanner import verify_parser_fixtures; verify_parser_fixtures(); print('parser fixtures ok')"
+
+      # Config tables that silently do not apply are the other class of failure
+      # that only shows up at boot: a city named in CONVECTIVE_CITIES but absent
+      # from STATIONS, or a model in WEIGHTS with no bias correction.
+      - name: Validate config tables
+        run: python -c "from weather import validate_config_tables; validate_config_tables(); print('config tables ok')"
+
+      - name: Import every module
+        # Catches syntax errors and circular imports in modules no test happens
+        # to import — app.py in particular is 1,200 lines behind a Flask app.
+        run: |
+          python -c "
+          import importlib
+          for m in ['config','db','utils','weather','metar','scanner','strategy',
+                    'executor','alerts','replay','calibrate','backup','main','app',
+                    'check_live_readiness']:
+              importlib.import_module(m)
+              print('ok', m)
+          "
