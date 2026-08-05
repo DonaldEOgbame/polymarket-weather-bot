@@ -153,6 +153,13 @@ def require_auth(f):
 
 @app.route('/')
 def root():
+    # An already-signed-in visitor goes straight through. Without this, "Keep me
+    # signed in" LOOKS broken even when it works perfectly: the cookie is valid
+    # for 30 days and /dashboard accepts it, but returning to the bare hostname
+    # rendered the sign-in form anyway, which is indistinguishable from having
+    # been logged out. Only /dashboard ever consulted the session.
+    if session.get('authed'):
+        return redirect('/dashboard')
     # The sign-in art carries a "<mode> MODE ENABLED" strip. Substituting it
     # here (rather than fetching it) keeps the page honest without exposing an
     # unauthenticated endpoint that reports what the bot is doing.
@@ -184,10 +191,15 @@ def api_login():
     return jsonify(error='Invalid credentials'), 401
 
 
-@app.get('/api/logout')
+# POST, not GET. As a GET link this was destroying sessions on its own: any
+# link prefetcher — Chrome's "Preload pages for faster browsing", an extension,
+# a link scanner — that follows the href signs the user out, and SameSite=Lax
+# still attaches the cookie to a top-level cross-site GET, so a link from
+# anywhere else logs them out too. Both present as "it keeps forgetting me".
+@app.post('/api/logout')
 def api_logout():
     session.clear()
-    return redirect('/')
+    return jsonify(ok=True)
 
 def _total_deposited():
     """Seed + every DEPOSIT = total capital ever put in.

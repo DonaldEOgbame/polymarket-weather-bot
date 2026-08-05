@@ -319,7 +319,15 @@ function TopBar({ portfolio, scanLog, activeTab, setActiveTab }) {
       </div>
 
       <NotificationBell />
-      <a href="/api/logout" className="icon-btn" title="Sign out">↩</a>
+      <button
+        type="button"
+        className="icon-btn"
+        title="Sign out"
+        onClick={async () => {
+          try { await fetch('/api/logout', { method: 'POST' }); } catch (e) {}
+          window.location.href = '/';
+        }}
+      >↩</button>
     </header>
   );
 }
