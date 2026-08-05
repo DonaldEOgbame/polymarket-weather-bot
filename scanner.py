@@ -6,7 +6,8 @@ import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
 from datetime import datetime, timezone
-from weather import get_station_coords, STATIONS
+from weather import (get_station_coords, STATIONS, is_tradeable_window,
+                     settlement_window)
 from db import execute_query, fetch_query
 from config import (
     MIN_VOLUME, MAX_HOURS_TO_RESOLUTION, GAMMA_EVENTS_URL, GAMMA_API_URL, CLOB_BASE_URL,
@@ -1136,6 +1137,19 @@ def scan_markets():
 
             if not checks["station_mapping_exists"]:
                 do_skip("No station mapping", "no_station_match")
+                continue
+
+            # A city whose SETTLEMENT WINDOW has not been established is not
+            # tradeable, however good the forecast: the bet would settle on a
+            # rule nobody has read. Karachi is the precedent — its description
+            # named Masroor Airbase and linked Jinnah International, and
+            # refusing to trade it was correct. Nothing is UNKNOWN as of the
+            # 2026-08-05 audit; this is the enforcement that keeps it that way
+            # when a resolution source changes.
+            if not is_tradeable_window(city):
+                do_skip(f"Settlement window not established for {city} "
+                        f"(window={settlement_window(city)!r}) — see "
+                        f"audit_settlement_windows.py", "unknown_settlement_window")
                 continue
 
             # Resolve the measurement date from the market's own "...on <DATE>"
