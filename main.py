@@ -415,6 +415,14 @@ def run_bot(in_thread=False):
     # already traded on the broken table. app.py runs this same function in its
     # bot thread, so both entrypoints are covered here.
     validate_config_tables()
+    # Classify any open position opened before the column existed, so the
+    # same-direction cap is not hollow for as long as the pre-change book takes
+    # to turn over (days, under hold-to-settlement).
+    try:
+        from risk import backfill_risk_direction
+        backfill_risk_direction()
+    except Exception as e:
+        logging.error(f"risk_direction backfill failed: {e}", exc_info=True)
     executor = Executor()
     _print_startup_summary()
 

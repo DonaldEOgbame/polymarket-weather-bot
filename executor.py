@@ -18,6 +18,7 @@ from zoneinfo import ZoneInfo
 from utils import parse_utc_datetime
 from weather import get_signal_engine, get_bucket_probability, _norm_cdf
 from metar import get_station, fetch_day_extremes, round_half_away, final_extreme_f
+from risk import check_correlation_limits
 from config import (
     POLYMARKET_PK, CLOB_API_KEY, CLOB_SECRET, CLOB_PASS_PHRASE,
     EXIT_EDGE_FLOOR, CLOB_BASE_URL,
@@ -1049,6 +1050,34 @@ class Executor:
             logging.info(f"Max {max_concurrent} concurrent positions reached, skipping entry.")
             return
 
+        # Correlated-exposure caps. Checked LAST of the portfolio gates, so a
+        # trade refused here has already passed everything cheaper and the log
+        # line is unambiguously about correlation. See risk.py: the count-based
+        # limits above cannot see that Dallas and Austin on one target date are
+        # one bet on one ridge.
+        direction = signal_data.get("risk_direction")
+        allowed, why, detail = check_correlation_limits(
+            fetch_query("SELECT city, target_date, size_usdc, risk_direction "
+                        "FROM positions WHERE mode=?", (current_mode(),)),
+            opp.city, opp.date, signal_data["size_usdc"], direction)
+        if not allowed:
+            logging.info(
+                f"CORRELATION_BLOCK | {opp.city} {opp.date} [{direction}] | {why} | "
+                f"group={detail['group']} "
+                f"group_exposure=${detail['group_exposure']:.2f}/${detail['group_cap']:.2f} "
+                f"direction_exposure=${detail['direction_exposure']:.2f}/"
+                f"${detail['direction_cap']:.2f}"
+            )
+            add_notification("correlation", why, "info")
+            return
+        if detail["positions_with_unknown_direction"]:
+            # Excluded positions weaken the direction cap silently otherwise.
+            logging.warning(
+                f"CORRELATION | {detail['positions_with_unknown_direction']} open "
+                f"position(s) on {opp.date} have no risk_direction and are not "
+                f"counted toward the ${detail['direction_cap']:.2f} same-direction cap"
+            )
+
         # Alert if model count was low for this signal (degraded confidence)
         model_count = signal_data.get("model_count", MIN_MODEL_COUNT)
         if model_count < MIN_MODEL_COUNT:
@@ -1093,7 +1122,7 @@ class Executor:
             price=price, size=size, now_iso=now_iso, question=opp.question,
             is_high=opp.is_high, city=opp.city, target_date=opp.date,
             model_prob=signal_data["model_prob"], edge=signal_data["edge"],
-            shares=shares, entry_fee=entry_fee,
+            shares=shares, entry_fee=entry_fee, risk_direction=direction,
         )
         send_trade_entry(opp.question, price, signal_data["model_prob"], signal_data["edge"], size)
 

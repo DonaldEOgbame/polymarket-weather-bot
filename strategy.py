@@ -3,6 +3,7 @@ import logging
 from weather import (get_signal_engine, get_bucket_probability,
                      bucket_probability_stages)
 from scanner import get_realtime_price, get_orderbook_depth_usd, PARSER_VERSION
+from risk import risk_direction
 from db import execute_query
 from datetime import datetime, timezone
 from config import (
@@ -624,5 +625,13 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         "price": target_price,
         "model_prob": prob,
         "edge": edge_used,
-        "model_count": model_count
+        "model_count": model_count,
+        # Which sign of temperature surprise would lose this position money.
+        # Computed HERE because it needs the ensemble mean that priced the
+        # bucket — by the time the executor consults the correlated-exposure
+        # caps for the NEXT trade, this forecast has already moved on. See
+        # risk.risk_direction.
+        "risk_direction": risk_direction(
+            side, opp.bucket_low, opp.bucket_high,
+            engine_res.get("raw_weighted_mean")),
     }

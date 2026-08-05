@@ -119,6 +119,12 @@ def init_db():
             # a row that slips through un-tagged reads as simulated and is
             # excluded from live money, rather than inflating it.
             "ALTER TABLE trades ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper'",
+            # Mirrors positions.risk_direction, kept on the trade so a CLOSED
+            # position's correlation exposure is still answerable after the
+            # position row is gone. The caps read open positions; the post-hoc
+            # question "how concentrated was the book when that heat wave hit"
+            # can only be asked of trades.
+            "ALTER TABLE trades ADD COLUMN risk_direction TEXT",
         ]:
             try:
                 conn.execute(ddl)
@@ -154,6 +160,14 @@ def init_db():
             # See the note on trades.mode. Positions additionally cannot span
             # modes at all: the mode switch refuses while the book is open.
             "ALTER TABLE positions ADD COLUMN mode TEXT NOT NULL DEFAULT 'paper'",
+            # Which SIGN of temperature surprise loses this position money —
+            # "HOT", "COLD", or NULL when it could not be determined. Stored
+            # rather than derived on read because it needs the ensemble mean at
+            # DECISION time, which nothing else on the row preserves: by the
+            # time the correlated-exposure cap is consulted for the next trade,
+            # the forecast that classified this one has already moved. See
+            # risk.risk_direction.
+            "ALTER TABLE positions ADD COLUMN risk_direction TEXT",
         ]:
             try:
                 conn.execute(ddl)
@@ -750,7 +764,7 @@ def update_bankroll(event, amount, trade_id=None):
 
 def open_position_atomic(market_id, token_id, side, price, size, now_iso, question,
                           is_high, city, target_date, model_prob, edge, shares=None,
-                          entry_fee=0.0):
+                          entry_fee=0.0, risk_direction=None):
     """Insert the position row, the trade row, and debit the bankroll all in a
     single transaction — see close_position_atomic for why the entry and exit
     sides both need this: a process kill between separate connect()/commit()
@@ -766,19 +780,20 @@ def open_position_atomic(market_id, token_id, side, price, size, now_iso, questi
             cur = conn.cursor()
             cur.execute(
                 "INSERT INTO positions (market_id, token_id, side, entry_price, size_usdc, "
-                "entry_time, question, is_high, city, target_date, shares, mode) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "entry_time, question, is_high, city, target_date, shares, mode, "
+                "risk_direction) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (market_id, token_id, side, price, size, now_iso, question,
                  1 if is_high else 0, city, target_date,
                  shares if shares is not None else (size / price if price > 0 else None),
-                 _mode)
+                 _mode, risk_direction)
             )
             cur.execute(
                 "INSERT INTO trades (market_id, side, size_usdc, fill_price, model_prob, edge, "
-                "status, entry_time, is_high, city, target_date, mode) "
-                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                "status, entry_time, is_high, city, target_date, mode, risk_direction) "
+                "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                 (market_id, side, size, price, model_prob, edge, "OPEN", now_iso,
-                 1 if is_high else 0, city, target_date, _mode)
+                 1 if is_high else 0, city, target_date, _mode, risk_direction)
             )
             trade_id = cur.lastrowid
             row = cur.execute("SELECT balance FROM bankroll WHERE mode = ? "

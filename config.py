@@ -534,6 +534,31 @@ MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.80"))
 # closed, so a stopped-out city can't be re-entered via a sibling bucket either).
 ONE_TRADE_PER_CITY_DATE = os.getenv("ONE_TRADE_PER_CITY_DATE", "true").lower() == "true"
 
+# --- Correlated-exposure caps (see risk.py) ---
+# ONE_TRADE_PER_CITY_DATE stops two buckets of one city-day being counted as two
+# bets; MAX_CONCURRENT_POSITIONS caps how many positions exist. Neither limits
+# the correlation that actually matters: one synoptic system covering several
+# cities at once. Dallas and Austin, same target date, both high-bucket NO, is
+# one bet on one Texas ridge sized twice — and it is what the open book held on
+# 2026-08-05.
+#
+# In STAKES, not dollars, so raising the stake cannot silently loosen them
+# (the same reasoning as DAILY_LOSS_STAKES).
+ENABLE_CORRELATION_LIMITS = os.getenv("ENABLE_CORRELATION_LIMITS", "true").lower() == "true"
+# 3 stakes in one synoptic group on one target date. Chosen to sit just above
+# current flow: the largest same-group same-date exposure in the live book is
+# 2 stakes (Dallas + Austin), so this does not bind today and does bind on the
+# 4th correlated entry — which, at MAX_CONCURRENT_POSITIONS=4, is the case where
+# the ENTIRE portfolio is one weather event.
+MAX_GROUP_STAKES_PER_DATE = float(os.getenv("MAX_GROUP_STAKES_PER_DATE", "3"))
+# 6 stakes exposed to the same SIGN of temperature surprise on one target date,
+# across every group — the hemispheric case, where cities sharing no synoptic
+# system still bust together. Deliberately inert at today's settings (4
+# concurrent x 1 stake = 4 stakes maximum, so it cannot bind) and becomes the
+# operative ceiling as soon as concurrency is raised. That is the intent: the
+# limit exists before it is needed, not after.
+MAX_DIRECTION_STAKES_PER_DATE = float(os.getenv("MAX_DIRECTION_STAKES_PER_DATE", "6"))
+
 # Exit when the mid has fallen this far below entry. Set from a replay of all 52
 # closed trades against Polymarket's own tick history (2026-07-26).
 #

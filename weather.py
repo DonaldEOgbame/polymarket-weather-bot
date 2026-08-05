@@ -698,7 +698,9 @@ def validate_config_tables(raise_on_problem=True):
 
     Call BEFORE the first scan cycle, from every entrypoint."""
     from config import validate_env_ranges
-    problems = validate_city_tables() + validate_model_tables() + validate_env_ranges()
+    from risk import validate_synoptic_groups
+    problems = (validate_city_tables() + validate_model_tables()
+                + validate_synoptic_groups() + validate_env_ranges())
     for p in problems:
         logging.error(f"Config validation: {p}")
     if problems and raise_on_problem:
