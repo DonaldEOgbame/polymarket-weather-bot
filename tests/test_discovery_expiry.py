@@ -34,7 +34,7 @@ def test_expired_submarket_dropped_even_if_event_still_open(monkeypatch):
     }
     event = {
         "closed": False,
-        "endDate": (now + timedelta(hours=48)).isoformat(),  # event-level end still within window
+        "endDate": (now + timedelta(hours=24)).isoformat(),  # event-level end still within window
         "markets": [expired_market, live_market],
     }
 

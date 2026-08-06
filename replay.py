@@ -52,9 +52,12 @@ class ConfigOverride:
     gfs_bias: dict = None
     min_model_agreement: float = None
     max_model_spread_std: float = None
+    min_model_confidence: float = None
+    min_entry_price: float = None
     max_entry_price: float = None
     min_depth_multiple: float = None
     max_entry_spread_fraction: float = None
+    max_hours_to_resolution: float = None
     forecast_margin_f: float = None
     # Independent veto. Replayable because the PROVIDER'S ANSWER is stored on
     # the row (independent_state / independent_value), so re-scoring a different
@@ -197,6 +200,10 @@ def replay_row(row, ov=None):
     thr = (pick(ov.narrow_bucket_edge_threshold, C.NARROW_BUCKET_EDGE_THRESHOLD)
            if row["is_narrow"] else pick(ov.edge_threshold, C.EDGE_THRESHOLD))
 
+    p_side = 1.0 - prob["post_floor"]
+    fill = walked if walked is not None else no_px
+    hours_res = _col(row, "hours_to_resolution") if _col(row, "hours_to_resolution") is not None else row.get("lead_time_hours")
+
     lo, hi = row["bucket_low"], row["bucket_high"]
     margin_f = pick(ov.forecast_margin_f, C.FORECAST_MARGIN_F)
     gates = [
@@ -205,12 +212,10 @@ def replay_row(row, ov=None):
          agreement >= pick(ov.min_model_agreement, C.MIN_MODEL_AGREEMENT)),
         ("model_spread_sd", spread_sd, pick(ov.max_model_spread_std, C.MAX_MODEL_SPREAD_STD),
          spread_sd <= pick(ov.max_model_spread_std, C.MAX_MODEL_SPREAD_STD)),
-        # Book depth, from the depth stored on the row. Rows written before
-        # 2026-08-06 have no usable-depth column and cannot be scored on it, so
-        # the gate passes rather than retroactively condemning history it has no
-        # evidence about — the opposite of the LIVE behaviour, which refuses on
-        # unknown depth. A replay must not invent a measurement that was never
-        # taken; the live path must not trade on one.
+        ("model_confidence", p_side, pick(ov.min_model_confidence, C.MIN_MODEL_CONFIDENCE),
+         p_side > pick(ov.min_model_confidence, C.MIN_MODEL_CONFIDENCE)),
+        ("time_to_resolution", hours_res, pick(ov.max_hours_to_resolution, C.MAX_HOURS_TO_RESOLUTION),
+         hours_res is None or hours_res < pick(ov.max_hours_to_resolution, C.MAX_HOURS_TO_RESOLUTION)),
         ("book_depth", _col(row, "usable_depth_usd"),
          pick(ov.min_depth_multiple, C.MIN_DEPTH_MULTIPLE) * (_col(row, "stake_usd") or 0.0),
          _col(row, "usable_depth_usd") is None
@@ -221,8 +226,10 @@ def replay_row(row, ov=None):
          pick(ov.max_entry_spread_fraction, C.MAX_ENTRY_SPREAD_FRACTION),
          sf is not None and sf <= pick(ov.max_entry_spread_fraction,
                                        C.MAX_ENTRY_SPREAD_FRACTION)),
-        ("entry_price", no_px, pick(ov.max_entry_price, C.MAX_ENTRY_PRICE),
-         no_px < pick(ov.max_entry_price, C.MAX_ENTRY_PRICE)),
+        ("min_entry_price", fill, pick(ov.min_entry_price, C.MIN_ENTRY_PRICE),
+         fill >= pick(ov.min_entry_price, C.MIN_ENTRY_PRICE)),
+        ("max_entry_price", fill, pick(ov.max_entry_price, C.MAX_ENTRY_PRICE),
+         fill <= pick(ov.max_entry_price, C.MAX_ENTRY_PRICE)),
         ("forecast_margin", mean, margin_f,
          S.forecast_margin_ok("NO", mean, lo, hi, margin_f)),
         ("forecast_direction", raw_wmean, None,

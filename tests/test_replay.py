@@ -38,8 +38,8 @@ class _Opp:
         defaults = dict(
             market_id="0xabc", token_id_yes="ty", token_id_no="tn",
             city="Tokyo", date="2026-08-02", bucket_low=88.0, bucket_high=88.8,
-            yes_price=0.20, no_price=0.62, volume=50000.0,
-            hours_to_resolution=36.0, question="q", is_high=True,
+            yes_price=0.30, no_price=0.70, volume=50000.0,
+            hours_to_resolution=24.0, question="q", is_high=True,
         )
         defaults.update(kw)
         for k, v in defaults.items():
@@ -52,7 +52,7 @@ def _engine(is_high=True, city="Tokyo"):
     raw = {"ecmwf_ifs025": 90.0, "jma_gsm": 91.2, "icon_global": 89.4, "gem_global": 90.6}
     corr = W.applied_corrections(city, is_high, raw)
     temps = {m: v + corr[m] for m, v in raw.items()}
-    return W._build_engine_result(temps, "AP", city, 36.0, is_high,
+    return W._build_engine_result(temps, "AP", city, 24.0, is_high,
                                   raw_models=raw, corrections=corr)
 
 
@@ -62,10 +62,10 @@ def _evaluate(monkeypatch, dbmod, opp, engine):
     monkeypatch.setattr(S, "get_live_spread_fraction", lambda t: 0.02)
     monkeypatch.setattr(S, "get_orderbook_depth_usd", lambda t: (500.0, 400.0))
     monkeypatch.setattr(S, "estimate_fill",
-                        lambda tok, usd, cap=None: {"vwap": 0.62, "filled_usd": usd,
+                        lambda tok, usd, cap=None: {"vwap": 0.70, "filled_usd": usd,
                                                     "exhausted": False,
                                                     "usable_depth_usd": 5000.0,
-                                                    "best_ask": 0.62})
+                                                    "best_ask": 0.70})
     monkeypatch.setattr(S, "execute_query", dbmod.execute_query)
     return S.evaluate_opportunity(
         opp, {"available_cash": 100.0, "total_equity": 100.0, "locked_cash": 0.0},
@@ -218,8 +218,8 @@ class TestReplayLogContents:
             opp, eng, 0.1, 0.08, 1.0, 0.5, 0.02)}
         assert set(by) == expected
         assert len(gates) == len(expected)
-        assert by["entry_price"]["observed"] == 0.62
-        assert by["entry_price"]["threshold"] == pytest.approx(0.80)
+        assert by["max_entry_price"]["observed"] == 0.70
+        assert by["max_entry_price"]["threshold"] == pytest.approx(0.85)
 
     def test_skips_are_logged_too(self, wired, monkeypatch):
         """A log that only records trades cannot answer counterfactuals, which

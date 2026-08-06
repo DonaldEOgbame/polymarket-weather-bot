@@ -205,7 +205,7 @@ class TestYesEntriesDisabled:
         from types import SimpleNamespace
 
         opp = SimpleNamespace(
-            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=48.0,
+            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=24.0,
             bucket_low=bucket_low, bucket_high=bucket_high, yes_price=yes_price, no_price=no_price,
             token_id_yes="y", token_id_no="n", market_id="m1",
         )
@@ -231,13 +231,13 @@ class TestYesEntriesDisabled:
     def test_huge_yes_edge_never_trades(self, monkeypatch):
         # Mean sits dead center in the bucket and YES is priced at 10c — a YES edge
         # this large (~0.89) would have fired BUY_YES before the gate was added.
-        result = self._run(monkeypatch, yes_price=0.10, no_price=0.90,
+        result = self._run(monkeypatch, yes_price=0.10, no_price=0.70,
                             mean=90.0, bucket_low=88.0, bucket_high=92.0)
         assert result is None
 
     def test_no_side_still_trades_normally(self, monkeypatch):
         # Sanity check the YES gate didn't collaterally break NO entries.
-        result = self._run(monkeypatch, yes_price=0.90, no_price=0.10,
+        result = self._run(monkeypatch, yes_price=0.30, no_price=0.70,
                             mean=70.0, bucket_low=88.0, bucket_high=92.0)
         assert result is not None
         assert result["signal"] == "BUY_NO"
@@ -255,7 +255,7 @@ class TestOrderbookDepthLogging:
         from types import SimpleNamespace
 
         opp = SimpleNamespace(
-            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=48.0,
+            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=24.0,
             bucket_low=bucket_low, bucket_high=bucket_high, yes_price=1.0 - no_price, no_price=no_price,
             token_id_yes="y", token_id_no="n", market_id="m1",
         )

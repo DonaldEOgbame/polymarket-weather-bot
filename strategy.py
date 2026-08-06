@@ -19,6 +19,7 @@ from config import (
     TAKER_FEE_RATE, SLIPPAGE_FRACTION, MAX_ENTRY_SPREAD_FRACTION,
     FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION, MAX_ENTRY_PRICE,
     MIN_DEPTH_MULTIPLE, REQUIRE_DEPTH_TO_TRADE,
+    MIN_MODEL_CONFIDENCE, MIN_ENTRY_PRICE, MAX_HOURS_TO_RESOLUTION,
     setting,
 )
 # FIXED_POSITION_SIZE / MAX_TOTAL_EXPOSURE_FRACTION are
@@ -293,7 +294,8 @@ def _depth_gate(usable_depth_usd, stake):
 
 
 def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
-                   no_spread_frac, veto=None, usable_depth_usd=None, stake=None):
+                   no_spread_frac, veto=None, usable_depth_usd=None, stake=None,
+                   prob=0.0, walked_vwap=None):
     """Every NO-side gate as a structured record, in decision order.
 
     Returns [{gate, observed, threshold, passed, detail}, ...]. `detail` is the
@@ -311,7 +313,9 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
     mean = engine_res["ensemble_mean"]
     lo, hi = opp.bucket_low, opp.bucket_high
     price = opp.no_price
-    payoff = ((1.0 - price) / price) if price else float("inf")
+    fill = walked_vwap if walked_vwap is not None else price
+    p_side = 1.0 - prob
+    payoff = ((1.0 - fill) / fill) if fill and fill > 0 else float("inf")
 
     # The independent-forecast veto sits LAST, after every gate derived from the
     # ensemble. Order is load-bearing here (the first failure is the reason
@@ -334,6 +338,15 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
          "passed": spread <= MAX_MODEL_SPREAD_STD,
          "detail": f"NO edge {no_edge:.3f} but spread too wide "
                    f"({spread:.2f}°F sd > {MAX_MODEL_SPREAD_STD}°F sd)"},
+        {"gate": "model_confidence", "observed": p_side, "threshold": MIN_MODEL_CONFIDENCE,
+         "passed": p_side > MIN_MODEL_CONFIDENCE,
+         "detail": f"NO edge {no_edge:.3f} but model confidence too low "
+                   f"({p_side:.3f} <= {MIN_MODEL_CONFIDENCE:.2f})"},
+        {"gate": "time_to_resolution", "observed": opp.hours_to_resolution,
+         "threshold": MAX_HOURS_TO_RESOLUTION,
+         "passed": opp.hours_to_resolution < MAX_HOURS_TO_RESOLUTION,
+         "detail": f"NO edge {no_edge:.3f} but time to resolution too long "
+                   f"({opp.hours_to_resolution:.1f}h >= {MAX_HOURS_TO_RESOLUTION:.0f}h)"},
         # Liquidity, before anything about price. A book that cannot absorb the
         # stake at an acceptable price makes every downstream number — the edge,
         # the entry price, the payoff ratio — a statement about a fill that will
@@ -351,11 +364,14 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
          "passed": no_spread_frac is not None and no_spread_frac <= MAX_ENTRY_SPREAD_FRACTION,
          "detail": f"NO edge {no_edge:.3f} but market spread too wide "
                    f"({(no_spread_frac or 0):.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"},
-        # Payoff asymmetry: at price p the trade risks 1 to win (1-p)/p.
-        {"gate": "entry_price", "observed": price, "threshold": MAX_ENTRY_PRICE,
-         "passed": price < MAX_ENTRY_PRICE,
-         "detail": f"NO edge {no_edge:.3f} but entry price too high "
-                   f"({price:.3f} >= {MAX_ENTRY_PRICE:.2f}): risks $1.00 to win "
+        {"gate": "min_entry_price", "observed": fill, "threshold": MIN_ENTRY_PRICE,
+         "passed": fill >= MIN_ENTRY_PRICE,
+         "detail": f"NO edge {no_edge:.3f} but entry fill price too low "
+                   f"({fill:.3f} < {MIN_ENTRY_PRICE:.2f})"},
+        {"gate": "max_entry_price", "observed": fill, "threshold": MAX_ENTRY_PRICE,
+         "passed": fill <= MAX_ENTRY_PRICE,
+         "detail": f"NO edge {no_edge:.3f} but entry fill price too high "
+                   f"({fill:.3f} > {MAX_ENTRY_PRICE:.2f}): risks $1.00 to win "
                    f"${payoff:.2f}"},
         {"gate": "forecast_margin", "observed": mean, "threshold": FORECAST_MARGIN_F,
          "passed": forecast_margin_ok("NO", mean, lo, hi, FORECAST_MARGIN_F),
@@ -521,7 +537,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
 
     no_gates = _no_side_gates(opp, engine_res, no_edge, effective_edge_threshold,
                               agreement, spread, no_spread_frac, veto=veto,
-                              usable_depth_usd=usable_depth, stake=intended_stake)
+                              usable_depth_usd=usable_depth, stake=intended_stake,
+                              prob=prob, walked_vwap=walked_vwap)
 
     # Evaluate NO side (independent check)
     if signal is None and no_edge >= effective_edge_threshold:

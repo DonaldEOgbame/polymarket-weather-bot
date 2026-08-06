@@ -535,10 +535,17 @@ MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "1.00"))
 # is the only losing band in the book. The arithmetic is unforgiving — paying 85c
 # to win 15c needs ~85% accuracy, and measured accuracy at that confidence is 70%.
 #
-# Note this is the same cut as "raise the edge threshold", since edge and fill are
-# mechanically linked (edge = (1-P) - ask). Price is the better-identified
-# variable of the two, so the gate lives here. Set to 1.00 to disable.
-MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.80"))
+# --- StormEdge Entry Filters (Owner Decision 2026-08-06) ---
+# Four constraints for trade entry, all of which must pass:
+#  1. Model confidence: p_side > 0.85 (MIN_MODEL_CONFIDENCE = 0.85)
+#  2. Entry price floor: fill >= 0.65 (MIN_ENTRY_PRICE = 0.65)
+#  3. Entry price cap: fill <= 0.85 (MAX_ENTRY_PRICE = 0.85)
+#  4. Time to resolution: < 36h (MAX_HOURS_TO_RESOLUTION = 36)
+#
+# Documented per owner decision on 2026-08-06. All four gates must pass for entry.
+MIN_MODEL_CONFIDENCE = float(os.getenv("MIN_MODEL_CONFIDENCE", "0.85"))
+MIN_ENTRY_PRICE = float(os.getenv("MIN_ENTRY_PRICE", "0.65"))
+MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.85"))
 
 # One trade per city per target day (user rule 2026-07-28). The live log shows repeat
 # same-city/same-day entries stacking correlated risk on one weather outcome: two Hong
@@ -679,7 +686,7 @@ ENABLE_THESIS_BREAK_EXIT = os.getenv("ENABLE_THESIS_BREAK_EXIT", "false").lower(
 
 # --- Market Filters ---
 MIN_VOLUME = float(os.getenv("MIN_VOLUME", "500"))
-MAX_HOURS_TO_RESOLUTION = float(os.getenv("MAX_HOURS_TO_RESOLUTION", "72"))
+MAX_HOURS_TO_RESOLUTION = float(os.getenv("MAX_HOURS_TO_RESOLUTION", "36"))
 
 # --- Market Discovery ---
 # Markets per API page (Gamma API max is 100)
@@ -1295,6 +1302,16 @@ def validate_env_ranges():
             f"abolishes the separate regime; going below it is almost certainly a typo."
         )
 
+    if not 0.5 <= MIN_MODEL_CONFIDENCE <= 0.99:
+        problems.append(
+            f"MIN_MODEL_CONFIDENCE={MIN_MODEL_CONFIDENCE} is outside [0.5, 0.99]."
+        )
+
+    if not 0.1 <= MIN_ENTRY_PRICE <= 0.95:
+        problems.append(
+            f"MIN_ENTRY_PRICE={MIN_ENTRY_PRICE} is outside [0.1, 0.95]."
+        )
+
     if not 0.5 < MAX_ENTRY_PRICE <= 0.95:
         problems.append(
             f"MAX_ENTRY_PRICE={MAX_ENTRY_PRICE} is outside (0.5, 0.95]. 1.00 is "
@@ -1302,6 +1319,16 @@ def validate_env_ranges():
             f"it disarms the gate entirely — the 0.80-0.90 fill band is the only "
             f"losing band in the whole book (-$3.55 over 10 trades). Set it "
             f"deliberately or leave it at its default."
+        )
+
+    if MIN_ENTRY_PRICE >= MAX_ENTRY_PRICE:
+        problems.append(
+            f"MIN_ENTRY_PRICE={MIN_ENTRY_PRICE} is >= MAX_ENTRY_PRICE={MAX_ENTRY_PRICE}."
+        )
+
+    if not 1.0 <= MAX_HOURS_TO_RESOLUTION <= 168.0:
+        problems.append(
+            f"MAX_HOURS_TO_RESOLUTION={MAX_HOURS_TO_RESOLUTION} is outside [1.0, 168.0]."
         )
 
     # --- Independent veto gate ---
@@ -1462,11 +1489,10 @@ _FINGERPRINT_KEYS = (
     # calibration must never pool vetoed and un-vetoed regimes.
     "INDEPENDENT_VETO_ENABLED", "DISAGREEMENT_VETO_F", "PLAUSIBLE_BAND_F",
     "INDEPENDENT_VETO_MAX_FIRE_RATE",
-    # Execution safety. These change which trades are ENTERABLE and what the
-    # edge is net of real execution cost, so a replay that could not tell a
-    # depth-gated configuration from an ungated one would silently pool the era
-    # that produced the Austin fill with the era that forbids it.
+    # Execution safety & entry filters. These change which trades are ENTERABLE
+    # and what the edge is net of real execution cost.
     "MIN_DEPTH_MULTIPLE", "REQUIRE_DEPTH_TO_TRADE", "USE_MARKETABLE_LIMIT",
+    "MIN_MODEL_CONFIDENCE", "MIN_ENTRY_PRICE", "MAX_HOURS_TO_RESOLUTION",
 )
 
 

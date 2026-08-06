@@ -91,9 +91,17 @@ class TestUnchangedGuardrails:
     would make the next replay uninterpretable — two changes, one sample."""
 
     def test_max_entry_price_still_armed(self, cfg):
-        """The only change in this project whose benefit is mechanical rather
-        than fitted. 1.00 is the disabled sentinel."""
-        assert cfg.MAX_ENTRY_PRICE == 0.80
+        """0.85, decided by the owner on 2026-08-06."""
+        assert cfg.MAX_ENTRY_PRICE == 0.85
+
+    def test_min_model_confidence_entry_filter(self, cfg):
+        assert cfg.MIN_MODEL_CONFIDENCE == 0.85
+
+    def test_min_entry_price_entry_filter(self, cfg):
+        assert cfg.MIN_ENTRY_PRICE == 0.65
+
+    def test_max_hours_to_resolution_entry_filter(self, cfg):
+        assert cfg.MAX_HOURS_TO_RESOLUTION == 36.0
 
     def test_narrow_bucket_std_inflation_still_on(self, cfg):
         """Second corrector of the same defect. Removing it too would be the

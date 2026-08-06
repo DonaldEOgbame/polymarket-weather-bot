@@ -828,8 +828,8 @@ class _Opp:
         defaults = dict(
             market_id="0xabc", token_id_yes="ty", token_id_no="tn",
             city="Tokyo", date="2026-08-07", bucket_low=88.0, bucket_high=89.0,
-            yes_price=0.60, no_price=0.30, volume=50000.0,
-            hours_to_resolution=36.0, question="q", is_high=True,
+            yes_price=0.30, no_price=0.70, volume=50000.0,
+            hours_to_resolution=24.0, question="q", is_high=True,
         )
         defaults.update(kw)
         for k, v in defaults.items():
@@ -853,10 +853,10 @@ def _evaluate(monkeypatch, dbmod, opp, engine, forecast):
     monkeypatch.setattr(S, "get_live_spread_fraction", lambda t: 0.02)
     monkeypatch.setattr(S, "get_orderbook_depth_usd", lambda t: (500.0, 400.0))
     monkeypatch.setattr(S, "estimate_fill",
-                        lambda tok, usd, cap=None: {"vwap": 0.62, "filled_usd": usd,
+                        lambda tok, usd, cap=None: {"vwap": 0.70, "filled_usd": usd,
                                                     "exhausted": False,
                                                     "usable_depth_usd": 5000.0,
-                                                    "best_ask": 0.62})
+                                                    "best_ask": 0.70})
     monkeypatch.setattr(S, "execute_query", dbmod.execute_query)
     monkeypatch.setattr(independent, "get_independent_forecast",
                         lambda *a, **k: forecast)

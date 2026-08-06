@@ -45,8 +45,8 @@ AUSTIN_BOOK = {
 }
 
 DEEP_BOOK = {
-    "asks": [{"price": "0.64", "size": "10000"}],
-    "bids": [{"price": "0.63", "size": "10000"}],
+    "asks": [{"price": "0.68", "size": "10000"}],
+    "bids": [{"price": "0.67", "size": "10000"}],
 }
 
 
@@ -78,7 +78,7 @@ class TestWalkingTheBook:
 
     def test_a_deep_book_fills_at_the_quote(self):
         vwap, filled, _ = SC._walk_asks(DEEP_BOOK, 6.0)
-        assert vwap == pytest.approx(0.64)
+        assert vwap == pytest.approx(0.68)
         assert filled == pytest.approx(6.0)
 
     def test_capping_the_price_limits_what_can_be_filled(self):
@@ -152,8 +152,8 @@ class TestTheAustinTradeIsNowRefused:
 
     def _evaluate(self, monkeypatch, book):
         opp = SimpleNamespace(
-            city="Austin", date="2026-08-07", is_high=True, hours_to_resolution=36.0,
-            bucket_low=94.0, bucket_high=95.0, yes_price=0.36, no_price=0.64,
+            city="Austin", date="2026-08-07", is_high=True, hours_to_resolution=24.0,
+            bucket_low=94.0, bucket_high=95.0, yes_price=0.32, no_price=0.68,
             token_id_yes="y", token_id_no="n", market_id="0xaustin", volume=50000.0,
             question="Will the highest temperature in Austin be between 94-95F?",
         )
@@ -172,7 +172,7 @@ class TestTheAustinTradeIsNowRefused:
                 "filled_usd": SC._walk_asks(book, usd, cap)[1],
                 "exhausted": SC._walk_asks(book, usd, cap)[2],
                 "usable_depth_usd": SC._usable_ask_depth_usd(book, cap),
-                "best_ask": 0.64}))
+                "best_ask": 0.68}))
         monkeypatch.setattr(C, "_RUNTIME", dict(C._RUNTIME, FIXED_POSITION_SIZE=6.0))
         return S.evaluate_opportunity(
             opp, {"available_cash": 100.0, "total_equity": 100.0, "locked_cash": 0.0},
