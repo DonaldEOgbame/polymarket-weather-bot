@@ -212,6 +212,21 @@ def run_scan_cycle():
         opportunities = scan_markets()
 
         weather_cache = prefetch_signal_engines(opportunities)
+
+        # The independent second opinion, warmed before the eval loop so the
+        # veto is a cache read rather than a round trip inside trade evaluation.
+        # The tripwire is checked once per cycle, not per market: it is a DB
+        # aggregate over a 24h window and cannot meaningfully change between two
+        # markets in the same scan. Both are best-effort — this gate refuses
+        # trades, so a failure in its own machinery must fail OPEN and never
+        # take the scan down with it.
+        try:
+            from independent import prefetch_independent, check_tripwire
+            check_tripwire()
+            prefetch_independent(opportunities)
+        except Exception as e:
+            logging.error(f"Independent-veto prefetch failed: {e}", exc_info=True)
+
         # Warm the live order-book cache in parallel — see prefetch_order_books'
         # docstring for why this is safe to parallelize while the eval loop below
         # (which reads/mutates portfolio_state) must stay sequential.

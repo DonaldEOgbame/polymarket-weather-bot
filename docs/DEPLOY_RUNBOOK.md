@@ -56,7 +56,8 @@ Fingerprints below were computed at each commit, not asserted.
 | 8 | `42f2781` | 2.1 Model families | `4965c6a94ca32201` | 4 | – |
 | 9 | `ff88a41` | 3.1 Walk-forward harness | `4965c6a94ca32201` | 4 | – |
 | 10 | `5e59731` | 3.2 Quantile model (disabled) | `4965c6a94ca32201` | 4 | – |
-| — | `HEAD` | ruler version added to fingerprint | `d1f0f1c6e696bd67` | 4 | 2 |
+| — | `3d9e769` | ruler version added to fingerprint | `d1f0f1c6e696bd67` | 4 | 2 |
+| 11 | `HEAD` | Independent forecast veto gate (armed) | `783d10b3ff6d89a8` | 4 | 2 |
 
 Deploys 1–4 do not change the fingerprint because they do not change what the
 bot believes: they add infrastructure, tests, a portfolio-level risk ceiling and
@@ -121,6 +122,52 @@ across this boundary; `SETTLEMENT_RULER_VERSION` is in the fingerprint so the
 split is queryable. Existing `resolutions` rows for North American cities are on
 the old ruler and are now known to be slightly wrong — consider re-deriving them
 before any recalibration.
+
+**11 — Independent veto gate.** The only phase in this rollout that ships a gate
+**armed with an unmeasured live fire rate** — owner decision, no shadow period.
+Full detail in `reports/independent-veto-2026-08-06.md`.
+
+Only **11 of 51 cities are gated** at deploy: the NWS cities. The other 40 need
+`METOFFICE_DATAHUB_KEY` and until it is set they log `INCONCLUSIVE` and never
+refuse anything.
+
+Watch for, in priority order:
+
+1. **`INDEPENDENT VETO CONCENTRATED IN ONE CITY` naming Los Angeles.** Expected,
+   and pre-measured: LAX disagreed with the ensemble by 9.5–10.5°F on the daily
+   high across two lead days, and LA+SF are 4 of the 6 pre-deploy gross fires.
+   Both are coastal marine-layer stations. Before touching any threshold, decide
+   which it is — a wrong station (the Hong Kong bug again) or a real ensemble
+   weakness at coastal California that NWS forecasters correct for by hand. The
+   settled outcomes of vetoed LA highs answer it directly.
+2. **`INDEPENDENT VETO AUTO-DISABLED`.** The tripwire fired. The gate is now
+   logging only, latched off until restart. Do not restart to re-arm it before
+   reading why — read `by_city` in the log line first.
+3. **Trade flow on US cities specifically.** Pre-deploy projection is a 10–20%
+   fire rate on the armed cities. Materially more than that means a station or
+   a settlement-window mismatch, not a threshold that needs loosening.
+4. **`independent: circuit breaker OPEN`.** One line per provider per hour at
+   most. Repeated openings for `nws` mean api.weather.gov is rejecting us —
+   check the `User-Agent`, which that API requires.
+
+Everything about this gate fails **open**. A provider outage, a rate limit, a
+parse failure or a missing key all resolve to `INCONCLUSIVE` and the trade
+proceeds exactly as it would have before the feature existed.
+
+```bash
+# Fire rate, per city, over the last 24h
+flyctl ssh console -a stormedgev2 -C "python -c \"
+from db import independent_veto_stats; print(independent_veto_stats(24))\""
+
+# Counterfactual: what the veto concluded vs what it did
+flyctl ssh console -a stormedgev2 -C "python -c \"
+from db import fetch_query
+print(fetch_query('''SELECT city_key, independent_state, COUNT(*) n,
+  SUM(veto_gross) gross, SUM(veto_band) band, SUM(vetoed) acted
+  FROM replay_signals WHERE independent_state IS NOT NULL
+  AND timestamp > datetime(\\\"now\\\",\\\"-24 hours\\\")
+  GROUP BY city_key, independent_state ORDER BY n DESC'''))\""
+```
 
 **8 — 2.1 Model families.** No new members yet, so the only effect is that
 `model_agreement` and `model_spread_std` are now family-level. With the current

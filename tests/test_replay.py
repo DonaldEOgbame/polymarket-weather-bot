@@ -202,8 +202,17 @@ class TestReplayLogContents:
         opp, eng = _Opp(), _engine()
         _evaluate(monkeypatch, wired, opp, eng)
         gates = wired.fetch_query("SELECT * FROM replay_gates")
-        assert len(gates) == 8, "all gates logged, not just the first failure"
         by = {g["gate"]: g for g in gates}
+        # Every gate, not just the first failure. Counted against the live gate
+        # list rather than a literal, so adding a gate does not silently turn
+        # this into a test of a stale number — it was `== 8` until the
+        # independent veto added two, and the fix then is to check the property,
+        # not to bump the constant.
+        import strategy as S
+        expected = {g["gate"] for g in S._no_side_gates(
+            opp, eng, 0.1, 0.08, 1.0, 0.5, 0.02)}
+        assert set(by) == expected
+        assert len(gates) == len(expected)
         assert by["entry_price"]["observed"] == 0.62
         assert by["entry_price"]["threshold"] == pytest.approx(0.80)
 

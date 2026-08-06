@@ -46,6 +46,18 @@ def send_circuit_breaker_alert(daily_pnl, limit):
     add_notification("circuit_breaker", msg, severity="warning")
 
 
+def add_notification_safe(kind, msg, severity="info"):
+    """add_notification that cannot propagate a DB error to its caller.
+
+    For alerts raised from inside a multi-step check, where a failed notification
+    write must not abort the checks that follow it. The log line has already been
+    emitted by then, so the alert is never lost — only its dashboard row is."""
+    try:
+        add_notification(kind, msg, severity=severity)
+    except Exception as e:
+        logging.error(f"notification write failed ({kind}): {e}")
+
+
 def send_error_alert(exception: Exception):
     tb = "".join(traceback.format_exception(type(exception), exception, exception.__traceback__))
     logging.error(f"BOT ERROR\n{tb}")

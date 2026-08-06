@@ -132,7 +132,7 @@ def forecast_direction_agrees(side, raw_weighted_mean, bucket_low, bucket_high):
 def _log_replay_row(*, timestamp, opp, engine_res, prob_stages, sigma_final,
                     bucket_width, is_narrow, no_edge, yes_edge, prob,
                     edge_threshold, gates, no_spread_frac, decision, skip_reason,
-                    ask_depth_usd, bid_depth_usd):
+                    ask_depth_usd, bid_depth_usd, veto=None):
     """Write the replay row for one evaluated opportunity.
 
     Records INPUTS, not conclusions, so any future configuration can be scored
@@ -154,7 +154,7 @@ def _log_replay_row(*, timestamp, opp, engine_res, prob_stages, sigma_final,
             yes_edge=yes_edge, prob=prob, edge_threshold=edge_threshold,
             gates=gates, no_spread_frac=no_spread_frac, decision=decision,
             skip_reason=skip_reason, ask_depth_usd=ask_depth_usd,
-            bid_depth_usd=bid_depth_usd,
+            bid_depth_usd=bid_depth_usd, veto=veto,
         )
     except Exception as e:
         logging.error(f"replay row build failed for {opp.market_id}: {e}", exc_info=True)
@@ -163,7 +163,7 @@ def _log_replay_row(*, timestamp, opp, engine_res, prob_stages, sigma_final,
 def _log_replay_row_inner(*, timestamp, opp, engine_res, prob_stages, sigma_final,
                           bucket_width, is_narrow, no_edge, yes_edge, prob,
                           edge_threshold, gates, no_spread_frac, decision,
-                          skip_reason, ask_depth_usd, bid_depth_usd):
+                          skip_reason, ask_depth_usd, bid_depth_usd, veto=None):
     from db import log_replay_signal
     from config import config_fingerprint, REPLAY_SCHEMA_VERSION, paper_mode
     from metar import STATION_ICAO
@@ -224,11 +224,30 @@ def _log_replay_row_inner(*, timestamp, opp, engine_res, prob_stages, sigma_fina
         "decision": decision or "SKIP",
         "skip_reason": skip_reason,
     }
+
+    # The independent-veto counterfactual, on every row regardless of outcome.
+    # Booleans go to int rather than being left as bools so a NULL keeps meaning
+    # "this row predates the veto" and can never be confused with False — the
+    # REPLAY_SCHEMA_VERSION 1 rows have no opinion, which is not the same as an
+    # opinion of "did not fire".
+    if veto:
+        row.update({
+            "independent_source": veto.get("independent_source"),
+            "independent_state": veto.get("independent_state"),
+            "independent_value": veto.get("independent_value"),
+            "independent_fetched_at": veto.get("independent_fetched_at"),
+            "independent_detail": veto.get("independent_detail"),
+            "disagreement_f": veto.get("disagreement_f"),
+            "veto_gross": int(bool(veto.get("veto_gross"))),
+            "veto_band": int(bool(veto.get("veto_band"))),
+            "vetoed": int(bool(veto.get("vetoed"))),
+        })
+
     log_replay_signal(row, gates)
 
 
 def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
-                   no_spread_frac):
+                   no_spread_frac, veto=None):
     """Every NO-side gate as a structured record, in decision order.
 
     Returns [{gate, observed, threshold, passed, detail}, ...]. `detail` is the
@@ -247,6 +266,15 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
     lo, hi = opp.bucket_low, opp.bucket_high
     price = opp.no_price
     payoff = ((1.0 - price) / price) if price else float("inf")
+
+    # The independent-forecast veto sits LAST, after every gate derived from the
+    # ensemble. Order is load-bearing here (the first failure is the reason
+    # reported), and last is right: a trade blocked by thin liquidity or a
+    # missing edge should say so, not blame a second opinion that never got to
+    # matter. It also keeps the veto's reason meaningful — when it IS the
+    # reported reason, everything else about the trade was fine, which is
+    # exactly the situation the gate was built for.
+    from independent import veto_gate_rows
 
     return [
         {"gate": "edge_threshold", "observed": no_edge, "threshold": edge_threshold,
@@ -289,7 +317,7 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
          "detail": f"NO edge {no_edge:.3f} but raw model forecast points the other way "
                    f"(bet requires models to predict missing the bucket, before "
                    f"resolution-source correction)"},
-    ]
+    ] + veto_gate_rows(veto or {})
 
 
 def calculate_kelly(edge, price):
@@ -401,8 +429,20 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     # so what gets LOGGED and what actually gated the trade cannot diverge —
     # which is what made "which gate cut this trade?" unanswerable from the old
     # free-text skip_reason during the 2026-07-31 reconciliation.
+    # The independent second opinion. Evaluated for EVERY opportunity, including
+    # ones an earlier gate has already refused and ones the tripwire has
+    # disarmed the veto for, because the counterfactual is the only way to
+    # answer "was the veto right?" once outcomes populate — and a counterfactual
+    # that only exists for trades nothing else blocked is a biased sample of the
+    # exact question being asked. Cheap: it is a cache read after the scan's
+    # prefetch, and it fails open on anything but a clean numeric answer.
+    from independent import evaluate_veto
+    veto = evaluate_veto(opp.city, opp.date, opp.is_high,
+                         engine_res.get("ensemble_mean"),
+                         opp.bucket_low, opp.bucket_high)
+
     no_gates = _no_side_gates(opp, engine_res, no_edge, effective_edge_threshold,
-                              agreement, spread, no_spread_frac)
+                              agreement, spread, no_spread_frac, veto=veto)
 
     # Evaluate NO side (independent check)
     if signal is None and no_edge >= effective_edge_threshold:
@@ -603,7 +643,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         no_edge=no_edge, yes_edge=yes_edge, prob=prob,
         edge_threshold=effective_edge_threshold, gates=no_gates,
         no_spread_frac=no_spread_frac, decision=signal, skip_reason=skip_reason,
-        ask_depth_usd=ask_depth_usd, bid_depth_usd=bid_depth_usd,
+        ask_depth_usd=ask_depth_usd, bid_depth_usd=bid_depth_usd, veto=veto,
     )
 
     if not signal:

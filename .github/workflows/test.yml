@@ -63,6 +63,7 @@ jobs:
           for m in ['config','db','utils','weather','metar','scanner','strategy',
                     'executor','alerts','replay','calibrate','backup','main','app',
                     'check_live_readiness','risk','lattice','families','intraday',
+                    'independent',
                     'harness','quantile_model','coverage_matrix',
                     'audit_settlement_windows','audit_station_lattice',
                     'fit_remaining_rise']:

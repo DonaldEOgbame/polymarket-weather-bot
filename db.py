@@ -401,11 +401,51 @@ def init_db():
                 decision TEXT,
                 skip_reason TEXT,
 
+                independent_source TEXT,
+                independent_state TEXT,
+                independent_value REAL,
+                independent_fetched_at TEXT,
+                independent_detail TEXT,
+                disagreement_f REAL,
+                veto_gross INTEGER,
+                veto_band INTEGER,
+                vetoed INTEGER,
+
                 settled_value REAL,
                 settled_outcome TEXT,
                 settled_at TEXT
             )
         ''')
+        # The independent-veto counterfactual, recorded on EVERY signal whether
+        # or not the gate is armed and whether or not an earlier gate already
+        # refused the trade.
+        #
+        # veto_gross/veto_band say what the veto CONCLUDED; `vetoed` says what it
+        # DID. They differ whenever the auto-disable tripwire has fired, and
+        # keeping them separate is the only way to answer "was the veto right"
+        # once settled_value is populating — a disabled gate that still records
+        # its opinion is the dataset the 14-day review runs on.
+        #
+        # independent_state is stored alongside independent_value so NO_DATA and
+        # INCONCLUSIVE stay distinguishable forever. Collapsing both to a NULL
+        # value would destroy exactly the distinction this feature is built on:
+        # one is a coverage fact, the other is an error that says nothing.
+        for _col, _type in (
+            ("independent_source", "TEXT"),
+            ("independent_state", "TEXT"),
+            ("independent_value", "REAL"),
+            ("independent_fetched_at", "TEXT"),
+            ("independent_detail", "TEXT"),
+            ("disagreement_f", "REAL"),
+            ("veto_gross", "INTEGER"),
+            ("veto_band", "INTEGER"),
+            ("vetoed", "INTEGER"),
+        ):
+            try:
+                conn.execute(
+                    f"ALTER TABLE replay_signals ADD COLUMN {_col} {_type}")
+            except sqlite3.OperationalError:
+                pass
         conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_ts ON replay_signals(timestamp)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_settle "
                      "ON replay_signals(target_date, city_key, is_high)")
@@ -1274,6 +1314,96 @@ def log_replay_signal(row, gates):
     except Exception as e:
         logging.error(f"replay logging failed: {e}", exc_info=True)
         return None
+
+
+def independent_veto_stats(hours=24, veto_gates=("independent_gross_disagreement",
+                                                 "independent_bucket_band")):
+    """Rolling-window fire rate for the independent veto, plus city concentration.
+
+    Returns {window_hours, considered, fired, fire_rate, by_city, top_city,
+    top_city_share}.
+
+    THE DENOMINATOR IS THE WHOLE POINT, so it is defined here rather than at the
+    call site. `considered` counts signals that passed EVERY OTHER GATE and for
+    which the provider actually returned DATA — real trade candidates that the
+    veto was both the last thing standing between and an order, AND was in a
+    position to refuse.
+
+    Two exclusions, each of which would otherwise blind the tripwire:
+
+      * signals refused by another gate. Most evaluations fail the edge
+        threshold and never reach the veto; including them divides by thousands
+        and guarantees the tripwire never fires however badly the gate behaves.
+      * signals where the provider returned NO_DATA or INCONCLUSIVE. These can
+        NEVER veto, so counting them measures provider coverage rather than gate
+        behaviour. This matters concretely right now: with no DataHub key, 40 of
+        51 cities are permanently INCONCLUSIVE, and a denominator including them
+        would let the veto fire on literally every US signal — a total failure of
+        the eleven armed cities — while reporting a rate near 11/51 x 100% = 22%
+        and never tripping. The plan's §5b says "25% of gate-passing signals";
+        this reads that as "of the signals the gate actually acted on", because
+        the other reading cannot detect the failure the tripwire exists for.
+
+    `all_gate_passing` is returned alongside so the looser denominator is still
+    reportable, but the tripwire runs on `considered`.
+
+    That is computed from replay_gates rather than from a stored flag, because
+    the gate rows are written by the same list the decision consumes — so this
+    cannot drift from what actually gated the trade, which is the property the
+    structured gate table was added for.
+
+    `fired` counts the veto's CONCLUSION (veto_gross or veto_band), not its
+    effect, so the rate keeps being measurable after the tripwire has disabled
+    the gate. Otherwise disabling would drive the rate to zero and the gate
+    would re-arm itself into the same storm."""
+    from datetime import timedelta
+    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
+    marks = ", ".join("?" * len(veto_gates))
+    rows = fetch_query(
+        f"""
+        SELECT s.city_key AS city_key,
+               s.independent_state AS state,
+               COALESCE(s.veto_gross, 0) AS vg,
+               COALESCE(s.veto_band, 0)  AS vb
+        FROM replay_signals s
+        WHERE s.timestamp >= ?
+          AND s.independent_state IS NOT NULL
+          AND NOT EXISTS (
+                SELECT 1 FROM replay_gates g
+                WHERE g.signal_id = s.id
+                  AND g.passed = 0
+                  AND g.gate NOT IN ({marks})
+          )
+        """,
+        (since, *veto_gates),
+    )
+
+    all_gate_passing = len(rows)
+    actionable = [r for r in rows if r["state"] == "DATA"]
+    considered = len(actionable)
+    by_city = {}
+    fired = 0
+    for r in actionable:
+        if r["vg"] or r["vb"]:
+            fired += 1
+            city = r["city_key"] or "unknown"
+            by_city[city] = by_city.get(city, 0) + 1
+
+    top_city, top_share = None, 0.0
+    if fired:
+        top_city, top_n = max(by_city.items(), key=lambda kv: kv[1])
+        top_share = top_n / fired
+
+    return {
+        "window_hours": hours,
+        "considered": considered,
+        "all_gate_passing": all_gate_passing,
+        "fired": fired,
+        "fire_rate": (fired / considered) if considered else 0.0,
+        "by_city": by_city,
+        "top_city": top_city,
+        "top_city_share": top_share,
+    }
 
 
 def flag_impossible_bucket(market_id, question, city, bucket_low, bucket_high,
