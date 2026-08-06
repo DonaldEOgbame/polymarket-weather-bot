@@ -349,12 +349,80 @@ is the first thing to check when a key lands.
 
 ---
 
-## 10. To do after deploy
+## 10. Deployed — first-cycle results
+
+Deployed to `stormedgev2` 2026-08-06 ~06:16 UTC. Fingerprint
+`46f163bd3f1489f9` → **`783d10b3ff6d89a8`**; replay schema 1 → 2; all nine
+columns migrated onto the live 252,774-row `replay_signals` table. Pre-deploy
+Fly volume snapshot taken on `vol_vjyw3l6gjeo6yyxv`.
+
+This was a single deploy of **all 11 phases**, against the runbook's staged
+sequence — owner decision, taken with the trade-off stated. The app had been
+running `a47729b` and nothing from the rollout had ever shipped.
+
+**Two undefined names surfaced on the first live scan and stopped trading
+completely.** Both predate this feature and neither was reachable by the test
+suite or the import check:
+
+- `is_tradeable_window(city)` in `scan_markets` — no `city` in scope, it is
+  `city_key`. The per-candidate exception handler swallowed the `NameError`, so
+  the scan reported `0 candidates | 0 traded | 0 skipped` rather than an error.
+  Phase 1.1's settlement-window guard had therefore never run once.
+- `flag_impossible_bucket`, defined in `db.py` and never imported into
+  `scanner.py` — would have raised on the first off-lattice bucket.
+
+Fixed in `098bd66`, redeployed, and a CI step now fails a push on any undefined
+name. Trading resumed at **989 candidates | 1 traded | 988 skipped**.
+
+### First-cycle veto behaviour
+
+| | |
+|---|---|
+| NWS rows (`DATA`) | 125 |
+| DataHub rows (`INCONCLUSIVE`) | 864 |
+| Conclusion rate on `DATA` rows | **32.0%** (40/125) |
+| Tripwire fire rate (`considered`) | **0/0** |
+| **Trades actually refused by the veto** | **0** |
+
+Every one of the 40 fires landed on a signal another gate had already refused.
+The veto has not yet been the binding constraint on a single trade, which is
+why the tripwire's denominator is still empty — and it is the counterfactual
+log doing exactly its job.
+
+### §5's prediction confirmed, precisely
+
+| City | `DATA` rows | fired | rate |
+|---|---|---|---|
+| **Los Angeles** | 11 | 11 | **100%** |
+| **San Francisco** | 11 | 11 | **100%** |
+| every other US city | 103 | 18 | 17.5% |
+
+LAX: NWS 77.0°F vs ensemble 86.5°F — **9.5°F**. SFO: NWS 77.0°F vs 72.0°F —
+**5.0°F**. Both on the daily high, both coastal marine-layer stations, both
+firing on every single evaluation.
+
+LA + SF are 22 of 40 fires = **55%**, over the 50% concentration threshold.
+Strip them out and the rate is 17.5%, comfortably under the 25% tripwire. The
+whole overage is two cities.
+
+The 32% headline is a **conclusion** rate over all `DATA` rows, not the
+tripwire's rate over actionable signals — those are different denominators
+(§6) and the tripwire is measuring the right one. But if an LA or SF signal
+ever clears the other gates, the veto will refuse it, and on this evidence it
+will refuse every one.
+
+---
+
+## 11. To do after deploy
 
 - [ ] **Set `METOFFICE_DATAHUB_KEY`.** 40 of 51 cities are ungated until then.
       Verify the parser against a real response the moment it lands (§8).
-- [ ] **Watch for the Los Angeles concentration ERROR** and decide between the
-      two explanations in §5. Do not loosen `DISAGREEMENT_VETO_F` first.
+- [ ] **Decide the Los Angeles / San Francisco question.** No longer a
+      prediction — both fire on 100% of evaluations (§10). Do not loosen
+      `DISAGREEMENT_VETO_F`: it would mask the finding without explaining it,
+      and the other nine cities are at 17.5% and do not need it. The choice is
+      between a station correction and accepting that the ensemble is genuinely
+      weak at coastal California in summer. Settled LA/SF highs answer it.
 - [ ] Record the deployed fingerprint and timestamp — it changes on this deploy
       and splits signal history. No calibration may pool across the boundary.
 - [ ] **14-day review** (due 2026-08-20): fire rate overall and per city, and
