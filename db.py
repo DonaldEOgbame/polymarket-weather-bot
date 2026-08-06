@@ -1136,6 +1136,44 @@ def purge_old_signals(keep_days=60, skip_keep_days=None, sample_pct=None,
         )
 
 
+def purge_old_replay(keep_days=2, sample_pct=None):
+    """Delete replay_signals/replay_gates rows older than keep_days.
+
+    The replay recorder writes one signal row plus ~8 gate rows for every
+    market evaluated, every cycle — it filled a 1GB volume in under three days
+    while every other high-volume table already had a purge. Same carve-outs
+    as purge_old_signals, for the same reason (the harness fits on this
+    trail): a deterministic id-cohort sample survives every run, and so does
+    any row whose edge cleared its own recorded entry threshold. Retained
+    rows shed their raw_models_pre_correction JSON once past the window; the
+    scalar stage columns stay. Gate rows follow their parent signal row.
+
+    Pass sample_pct=None/0 to keep only the near-miss carve-out."""
+    cutoff = _iso_cutoff(keep_days)
+    carve = ["(edge_post_fee IS NOT NULL AND edge_threshold IS NOT NULL "
+             "AND edge_post_fee >= edge_threshold)"]
+    params_carve = []
+    if sample_pct:
+        carve.append("(id % 100) < ?")
+        params_carve.append(int(sample_pct))
+    keep_sql = f"({' OR '.join(carve)})"
+
+    execute_query(
+        f"DELETE FROM replay_gates WHERE signal_id IN "
+        f"(SELECT id FROM replay_signals WHERE timestamp < ? AND NOT {keep_sql})",
+        (cutoff, *params_carve),
+    )
+    execute_query(
+        f"DELETE FROM replay_signals WHERE timestamp < ? AND NOT {keep_sql}",
+        (cutoff, *params_carve),
+    )
+    execute_query(
+        "UPDATE replay_signals SET raw_models_pre_correction = NULL "
+        "WHERE timestamp < ? AND raw_models_pre_correction IS NOT NULL",
+        (cutoff,),
+    )
+
+
 def purge_old_scan_log(keep_days=14):
     """Delete scan_log rows older than keep_days."""
     execute_query("DELETE FROM scan_log WHERE timestamp < ?", (_iso_cutoff(keep_days),))

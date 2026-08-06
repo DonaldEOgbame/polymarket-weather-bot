@@ -146,3 +146,112 @@ class TestSkipRetention:
         h.add("ENTRY", days_ago=5, edge=0.2, n=10)
         dbmod.purge_old_signals(14, 3, sample_pct=5, near_miss_edge=0.08)
         assert h.count() == 10
+
+
+class _ReplayHarness:
+    """Same trick for the replay recorder's two tables."""
+
+    def __init__(self, tmp_path):
+        self.path = tmp_path
+        conn = sqlite3.connect(self.path)
+        conn.execute("CREATE TABLE replay_signals (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                     " timestamp TEXT, edge_post_fee REAL, edge_threshold REAL,"
+                     " raw_models_pre_correction TEXT)")
+        conn.execute("CREATE TABLE replay_gates (id INTEGER PRIMARY KEY AUTOINCREMENT,"
+                     " signal_id INTEGER, gate TEXT, passed INTEGER)")
+        conn.commit()
+        conn.close()
+
+    def add(self, days_ago, edge=0.01, threshold=0.08, n=1, gates=3,
+            raw='{"m": 80.0}'):
+        conn = sqlite3.connect(self.path)
+        for _ in range(n):
+            cur = conn.execute(
+                "INSERT INTO replay_signals (timestamp, edge_post_fee,"
+                " edge_threshold, raw_models_pre_correction) VALUES (?,?,?,?)",
+                (_iso(days_ago), edge, threshold, raw))
+            for g in range(gates):
+                conn.execute("INSERT INTO replay_gates (signal_id, gate, passed)"
+                             " VALUES (?,?,1)", (cur.lastrowid, f"gate{g}"))
+        conn.commit()
+        conn.close()
+
+    def count(self, table="replay_signals", where="1=1"):
+        conn = sqlite3.connect(self.path)
+        n = conn.execute(f"SELECT COUNT(*) FROM {table} WHERE {where}").fetchone()[0]
+        conn.close()
+        return n
+
+
+def _replay_harness(monkeypatch):
+    h = _ReplayHarness(os.path.join(tempfile.mkdtemp(), "replay.db"))
+
+    def execute_query(query, params=()):
+        conn = sqlite3.connect(h.path)
+        conn.execute(query, params)
+        conn.commit()
+        conn.close()
+
+    monkeypatch.setattr(dbmod, "execute_query", execute_query)
+    return h
+
+
+class TestReplayRetention:
+    """The replay recorder writes every evaluated market every cycle and had NO
+    purge at all — it filled the 1GB volume in under three days after the
+    2026-08-04 account move."""
+
+    def test_old_rows_and_their_gates_are_purged(self, monkeypatch):
+        h = _replay_harness(monkeypatch)
+        h.add(days_ago=5, n=40, gates=3)
+        dbmod.purge_old_replay(2, sample_pct=0)
+        assert h.count() == 0
+        assert h.count("replay_gates") == 0
+
+    def test_recent_rows_are_untouched(self, monkeypatch):
+        h = _replay_harness(monkeypatch)
+        h.add(days_ago=1, n=40, gates=3)
+        dbmod.purge_old_replay(2, sample_pct=5)
+        assert h.count() == 40
+        assert h.count("replay_gates") == 120
+
+    def test_near_miss_rows_survive_with_their_gates(self, monkeypatch):
+        """Rows whose edge cleared their own recorded threshold are the
+        counterfactuals the harness fits on; their gate rows carry WHICH gate
+        said no, so they must survive together."""
+        h = _replay_harness(monkeypatch)
+        h.add(days_ago=5, edge=0.25, threshold=0.08, n=7, gates=3)   # near-miss
+        h.add(days_ago=5, edge=0.01, threshold=0.08, n=93, gates=3)  # noise
+        dbmod.purge_old_replay(2, sample_pct=0)
+        assert h.count() == 7
+        assert h.count("replay_gates") == 21
+
+    def test_null_edge_rows_are_not_near_misses(self, monkeypatch):
+        h = _replay_harness(monkeypatch)
+        h.add(days_ago=5, edge=None, threshold=None, n=20)
+        dbmod.purge_old_replay(2, sample_pct=0)
+        assert h.count() == 0
+
+    def test_sample_cohort_is_stable_across_repeated_purges(self, monkeypatch):
+        h = _replay_harness(monkeypatch)
+        h.add(days_ago=5, edge=0.01, threshold=0.08, n=200)
+        dbmod.purge_old_replay(2, sample_pct=5)
+        first = h.count()
+        assert 0 < first < 200
+        for _ in range(5):
+            dbmod.purge_old_replay(2, sample_pct=5)
+        assert h.count() == first
+
+    def test_retained_rows_shed_the_json_but_keep_scalars(self, monkeypatch):
+        h = _replay_harness(monkeypatch)
+        h.add(days_ago=5, edge=0.25, threshold=0.08, n=5)
+        dbmod.purge_old_replay(2, sample_pct=0)
+        assert h.count() == 5
+        assert h.count(where="raw_models_pre_correction IS NULL") == 5
+        assert h.count(where="edge_post_fee IS NOT NULL") == 5
+
+    def test_recent_rows_keep_their_json(self, monkeypatch):
+        h = _replay_harness(monkeypatch)
+        h.add(days_ago=1, edge=0.25, threshold=0.08, n=5)
+        dbmod.purge_old_replay(2, sample_pct=0)
+        assert h.count(where="raw_models_pre_correction IS NOT NULL") == 5

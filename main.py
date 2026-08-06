@@ -7,7 +7,7 @@ from datetime import datetime, timezone
 from db import (
     init_db, fetch_query, get_portfolio_state, get_daily_pnl, execute_query,
     purge_old_signals, purge_old_scan_log, purge_old_notifications, vacuum_db,
-    purge_old_position_trail, current_mode, backfill_replay_outcomes,
+    purge_old_position_trail, purge_old_replay, current_mode, backfill_replay_outcomes,
 )
 from scanner import scan_markets, verify_parser_fixtures, prefetch_order_books
 from strategy import evaluate_opportunity
@@ -287,12 +287,14 @@ def _daily_purge():
         from config import (NOTIFICATION_RETENTION_DAYS, SIGNAL_RETENTION_DAYS,
                             SCAN_LOG_RETENTION_DAYS, SKIP_SIGNAL_RETENTION_DAYS,
                             SKIP_SIGNAL_SAMPLE_PCT, SKIP_SIGNAL_NEAR_MISS_EDGE,
-                            POSITION_TRAIL_RETENTION_DAYS)
+                            POSITION_TRAIL_RETENTION_DAYS, REPLAY_RETENTION_DAYS,
+                            REPLAY_SAMPLE_PCT)
         # Pass the configured retentions — the no-arg calls silently ignored the
         # SIGNAL_RETENTION_DAYS / SCAN_LOG_RETENTION_DAYS env overrides.
         purge_old_signals(SIGNAL_RETENTION_DAYS, SKIP_SIGNAL_RETENTION_DAYS,
                           sample_pct=SKIP_SIGNAL_SAMPLE_PCT,
                           near_miss_edge=SKIP_SIGNAL_NEAR_MISS_EDGE)
+        purge_old_replay(REPLAY_RETENTION_DAYS, sample_pct=REPLAY_SAMPLE_PCT)
         purge_old_scan_log(SCAN_LOG_RETENTION_DAYS)
         purge_old_notifications(NOTIFICATION_RETENTION_DAYS)
         purge_old_position_trail(POSITION_TRAIL_RETENTION_DAYS)

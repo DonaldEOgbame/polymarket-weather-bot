@@ -1050,6 +1050,21 @@ SKIP_SIGNAL_SAMPLE_PCT = int(os.getenv("SKIP_SIGNAL_SAMPLE_PCT", "5"))
 # None/blank disables. Defaults to the entry threshold.
 _nm = os.getenv("SKIP_SIGNAL_NEAR_MISS_EDGE", "").strip()
 SKIP_SIGNAL_NEAR_MISS_EDGE = float(_nm) if _nm else EDGE_THRESHOLD
+# Replay recorder retention. replay_signals + replay_gates log EVERY evaluated
+# market every cycle (~120k signal rows and ~1M gate rows a day at 31 cities)
+# and filled the 1GB volume in under three days after the 2026-08-04 account
+# move — the volume extension that justified indefinite skip retention above
+# did not survive the migration, and these tables had no purge at all.
+#
+# Same policy as the skip purge: a short full-fidelity window for debugging
+# recent scans, plus two carve-outs kept past it for the harness's
+# out-of-sample fitting — a deterministic id-cohort sample and every row whose
+# edge cleared the entry threshold (the counterfactuals with information in
+# them). Retained rows shed raw_models_pre_correction once past the window;
+# the scalar stage columns the harness fits on are unaffected. Gate rows are
+# deleted with their parent signal row.
+REPLAY_RETENTION_DAYS = int(os.getenv("REPLAY_RETENTION_DAYS", "2"))
+REPLAY_SAMPLE_PCT = int(os.getenv("REPLAY_SAMPLE_PCT", "5"))
 SCAN_LOG_RETENTION_DAYS = int(os.getenv("SCAN_LOG_RETENTION_DAYS", "14"))
 NOTIFICATION_RETENTION_DAYS = int(os.getenv("NOTIFICATION_RETENTION_DAYS", "30"))
 # Monitor-cycle position trail: life of the position plus 90 days MINIMUM.
