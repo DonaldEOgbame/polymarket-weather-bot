@@ -9,7 +9,7 @@ from datetime import datetime, timezone
 from weather import (get_station_coords, STATIONS, is_tradeable_window,
                      settlement_window)
 from lattice import star_tag
-from db import execute_query, fetch_query
+from db import execute_query, fetch_query, flag_impossible_bucket
 from config import (
     MIN_VOLUME, MAX_HOURS_TO_RESOLUTION, GAMMA_EVENTS_URL, GAMMA_API_URL, CLOB_BASE_URL,
     DATA_API_URL,
@@ -1147,9 +1147,16 @@ def scan_markets():
             # refusing to trade it was correct. Nothing is UNKNOWN as of the
             # 2026-08-05 audit; this is the enforcement that keeps it that way
             # when a resolution source changes.
-            if not is_tradeable_window(city):
-                do_skip(f"Settlement window not established for {city} "
-                        f"(window={settlement_window(city)!r}) — see "
+            # `city_key`, not `city` — there is no `city` in this scope. Shipped
+            # as a NameError in Phase 1.1 and caught only on the first real scan
+            # after deploy (2026-08-06): the exception is swallowed by the
+            # per-candidate handler, so every weather market failed with
+            # "Error processing weather candidate ... name 'city' is not
+            # defined" and the scan reported 0 candidates. Trading stopped
+            # completely, and this guard never ran once.
+            if not is_tradeable_window(city_key):
+                do_skip(f"Settlement window not established for {city_key} "
+                        f"(window={settlement_window(city_key)!r}) — see "
                         f"audit_settlement_windows.py", "unknown_settlement_window")
                 continue
 

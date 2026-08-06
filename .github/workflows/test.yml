@@ -54,6 +54,27 @@ jobs:
       - name: Validate config tables
         run: python -c "from weather import validate_config_tables; validate_config_tables(); print('config tables ok')"
 
+      # Undefined names are invisible to both the test suite and the import
+      # check: they raise only when the line actually executes, and the two
+      # that shipped on 2026-08-06 were both on the live market path. One
+      # (`is_tradeable_window(city)` — no such name in scope) was swallowed by
+      # the per-candidate exception handler and stopped trading completely,
+      # reporting "0 candidates" rather than an error. The other
+      # (`flag_impossible_bucket`, defined in db.py and never imported) would
+      # have raised the first time a market hit an off-lattice bucket.
+      #
+      # Scoped to undefined names on purpose. This is a correctness gate, not a
+      # style gate — unused imports and long lines must never be able to fail a
+      # push.
+      - name: No undefined names
+        run: |
+          pip install pyflakes
+          if python -m pyflakes *.py tests/*.py | grep -i "undefined name"; then
+            echo "::error::undefined name(s) found — these raise at runtime, not at import"
+            exit 1
+          fi
+          echo "no undefined names"
+
       - name: Import every module
         # Catches syntax errors and circular imports in modules no test happens
         # to import — app.py in particular is 1,200 lines behind a Flask app.
