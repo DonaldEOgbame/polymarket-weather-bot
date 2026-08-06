@@ -995,10 +995,9 @@ INTRADAY_SIGMA_FLOOR_F = float(os.getenv("INTRADAY_SIGMA_FLOOR_F", "0.5"))
 # Dimensionless, so it travels across climates and hemispheres; multiplied at
 # runtime by the diurnal range the ensemble forecasts for that day.
 #
-# Fitted by fit_remaining_rise.py over 12 months of METAR from ten stations
-# spanning the traded climate zones. Regenerate with that script; do not hand-
-# edit. See reports/remaining-rise.md for the per-station curves and whether
-# pooling across climates is defensible.
+# Fitted over 12 months of METAR from ten stations spanning the traded climate
+# zones (fit_remaining_rise.py, now in git history only — restore it to refit).
+# Do not hand-edit.
 REMAINING_RISE_TABLE = {
      0: {"f_mean": 0.6974, "f_sd": 0.2425, "g_mean": 0.2789, "g_sd": 0.2361},
      1: {"f_mean": 0.6863, "f_sd": 0.2421, "g_mean": 0.2268, "g_sd": 0.2229},
@@ -1025,28 +1024,6 @@ REMAINING_RISE_TABLE = {
     22: {"f_mean": 0.0006, "f_sd": 0.0107, "g_mean": 0.0092, "g_sd": 0.0428},
     23: {"f_mean": 0.0000, "f_sd": 0.0000, "g_mean": 0.0000, "g_sd": 0.0000},
 }
-
-# --- Quantile meta-model (see quantile_model.py) ---
-# One learned object that would replace eight groups of hand-fitted constants:
-# the per-model and per-city bias tables, the global METAR shift, the sigma
-# construction, the per-direction scaling, both variance inflations, and the
-# Platt calibration layered on top to undo their composition's errors.
-#
-# DEFAULT FALSE, and it must stay false until harness.py shows it beating the
-# parametric stack OUT OF SAMPLE. Three prior refits (sigma, Student-t df,
-# per-direction bias) each returned confidence intervals wider than the
-# correction they proposed on 23 trades; a gradient-boosted model on that
-# sample is the same failure with more parameters and less visibility.
-ENABLE_QUANTILE_MODEL = os.getenv("ENABLE_QUANTILE_MODEL", "false").lower() == "true"
-QUANTILE_MODEL_PATH = os.getenv("QUANTILE_MODEL_PATH",
-                                os.path.join(os.path.dirname(DB_PATH) or ".",
-                                             "quantile_model.json"))
-# 11 levels: dense in the tails, because that is where every bet lives. An
-# evenly spaced grid would put most of its resolution in the middle of the
-# distribution, which is the part no bucket is ever priced from.
-QUANTILE_LEVELS = (0.01, 0.05, 0.10, 0.25, 0.40, 0.50, 0.60, 0.75, 0.90, 0.95, 0.99)
-# Refuses to fit below this. Not caution for its own sake — see above.
-QUANTILE_MIN_TRAINING_ROWS = int(os.getenv("QUANTILE_MIN_TRAINING_ROWS", "2000"))
 
 SIGNAL_RETENTION_DAYS = int(os.getenv("SIGNAL_RETENTION_DAYS", "14"))
 SKIP_SIGNAL_RETENTION_DAYS = int(os.getenv("SKIP_SIGNAL_RETENTION_DAYS", "3"))
