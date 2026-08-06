@@ -34,7 +34,7 @@ for _m in ("py_clob_client_v2", "py_clob_client_v2.client", "py_clob_client_v2.c
     sys.modules.setdefault(_m, types.ModuleType(_m))
 sys.modules["py_clob_client_v2.client"].ClobClient = object
 _ct = sys.modules["py_clob_client_v2.clob_types"]
-for _n in ("MarketOrderArgsV2", "OrderType", "ApiCreds", "BalanceAllowanceParams", "AssetType"):
+for _n in ("MarketOrderArgsV2", "OrderArgsV2", "OrderType", "ApiCreds", "BalanceAllowanceParams", "AssetType"):
     if not hasattr(_ct, _n):
         setattr(_ct, _n, object)
 

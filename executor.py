@@ -4,7 +4,8 @@ import threading
 from datetime import datetime, timezone
 from py_clob_client_v2.client import ClobClient
 from py_clob_client_v2.clob_types import (
-    MarketOrderArgsV2, OrderType, ApiCreds, BalanceAllowanceParams, AssetType,
+    MarketOrderArgsV2, OrderArgsV2, OrderType, ApiCreds, BalanceAllowanceParams,
+    AssetType,
 )
 from db import (execute_query, fetch_query, get_open_position, close_position_atomic,
                 open_position_atomic, reduce_position_atomic, get_position_by_id,
@@ -27,7 +28,8 @@ from config import (
     SUSTAINED_LOSS_MIN_DROP, REENTRY_COOLDOWN_HOURS,
     ENABLE_SUSTAINED_LOSS_GUARD, ENABLE_THESIS_BREAK_EXIT,
     POLYMARKET_FUNDER, POLYMARKET_SIG_TYPE, EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN,
-    ONE_TRADE_PER_CITY_DATE,
+    ONE_TRADE_PER_CITY_DATE, MAX_ENTRY_PRICE,
+    USE_MARKETABLE_LIMIT, MAX_FILL_SLIPPAGE_ALERT,
     setting, paper_mode,
 )
 # MAX_CONCURRENT_POSITIONS / ENABLE_STOP_LOSS / STOP_LOSS_PCT / TAKE_PROFIT_PRICE
@@ -935,6 +937,149 @@ class Executor:
                 _time.sleep(1.0)
         return shares, price
 
+    def _verify_fill(self, opp, signal_data, quoted, limit_sent, filled_price,
+                     shares, size):
+        """Check what was actually paid against what the decision assumed.
+
+        The Austin fill sat in the ledger looking ordinary: the trade row records
+        fill_price and nothing else, so a 34-cent slippage and a 0-cent slippage
+        are indistinguishable after the fact without re-deriving the quote from
+        the replay log. Every other trade in the book filled AT the quote, so
+        this is near-silent in normal operation and loud exactly once.
+
+        Recomputes the edge at the price actually paid. Post-fill edge is the
+        only number that describes the bet that now exists — a +0.128 edge on a
+        0.64 quote is a -0.117 edge at a 0.9818 fill, and the position will still
+        most likely win, which is precisely why nothing else would catch it."""
+        slippage = filled_price - quoted
+        prob = signal_data.get("model_prob")
+        # NO side pays `filled_price` to receive 1.00 when the bucket misses.
+        fair = (1.0 - prob) if signal_data.get("side") == "NO" else prob
+        post_fill_edge = (fair - filled_price) if fair is not None else None
+        depth = signal_data.get("usable_depth_usd")
+        pct_of_depth = (100.0 * size / depth) if depth else None
+
+        logging.info(
+            f"FILL_AUDIT {opp.market_id} {signal_data.get('side')} | "
+            f"quoted={quoted:.4f} limit_sent={limit_sent} filled={filled_price:.4f} "
+            f"slippage={slippage:+.4f} | shares={shares} size=${size:.2f} | "
+            f"depth_at_decision="
+            f"{('$%.2f' % depth) if depth else 'unknown'} "
+            f"size_pct_of_depth={('%.1f%%' % pct_of_depth) if pct_of_depth else 'n/a'} | "
+            f"edge_at_decision={signal_data.get('edge'):+.4f} "
+            f"edge_at_fill={('%+.4f' % post_fill_edge) if post_fill_edge is not None else 'n/a'}"
+        )
+
+        if filled_price > MAX_ENTRY_PRICE + 1e-9:
+            # Should be structurally impossible now. If it fires, some path is
+            # still sending an order the cap does not constrain.
+            logging.error(
+                f"CAP BREACH {opp.market_id}: filled at {filled_price:.4f}, above "
+                f"MAX_ENTRY_PRICE {MAX_ENTRY_PRICE:.2f}. Another code path is "
+                f"bypassing the entry cap — investigate before trading further.")
+            add_notification(
+                "execution",
+                f"Fill at {filled_price:.4f} breached the {MAX_ENTRY_PRICE:.2f} "
+                f"entry cap on {opp.city} — a path is bypassing the limit price.",
+                "error")
+
+        if post_fill_edge is not None and post_fill_edge < 0:
+            logging.error(
+                f"NEGATIVE EDGE AT FILL {opp.market_id} ({opp.city}): paid "
+                f"{filled_price:.4f} for a token worth {fair:.4f}. The decision "
+                f"claimed {signal_data.get('edge'):+.4f}; execution made it "
+                f"{post_fill_edge:+.4f}. This position is expected to LOSE "
+                f"${abs(post_fill_edge) * shares:.2f} even though it will "
+                f"probably still resolve in our favour.")
+            add_notification(
+                "execution",
+                f"{opp.city}: filled at {filled_price:.4f} vs fair {fair:.4f} — "
+                f"negative edge at fill ({post_fill_edge:+.4f}). Likely to win, "
+                f"still a losing bet.",
+                "error")
+
+        if abs(slippage) > MAX_FILL_SLIPPAGE_ALERT:
+            add_notification(
+                "execution",
+                f"{opp.city}: filled {slippage:+.4f} from the {quoted:.4f} quote "
+                f"(limit {limit_sent}), ${size:.2f} into "
+                f"{('$%.2f' % depth) if depth else 'unknown'} of usable depth.",
+                "warning")
+
+    def _submit_marketable_limit(self, token_id, side, amount, limit_price,
+                                 fallback_price=None):
+        """Cross the book with a LIMIT order that cannot fill above `limit_price`.
+
+        A market order on a $0-$1 instrument has no floor on execution quality:
+        it walks until the size is filled at whatever the book charges. On
+        2026-08-06 that turned a $6 order against $26.49 of ask depth into a
+        0.9818 fill on a 0.64 quote — 34 cents of slippage on a 12.8-cent edge.
+
+        FAK (fill-and-kill) so the unfillable remainder is cancelled rather than
+        resting as a phantom open order. A PARTIAL fill is the desired outcome
+        when the book is thinner than expected: $3.50 filled at an acceptable
+        price beats $6.00 filled at any price, and the shortfall is logged.
+
+        `amount` is USDC for BUY. The CLOB wants (price, size-in-shares) for a
+        limit order, so the size is derived at the limit price — that is the
+        WORST price it can pay, so it can never overspend the intended stake."""
+        if self._ensure_client() is None:
+            logging.error(
+                f"No CLOB client — refusing to {side} {token_id}. "
+                f"Live mode needs POLYMARKET_PK and working CLOB credentials.")
+            return None
+        try:
+            fee_bps = self.client.get_fee_rate_bps(token_id)
+        except Exception:
+            fee_bps = None
+
+        limit_price = round(float(limit_price), 4)
+        shares = round(amount / limit_price, 2) if side == "BUY" else round(amount, 2)
+        if shares <= 0:
+            logging.warning(f"{side} size rounds to zero at limit {limit_price}; not sending")
+            return None
+        try:
+            signed = self.client.create_order(
+                OrderArgsV2(token_id=token_id, price=limit_price, size=shares,
+                            side=side)
+            )
+            resp = self.client.post_order(signed, OrderType.FAK)
+        except Exception as e:
+            logging.error(
+                f"Limit order failed ({side} size={shares} @ {limit_price} "
+                f"tok={token_id}): {e}")
+            return None
+        logging.info(f"RAW order response [{side} {token_id} @ limit {limit_price}]: {resp}")
+
+        order_id = resp.get("orderID") or resp.get("orderId") if isinstance(resp, dict) else None
+        filled, avg = 0.0, None
+        if isinstance(resp, dict) and resp.get("status") == "matched":
+            try:
+                mk = float(resp.get("makingAmount") or 0)
+                tk = float(resp.get("takingAmount") or 0)
+                if mk > 0 and tk > 0:
+                    filled, avg = (tk, mk / tk) if side == "BUY" else (mk, tk / mk)
+            except (TypeError, ValueError):
+                pass
+        if filled <= 0:
+            filled, avg = self._read_fill(resp, order_id, fallback_price or limit_price)
+        if filled <= 0:
+            logging.info(
+                f"{side} limit order at {limit_price} did not fill — the book had "
+                f"nothing at or better than the cap. Nothing booked. resp={resp}")
+            return None
+        if not avg:
+            # A real fill whose price cannot be read must never be discarded, but
+            # it also must not be booked below what was actually paid. The limit
+            # is the worst possible price, so it is the safe assumption.
+            logging.critical(
+                f"{side} order {order_id} matched {filled} shares but no price "
+                f"could be read — booking at the limit {limit_price}. RECONCILE "
+                f"MANUALLY. resp={resp}")
+            avg = limit_price
+        return {"shares": filled, "price": avg, "fee_bps": fee_bps,
+                "limit_price": limit_price, "requested_usd": amount}
+
     def _submit_taker(self, token_id, side, amount, fallback_price=None):
         """Place a Fill-And-Kill MARKET order (taker). For BUY, `amount` is USDC to
         spend (Polymarket market-order min $1); for SELL, `amount` is shares. The
@@ -1088,28 +1233,37 @@ class Executor:
         # Paper assumes a fill at the quote + 1¢. Live crosses the real ask and
         # records whatever ACTUALLY fills (price + size), so the ledger and the
         # measured cost reflect real execution, not an assumption.
-        price = round(min(signal_data["price"] + 0.01, 0.99), 2)
+        quoted_price = signal_data["price"]
+        # The limit the order is actually sent with. `quote + 1c` is the intended
+        # slippage allowance; MAX_ENTRY_PRICE is policy and must win. Before
+        # 2026-08-06 this line capped at 0.99 — the DISABLED sentinel — so the
+        # configured 0.80 cap could not constrain what was paid, and a market
+        # order filled at 0.9818.
+        price = round(min(quoted_price + 0.01, MAX_ENTRY_PRICE), 2)
         shares = round(size / price, 2)
         entry_fee = 0.0  # paper mode: fee is modeled inside transaction_cost, not the ledger
 
         if not paper_mode():
             logging.info(
                 f"Executing LIVE trade: BUY ${size:.2f} of {opp.market_id} {side} "
-                f"(target=${signal_data['price']:.2f}, edge={signal_data['edge']:.3f})"
+                f"(quote=${quoted_price:.4f}, limit=${price:.4f}, "
+                f"edge={signal_data['edge']:.3f})"
             )
-            fill = self._submit_taker(signal_data["token_id"], "BUY", size,
-                                      fallback_price=price)  # amount = USDC
+            if USE_MARKETABLE_LIMIT:
+                fill = self._submit_marketable_limit(
+                    signal_data["token_id"], "BUY", size, limit_price=price,
+                    fallback_price=price)
+            else:
+                fill = self._submit_taker(signal_data["token_id"], "BUY", size,
+                                          fallback_price=price)  # amount = USDC
             if not fill:
                 return  # nothing filled → no phantom position
             price = round(fill["price"], 4)
             shares = fill["shares"]
             size = round(shares * price, 2)                  # actual USDC deployed
             entry_fee = self._fill_fee_rate(fill) * price * (1.0 - price) * shares
-            slip = price - signal_data["price"]
-            logging.info(
-                f"FILLED {opp.market_id} {side}: {shares} sh @ ${price:.4f} "
-                f"= ${size:.2f} | slippage vs target {slip:+.4f} | fee_bps={fill['fee_bps']}"
-            )
+            self._verify_fill(opp, signal_data, quoted_price,
+                              fill.get("limit_price"), price, shares, size)
         else:
             logging.info(
                 f"Executing PAPER trade: BUY {shares} shares of {opp.market_id} {side} @ ${price:.3f} "

@@ -440,6 +440,14 @@ def init_db():
             ("veto_gross", "INTEGER"),
             ("veto_band", "INTEGER"),
             ("vetoed", "INTEGER"),
+            # Execution safety, 2026-08-06. Rows written before this carry NULL,
+            # which the replay reads as "never measured" rather than as "zero" —
+            # the opposite of the live gate, which refuses on unknown depth. A
+            # replay must not invent a measurement nobody took; the live path
+            # must not trade on one.
+            ("usable_depth_usd", "REAL"),
+            ("stake_usd", "REAL"),
+            ("walked_vwap", "REAL"),
         ):
             try:
                 conn.execute(

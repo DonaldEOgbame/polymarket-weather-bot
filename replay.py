@@ -53,6 +53,7 @@ class ConfigOverride:
     min_model_agreement: float = None
     max_model_spread_std: float = None
     max_entry_price: float = None
+    min_depth_multiple: float = None
     max_entry_spread_fraction: float = None
     forecast_margin_f: float = None
     # Independent veto. Replayable because the PROVIDER'S ANSWER is stored on
@@ -179,7 +180,18 @@ def replay_row(row, ov=None):
     no_px = row["no_price"]
     sf = row["spread_fraction"]
     fee = C.TAKER_FEE_RATE * no_px * (1.0 - no_px)
-    slip = (sf if sf is not None else C.SLIPPAGE_FRACTION) * no_px
+    # Slippage from the WALKED book when the row recorded one, exactly as the
+    # live path does. `spread_fraction * price` measures crossing the spread, a
+    # single-level move, and understated the real cost of the 2026-08-06 Austin
+    # fill by 4x. Rows written before walked_vwap existed fall back to the old
+    # formula — that is what those rows were actually traded on, so reproducing
+    # them any other way would make the replay disagree with history.
+    walked = _col(row, "walked_vwap")
+    if walked is not None and no_px:
+        slip_frac = max((walked - no_px) / no_px, 0.0)
+    else:
+        slip_frac = sf if sf is not None else C.SLIPPAGE_FRACTION
+    slip = slip_frac * no_px
     no_edge = ((1.0 - prob["post_floor"]) - no_px) - (fee + slip)
 
     thr = (pick(ov.narrow_bucket_edge_threshold, C.NARROW_BUCKET_EDGE_THRESHOLD)
@@ -193,6 +205,17 @@ def replay_row(row, ov=None):
          agreement >= pick(ov.min_model_agreement, C.MIN_MODEL_AGREEMENT)),
         ("model_spread_sd", spread_sd, pick(ov.max_model_spread_std, C.MAX_MODEL_SPREAD_STD),
          spread_sd <= pick(ov.max_model_spread_std, C.MAX_MODEL_SPREAD_STD)),
+        # Book depth, from the depth stored on the row. Rows written before
+        # 2026-08-06 have no usable-depth column and cannot be scored on it, so
+        # the gate passes rather than retroactively condemning history it has no
+        # evidence about — the opposite of the LIVE behaviour, which refuses on
+        # unknown depth. A replay must not invent a measurement that was never
+        # taken; the live path must not trade on one.
+        ("book_depth", _col(row, "usable_depth_usd"),
+         pick(ov.min_depth_multiple, C.MIN_DEPTH_MULTIPLE) * (_col(row, "stake_usd") or 0.0),
+         _col(row, "usable_depth_usd") is None
+         or _col(row, "usable_depth_usd") >= pick(ov.min_depth_multiple,
+                                                  C.MIN_DEPTH_MULTIPLE) * (_col(row, "stake_usd") or 0.0)),
         ("book_readable", sf, None, sf is not None),
         ("market_spread_frac", sf,
          pick(ov.max_entry_spread_fraction, C.MAX_ENTRY_SPREAD_FRACTION),

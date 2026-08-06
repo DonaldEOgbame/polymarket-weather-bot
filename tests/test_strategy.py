@@ -220,6 +220,11 @@ class TestYesEntriesDisabled:
         # the book is unreadable, so tests must present a real book to trade.
         monkeypatch.setattr(strategy, "get_realtime_price", lambda tid: (0.51, 0.49))
         monkeypatch.setattr(strategy, "get_orderbook_depth_usd", lambda tid: (None, None))
+        monkeypatch.setattr(strategy, "estimate_fill",
+                            lambda tok, usd, cap=None: {
+                                "vwap": opp.no_price, "filled_usd": usd,
+                                "exhausted": False, "usable_depth_usd": 5000.0,
+                                "best_ask": opp.no_price})
         monkeypatch.setattr(strategy, "execute_query", lambda *a, **k: None)
         return strategy.evaluate_opportunity(opp, portfolio_state, engine_res=engine_res)
 
@@ -276,6 +281,11 @@ class TestOrderbookDepthLogging:
         # the book is unreadable, so tests must present a real book to trade.
         monkeypatch.setattr(strategy, "get_realtime_price", lambda tid: (0.51, 0.49))
         monkeypatch.setattr(strategy, "get_orderbook_depth_usd", fake_depth)
+        monkeypatch.setattr(strategy, "estimate_fill",
+                            lambda tok, usd, cap=None: {
+                                "vwap": opp.no_price, "filled_usd": usd,
+                                "exhausted": False, "usable_depth_usd": 5000.0,
+                                "best_ask": opp.no_price})
         monkeypatch.setattr(strategy, "execute_query", fake_execute_query)
         result = strategy.evaluate_opportunity(opp, portfolio_state, engine_res=engine_res)
         return result, depth_calls, logged_rows

@@ -14,7 +14,7 @@ for mod in ("py_clob_client_v2", "py_clob_client_v2.client", "py_clob_client_v2.
     sys.modules.setdefault(mod, types.ModuleType(mod))
 sys.modules["py_clob_client_v2.client"].ClobClient = object
 ct = sys.modules["py_clob_client_v2.clob_types"]
-for n in ("MarketOrderArgsV2", "OrderType", "ApiCreds", "BalanceAllowanceParams", "AssetType"):
+for n in ("MarketOrderArgsV2", "OrderArgsV2", "OrderType", "ApiCreds", "BalanceAllowanceParams", "AssetType"):
     setattr(ct, n, object)
 
 import scanner

@@ -311,6 +311,60 @@ def _book_depth_usd(data):
     return _depth(data.get("asks", [])), _depth(data.get("bids", []))
 
 
+def _usable_ask_depth_usd(data, max_price):
+    """Resting $ depth on the ask side AT OR BELOW `max_price`.
+
+    Total book depth is the wrong number for an entry decision. Depth resting at
+    0.95 is not depth you can use when your cap is 0.80 — it is exactly the
+    depth a market order walks into after exhausting everything cheaper, which
+    is how a $6 order against a $26.49 book filled at 0.9818 on a 0.64 quote.
+
+    `max_price=None` means no cap and returns the whole side, matching
+    _book_depth_usd."""
+    total = 0.0
+    for lvl in data.get("asks", []) or []:
+        try:
+            p, s = float(lvl["price"]), float(lvl["size"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if max_price is None or p <= max_price + 1e-9:
+            total += p * s
+    return total
+
+
+def _walk_asks(data, usd_amount, max_price=None):
+    """What buying `usd_amount` would ACTUALLY cost, by consuming the real book.
+
+    Returns (vwap, filled_usd, exhausted_book). Levels are taken cheapest-first,
+    which is how a taker fills. `vwap` is None when nothing is fillable.
+
+    This is the quantity SLIPPAGE_FRACTION was always meant to approximate and
+    never did: `spread_fraction * price` describes CROSSING THE SPREAD, a
+    one-level move, while a size larger than the top level WALKS the book and
+    pays every level it eats. On the Austin book those differed by 4x — modelled
+    0.085, actual 0.34."""
+    levels = []
+    for lvl in data.get("asks", []) or []:
+        try:
+            p, s = float(lvl["price"]), float(lvl["size"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if p > 0 and s > 0 and (max_price is None or p <= max_price + 1e-9):
+            levels.append((p, s))
+    levels.sort()
+
+    spent = shares = 0.0
+    for price, size in levels:
+        if spent >= usd_amount - 1e-9:
+            break
+        can_spend = min(price * size, usd_amount - spent)
+        spent += can_spend
+        shares += can_spend / price
+    if shares <= 0:
+        return None, 0.0, True
+    return spent / shares, spent, spent < usd_amount - 1e-9
+
+
 def _top_of_book_size(data):
     """Shares resting AT the best price on each side: (ask_top_size, bid_top_size).
 
@@ -364,6 +418,61 @@ def get_realtime_price_status(token_id):
 
     set_cached_price(token_id, 0.0, 0.0, False)
     return 0.0, 0.0, False
+
+
+# Raw books, cached briefly. The price cache stores only the AGGREGATE depth
+# numbers, which cannot answer "how much is resting at or below 0.80" or "what
+# would $6 actually fill at" — both need the levels themselves.
+_BOOK_CACHE: dict = {}
+_BOOK_TTL_SECONDS = 30
+
+
+def get_book(token_id, force=False):
+    """The raw CLOB book for `token_id`, or None if it cannot be read.
+
+    None is load-bearing and must not be collapsed to an empty book: "the book
+    is unreadable" and "the book is empty" are different facts, and the entry
+    gate refuses on the first rather than treating unknown depth as zero or as
+    infinite."""
+    import time as _t
+    hit = _BOOK_CACHE.get(token_id)
+    if hit and not force and (_t.monotonic() - hit[0]) < _BOOK_TTL_SECONDS:
+        return hit[1]
+    try:
+        resp = safe_get(f"{CLOB_BASE_URL}/book?token_id={token_id}", timeout=10)
+        if resp.status_code == 200:
+            data = resp.json()
+            _BOOK_CACHE[token_id] = (_t.monotonic(), data)
+            return data
+        logging.warning(f"Book fetch for {token_id}: HTTP {resp.status_code}")
+    except Exception as e:
+        logging.error(f"Book fetch failed for {token_id}: {e}")
+    return None
+
+
+def usable_ask_depth_usd(token_id, max_price):
+    """$ resting on the ask side at or below `max_price`, or None if unreadable.
+
+    The number the entry gate needs. See _usable_ask_depth_usd."""
+    data = get_book(token_id)
+    if data is None:
+        return None
+    return _usable_ask_depth_usd(data, max_price)
+
+
+def estimate_fill(token_id, usd_amount, max_price=None):
+    """What `usd_amount` would really fill at, by walking the live book.
+
+    Returns {"vwap", "filled_usd", "exhausted", "usable_depth_usd", "best_ask"}
+    or None when the book cannot be read."""
+    data = get_book(token_id)
+    if data is None:
+        return None
+    best_ask, _ = _best_ask_bid_from_book(data)
+    vwap, filled, exhausted = _walk_asks(data, usd_amount, max_price)
+    return {"vwap": vwap, "filled_usd": filled, "exhausted": exhausted,
+            "usable_depth_usd": _usable_ask_depth_usd(data, max_price),
+            "best_ask": best_ask}
 
 
 def get_orderbook_depth_usd(token_id):

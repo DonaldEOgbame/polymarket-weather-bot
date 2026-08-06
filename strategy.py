@@ -2,7 +2,8 @@ import json
 import logging
 from weather import (get_signal_engine, get_bucket_probability,
                      bucket_probability_stages)
-from scanner import get_realtime_price, get_orderbook_depth_usd, PARSER_VERSION
+from scanner import (get_realtime_price, get_orderbook_depth_usd, estimate_fill,
+                     PARSER_VERSION)
 from risk import risk_direction
 from db import execute_query
 from datetime import datetime, timezone
@@ -17,6 +18,7 @@ from config import (
     MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION,
     TAKER_FEE_RATE, SLIPPAGE_FRACTION, MAX_ENTRY_SPREAD_FRACTION,
     FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION, MAX_ENTRY_PRICE,
+    MIN_DEPTH_MULTIPLE, REQUIRE_DEPTH_TO_TRADE,
     setting,
 )
 # FIXED_POSITION_SIZE / MAX_TOTAL_EXPOSURE_FRACTION are
@@ -132,7 +134,8 @@ def forecast_direction_agrees(side, raw_weighted_mean, bucket_low, bucket_high):
 def _log_replay_row(*, timestamp, opp, engine_res, prob_stages, sigma_final,
                     bucket_width, is_narrow, no_edge, yes_edge, prob,
                     edge_threshold, gates, no_spread_frac, decision, skip_reason,
-                    ask_depth_usd, bid_depth_usd, veto=None):
+                    ask_depth_usd, bid_depth_usd, veto=None,
+                    usable_depth_usd=None, stake_usd=None, walked_vwap=None):
     """Write the replay row for one evaluated opportunity.
 
     Records INPUTS, not conclusions, so any future configuration can be scored
@@ -155,6 +158,8 @@ def _log_replay_row(*, timestamp, opp, engine_res, prob_stages, sigma_final,
             gates=gates, no_spread_frac=no_spread_frac, decision=decision,
             skip_reason=skip_reason, ask_depth_usd=ask_depth_usd,
             bid_depth_usd=bid_depth_usd, veto=veto,
+            usable_depth_usd=usable_depth_usd, stake_usd=stake_usd,
+            walked_vwap=walked_vwap,
         )
     except Exception as e:
         logging.error(f"replay row build failed for {opp.market_id}: {e}", exc_info=True)
@@ -163,7 +168,8 @@ def _log_replay_row(*, timestamp, opp, engine_res, prob_stages, sigma_final,
 def _log_replay_row_inner(*, timestamp, opp, engine_res, prob_stages, sigma_final,
                           bucket_width, is_narrow, no_edge, yes_edge, prob,
                           edge_threshold, gates, no_spread_frac, decision,
-                          skip_reason, ask_depth_usd, bid_depth_usd, veto=None):
+                          skip_reason, ask_depth_usd, bid_depth_usd, veto=None,
+                          usable_depth_usd=None, stake_usd=None, walked_vwap=None):
     from db import log_replay_signal
     from config import config_fingerprint, REPLAY_SCHEMA_VERSION, paper_mode
     from metar import STATION_ICAO
@@ -207,6 +213,12 @@ def _log_replay_row_inner(*, timestamp, opp, engine_res, prob_stages, sigma_fina
         "volume": getattr(opp, "volume", None),
         "spread_fraction": no_spread_frac,
         "ask_depth_usd": ask_depth_usd, "bid_depth_usd": bid_depth_usd,
+        # The depth the entry decision was actually made against, and the stake
+        # it was compared to. Both are needed: the requirement is a MULTIPLE of
+        # the stake, so depth alone cannot reconstruct the gate.
+        "usable_depth_usd": usable_depth_usd,
+        "stake_usd": stake_usd,
+        "walked_vwap": walked_vwap,
         "sigma_base": ss.get("base"),
         "sigma_post_spread": ss.get("post_spread"),
         "sigma_post_direction": ss.get("post_direction"),
@@ -246,8 +258,42 @@ def _log_replay_row_inner(*, timestamp, opp, engine_res, prob_stages, sigma_fina
     log_replay_signal(row, gates)
 
 
+def _depth_gate(usable_depth_usd, stake):
+    """The book-depth gate row.
+
+    Refuses when the usable ask depth is less than MIN_DEPTH_MULTIPLE times the
+    stake. Both numbers are recorded so the row answers "how thin was it, and
+    against what stake" without a second query — the requirement scales with
+    `effective_stake()`, so the same market can pass at $2 and fail at $6. The
+    $2 -> $6 change is exactly what made the 2026-08-06 Austin fill reachable,
+    which is why this is a multiple and not a dollar figure.
+
+    Unknown depth REFUSES when REQUIRE_DEPTH_TO_TRADE. Deliberately the opposite
+    of the independent veto, which fails OPEN: a veto that cannot read its
+    inputs should not block a trade the primary model likes, but an entry that
+    cannot see the book it is about to cross has no idea what it will pay. The
+    two behaviours must not be copied into each other."""
+    required = MIN_DEPTH_MULTIPLE * stake
+    if usable_depth_usd is None:
+        return {
+            "gate": "book_depth", "observed": None, "threshold": required,
+            "passed": not REQUIRE_DEPTH_TO_TRADE,
+            "detail": (f"order-book depth unreadable — cannot verify that "
+                       f"${stake:.2f} can fill at or below {MAX_ENTRY_PRICE:.2f} "
+                       f"without walking the book"),
+        }
+    return {
+        "gate": "book_depth", "observed": usable_depth_usd, "threshold": required,
+        "passed": usable_depth_usd >= required,
+        "detail": (f"only ${usable_depth_usd:.2f} resting at or below "
+                   f"{MAX_ENTRY_PRICE:.2f}, need ${required:.2f} "
+                   f"({MIN_DEPTH_MULTIPLE:g}x the ${stake:.2f} stake) — a taker "
+                   f"order this size would walk the book"),
+    }
+
+
 def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
-                   no_spread_frac, veto=None):
+                   no_spread_frac, veto=None, usable_depth_usd=None, stake=None):
     """Every NO-side gate as a structured record, in decision order.
 
     Returns [{gate, observed, threshold, passed, detail}, ...]. `detail` is the
@@ -288,6 +334,11 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
          "passed": spread <= MAX_MODEL_SPREAD_STD,
          "detail": f"NO edge {no_edge:.3f} but spread too wide "
                    f"({spread:.2f}°F sd > {MAX_MODEL_SPREAD_STD}°F sd)"},
+        # Liquidity, before anything about price. A book that cannot absorb the
+        # stake at an acceptable price makes every downstream number — the edge,
+        # the entry price, the payoff ratio — a statement about a fill that will
+        # not happen.
+        _depth_gate(usable_depth_usd, stake if stake is not None else 0.0),
         # Fail CLOSED on an unreadable book: empty/one-sided/error is most likely
         # exactly the thin market this gate exists to block. Observed is None
         # rather than 0.0 so a replay can tell "unreadable" from "zero spread".
@@ -398,11 +449,38 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     yes_spread_frac = get_live_spread_fraction(opp.token_id_yes)
     no_spread_frac = get_live_spread_fraction(opp.token_id_no)
 
+    # What the intended stake would ACTUALLY fill at, by walking the real book.
+    #
+    # Fetched HERE, before the decision, which is the whole fix. Depth used to be
+    # read three hundred lines below inside `if signal:` — collected purely for
+    # logging, one line after the commitment it could have prevented. On
+    # 2026-08-06 that ordering let a $6 order into $26.49 of ask depth fill at
+    # 0.9818 against a 0.64 quote.
+    #
+    # Only levels at or below MAX_ENTRY_PRICE count: depth resting at 0.95 is not
+    # depth you can use when your cap is 0.80, it is what a taker walks into
+    # after exhausting everything cheaper.
+    intended_stake = setting("FIXED_POSITION_SIZE") or MIN_POSITION_SIZE
+    fill_est = estimate_fill(opp.token_id_no, intended_stake, MAX_ENTRY_PRICE)
+    usable_depth = fill_est["usable_depth_usd"] if fill_est else None
+    walked_vwap = fill_est["vwap"] if fill_est else None
+
     # Subtract the real per-share transaction cost (Polymarket dynamic taker fee +
     # spread/slippage) from raw edge so the threshold check is on *net* edge after
     # frictions. Cost is priced at the side actually bought.
+    #
+    # The NO side prices slippage from the WALKED book when it is readable.
+    # `spread_fraction * price` describes crossing the spread — a single-level
+    # move — and silently assumes the size fits in the top level. When it does
+    # not, the order pays every level it eats: modelled 0.085 against an actual
+    # 0.34 on the Austin book, a 4x understatement.
     yes_edge = (prob - opp.yes_price) - transaction_cost(opp.yes_price, yes_spread_frac)
-    no_edge = ((1.0 - prob) - opp.no_price) - transaction_cost(opp.no_price, no_spread_frac)
+    no_slip_frac = no_spread_frac
+    if walked_vwap is not None and opp.no_price > 0:
+        # Realised slippage as a fraction of the quote, so transaction_cost's
+        # `fraction * price` shape is preserved and the fee term is untouched.
+        no_slip_frac = max((walked_vwap - opp.no_price) / opp.no_price, 0.0)
+    no_edge = ((1.0 - prob) - opp.no_price) - transaction_cost(opp.no_price, no_slip_frac)
 
     agreement = engine_res["model_agreement"]
     # Weighted stdev since 2026-07-31, not max-min — see MAX_MODEL_SPREAD_STD.
@@ -442,7 +520,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                          opp.bucket_low, opp.bucket_high)
 
     no_gates = _no_side_gates(opp, engine_res, no_edge, effective_edge_threshold,
-                              agreement, spread, no_spread_frac, veto=veto)
+                              agreement, spread, no_spread_frac, veto=veto,
+                              usable_depth_usd=usable_depth, stake=intended_stake)
 
     # Evaluate NO side (independent check)
     if signal is None and no_edge >= effective_edge_threshold:
@@ -644,6 +723,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         edge_threshold=effective_edge_threshold, gates=no_gates,
         no_spread_frac=no_spread_frac, decision=signal, skip_reason=skip_reason,
         ask_depth_usd=ask_depth_usd, bid_depth_usd=bid_depth_usd, veto=veto,
+        usable_depth_usd=usable_depth, stake_usd=intended_stake,
+        walked_vwap=walked_vwap,
     )
 
     if not signal:

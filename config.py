@@ -550,6 +550,32 @@ MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.80"))
 # closed, so a stopped-out city can't be re-entered via a sibling bucket either).
 ONE_TRADE_PER_CITY_DATE = os.getenv("ONE_TRADE_PER_CITY_DATE", "true").lower() == "true"
 
+# --- Execution safety (Phase 0.3) ---------------------------------------
+# 2026-08-06: a $6 market order went into a book holding $26.49 of ask depth and
+# filled at 0.9818 against a 0.64 quote. Every gate passed on the quote; the
+# execution then inverted the trade from a modelled +$0.78 to an actual -$0.71.
+# The position will most likely still WIN (86.5%), which is what makes it
+# dangerous: nothing in the ledger would ever have flagged it.
+#
+# Required resting ask depth, as a multiple of the stake, measured only over
+# levels at or below MAX_ENTRY_PRICE. Expressed as a MULTIPLE and not as
+# dollars on purpose: the requirement has to scale with the stake, and the
+# $2 -> $6 stake change is precisely what made this bug reachable. A fixed
+# dollar threshold would have let it happen again at the next raise.
+MIN_DEPTH_MULTIPLE = float(os.getenv("MIN_DEPTH_MULTIPLE", "10.0"))
+# Unknown depth REFUSES the trade. Deliberately the opposite of the veto gate's
+# fail-open: an unreadable book is exactly the condition under which a taker
+# order does the most damage, so "we could not check" must not mean "proceed".
+REQUIRE_DEPTH_TO_TRADE = os.getenv("REQUIRE_DEPTH_TO_TRADE", "true").lower() == "true"
+# Marketable LIMIT orders instead of market orders. On a $0-$1 instrument in a
+# thin book a market order has no floor on execution quality — it walks until
+# the size is filled at whatever the book charges.
+USE_MARKETABLE_LIMIT = os.getenv("USE_MARKETABLE_LIMIT", "true").lower() == "true"
+# Fill this far from the quote raises a dashboard alert. In price units, NOT
+# °F — every other _F constant in this file is a temperature, so the suffix is
+# deliberately absent here.
+MAX_FILL_SLIPPAGE_ALERT = float(os.getenv("MAX_FILL_SLIPPAGE_ALERT", "0.03"))
+
 # --- Correlated-exposure caps (see risk.py) ---
 # ONE_TRADE_PER_CITY_DATE stops two buckets of one city-day being counted as two
 # bets; MAX_CONCURRENT_POSITIONS caps how many positions exist. Neither limits
@@ -1342,6 +1368,32 @@ def validate_env_ranges():
             f"can never fire and removes that mitigation entirely."
         )
 
+    if MIN_DEPTH_MULTIPLE < 1.0:
+        problems.append(
+            f"MIN_DEPTH_MULTIPLE={MIN_DEPTH_MULTIPLE} is below 1.0, which permits "
+            f"an order larger than the entire usable book. The 2026-08-06 Austin "
+            f"fill took ~23% of all resting depth and paid 0.9818 on a 0.64 quote; "
+            f"the default 10.0 requires the stake to be a tenth of what is resting."
+        )
+    if not 0.0 < MAX_FILL_SLIPPAGE_ALERT <= 0.5:
+        problems.append(
+            f"MAX_FILL_SLIPPAGE_ALERT={MAX_FILL_SLIPPAGE_ALERT} is outside (0, 0.5]. "
+            f"It is a PRICE difference, not a temperature — 0.03 means three cents."
+        )
+    if not REQUIRE_DEPTH_TO_TRADE:
+        problems.append(
+            "REQUIRE_DEPTH_TO_TRADE is false: an unreadable book will no longer "
+            "refuse entry. That is the exact condition under which a taker order "
+            "does the most damage. Set it deliberately or leave it on."
+        )
+    if not USE_MARKETABLE_LIMIT:
+        problems.append(
+            "USE_MARKETABLE_LIMIT is false: entries will use MARKET orders, which "
+            "have no floor on execution quality in a thin book and cannot be "
+            "constrained by MAX_ENTRY_PRICE. This is how the 2026-08-06 Austin "
+            "fill happened."
+        )
+
     return problems
 
 
@@ -1433,6 +1485,11 @@ _FINGERPRINT_KEYS = (
     # calibration must never pool vetoed and un-vetoed regimes.
     "INDEPENDENT_VETO_ENABLED", "DISAGREEMENT_VETO_F", "PLAUSIBLE_BAND_F",
     "INDEPENDENT_VETO_MAX_FIRE_RATE",
+    # Execution safety. These change which trades are ENTERABLE and what the
+    # edge is net of real execution cost, so a replay that could not tell a
+    # depth-gated configuration from an ungated one would silently pool the era
+    # that produced the Austin fill with the era that forbids it.
+    "MIN_DEPTH_MULTIPLE", "REQUIRE_DEPTH_TO_TRADE", "USE_MARKETABLE_LIMIT",
 )
 
 

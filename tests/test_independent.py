@@ -852,6 +852,11 @@ def _evaluate(monkeypatch, dbmod, opp, engine, forecast):
     import strategy as S
     monkeypatch.setattr(S, "get_live_spread_fraction", lambda t: 0.02)
     monkeypatch.setattr(S, "get_orderbook_depth_usd", lambda t: (500.0, 400.0))
+    monkeypatch.setattr(S, "estimate_fill",
+                        lambda tok, usd, cap=None: {"vwap": 0.62, "filled_usd": usd,
+                                                    "exhausted": False,
+                                                    "usable_depth_usd": 5000.0,
+                                                    "best_ask": 0.62})
     monkeypatch.setattr(S, "execute_query", dbmod.execute_query)
     monkeypatch.setattr(independent, "get_independent_forecast",
                         lambda *a, **k: forecast)
