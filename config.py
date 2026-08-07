@@ -544,6 +544,7 @@ MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "1.00"))
 #
 # Documented per owner decision on 2026-08-07. All four gates must pass for entry.
 MIN_MODEL_CONFIDENCE = float(os.getenv("MIN_MODEL_CONFIDENCE", "0.60"))
+MAX_MODEL_CONFIDENCE = float(os.getenv("MAX_MODEL_CONFIDENCE", "0.85"))
 MIN_ENTRY_PRICE = float(os.getenv("MIN_ENTRY_PRICE", "0.65"))
 MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.85"))
 
@@ -1322,6 +1323,16 @@ def validate_env_ranges():
             f"MIN_MODEL_CONFIDENCE={MIN_MODEL_CONFIDENCE} is outside [0.5, 0.99]."
         )
 
+    if not 0.5 <= MAX_MODEL_CONFIDENCE <= 0.99:
+        problems.append(
+            f"MAX_MODEL_CONFIDENCE={MAX_MODEL_CONFIDENCE} is outside [0.5, 0.99]."
+        )
+
+    if MIN_MODEL_CONFIDENCE >= MAX_MODEL_CONFIDENCE:
+        problems.append(
+            f"MIN_MODEL_CONFIDENCE={MIN_MODEL_CONFIDENCE} is >= MAX_MODEL_CONFIDENCE={MAX_MODEL_CONFIDENCE}."
+        )
+
     if not 0.1 <= MIN_ENTRY_PRICE <= 0.95:
         problems.append(
             f"MIN_ENTRY_PRICE={MIN_ENTRY_PRICE} is outside [0.1, 0.95]."
@@ -1507,7 +1518,7 @@ _FINGERPRINT_KEYS = (
     # Execution safety & entry filters. These change which trades are ENTERABLE
     # and what the edge is net of real execution cost.
     "MIN_DEPTH_MULTIPLE", "REQUIRE_DEPTH_TO_TRADE", "USE_MARKETABLE_LIMIT",
-    "MIN_MODEL_CONFIDENCE", "MIN_ENTRY_PRICE", "MAX_HOURS_TO_RESOLUTION",
+    "MIN_MODEL_CONFIDENCE", "MAX_MODEL_CONFIDENCE", "MIN_ENTRY_PRICE", "MAX_HOURS_TO_RESOLUTION",
 )
 
 

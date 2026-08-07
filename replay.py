@@ -53,6 +53,7 @@ class ConfigOverride:
     min_model_agreement: float = None
     max_model_spread_std: float = None
     min_model_confidence: float = None
+    max_model_confidence: float = None
     min_entry_price: float = None
     max_entry_price: float = None
     min_depth_multiple: float = None
@@ -195,12 +196,13 @@ def replay_row(row, ov=None):
     else:
         slip_frac = sf if sf is not None else C.SLIPPAGE_FRACTION
     slip = slip_frac * no_px
-    no_edge = ((1.0 - prob["post_floor"]) - no_px) - (fee + slip)
+    max_conf = pick(ov.max_model_confidence, C.MAX_MODEL_CONFIDENCE)
+    p_side = min(1.0 - prob["post_floor"], max_conf)
+    no_edge = (p_side - no_px) - (fee + slip)
 
     thr = (pick(ov.narrow_bucket_edge_threshold, C.NARROW_BUCKET_EDGE_THRESHOLD)
            if row["is_narrow"] else pick(ov.edge_threshold, C.EDGE_THRESHOLD))
 
-    p_side = 1.0 - prob["post_floor"]
     fill = walked if walked is not None else no_px
     hours_res = _col(row, "hours_to_resolution") if _col(row, "hours_to_resolution") is not None else row.get("lead_time_hours")
 
@@ -214,6 +216,8 @@ def replay_row(row, ov=None):
          spread_sd <= pick(ov.max_model_spread_std, C.MAX_MODEL_SPREAD_STD)),
         ("model_confidence", p_side, pick(ov.min_model_confidence, C.MIN_MODEL_CONFIDENCE),
          p_side > pick(ov.min_model_confidence, C.MIN_MODEL_CONFIDENCE)),
+        ("max_model_confidence", p_side, pick(ov.max_model_confidence, C.MAX_MODEL_CONFIDENCE),
+         p_side <= pick(ov.max_model_confidence, C.MAX_MODEL_CONFIDENCE)),
         ("time_to_resolution", hours_res, pick(ov.max_hours_to_resolution, C.MAX_HOURS_TO_RESOLUTION),
          hours_res is None or hours_res < pick(ov.max_hours_to_resolution, C.MAX_HOURS_TO_RESOLUTION)),
         ("book_depth", _col(row, "usable_depth_usd"),

@@ -19,7 +19,7 @@ from config import (
     TAKER_FEE_RATE, SLIPPAGE_FRACTION, MAX_ENTRY_SPREAD_FRACTION,
     FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION, MAX_ENTRY_PRICE,
     MIN_DEPTH_MULTIPLE, REQUIRE_DEPTH_TO_TRADE,
-    MIN_MODEL_CONFIDENCE, MIN_ENTRY_PRICE, MAX_HOURS_TO_RESOLUTION,
+    MIN_MODEL_CONFIDENCE, MAX_MODEL_CONFIDENCE, MIN_ENTRY_PRICE, MAX_HOURS_TO_RESOLUTION,
     setting,
 )
 # FIXED_POSITION_SIZE / MAX_TOTAL_EXPOSURE_FRACTION are
@@ -314,7 +314,7 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
     lo, hi = opp.bucket_low, opp.bucket_high
     price = opp.no_price
     fill = walked_vwap if walked_vwap is not None else price
-    p_side = 1.0 - prob
+    p_side = min(1.0 - prob, MAX_MODEL_CONFIDENCE)
     payoff = ((1.0 - fill) / fill) if fill and fill > 0 else float("inf")
 
     # The independent-forecast veto sits LAST, after every gate derived from the
@@ -342,6 +342,10 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
          "passed": p_side > MIN_MODEL_CONFIDENCE,
          "detail": f"NO edge {no_edge:.3f} but model confidence too low "
                    f"({p_side:.3f} <= {MIN_MODEL_CONFIDENCE:.2f})"},
+        {"gate": "max_model_confidence", "observed": p_side, "threshold": MAX_MODEL_CONFIDENCE,
+         "passed": p_side <= MAX_MODEL_CONFIDENCE,
+         "detail": f"NO edge {no_edge:.3f} but model confidence too high "
+                   f"({p_side:.3f} > {MAX_MODEL_CONFIDENCE:.2f})"},
         {"gate": "time_to_resolution", "observed": opp.hours_to_resolution,
          "threshold": MAX_HOURS_TO_RESOLUTION,
          "passed": opp.hours_to_resolution < MAX_HOURS_TO_RESOLUTION,
@@ -496,7 +500,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         # Realised slippage as a fraction of the quote, so transaction_cost's
         # `fraction * price` shape is preserved and the fee term is untouched.
         no_slip_frac = max((walked_vwap - opp.no_price) / opp.no_price, 0.0)
-    no_edge = ((1.0 - prob) - opp.no_price) - transaction_cost(opp.no_price, no_slip_frac)
+    p_side = min(1.0 - prob, MAX_MODEL_CONFIDENCE)
+    no_edge = (p_side - opp.no_price) - transaction_cost(opp.no_price, no_slip_frac)
 
     agreement = engine_res["model_agreement"]
     # Weighted stdev since 2026-07-31, not max-min — see MAX_MODEL_SPREAD_STD.

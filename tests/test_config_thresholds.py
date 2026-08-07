@@ -97,6 +97,9 @@ class TestUnchangedGuardrails:
     def test_min_model_confidence_entry_filter(self, cfg):
         assert cfg.MIN_MODEL_CONFIDENCE == 0.60
 
+    def test_max_model_confidence_entry_filter(self, cfg):
+        assert cfg.MAX_MODEL_CONFIDENCE == 0.85
+
     def test_min_entry_price_entry_filter(self, cfg):
         assert cfg.MIN_ENTRY_PRICE == 0.65
 
