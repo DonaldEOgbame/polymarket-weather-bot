@@ -258,8 +258,7 @@ def replay_row(row, ov=None):
     if veto_state == "DATA" and veto_value is not None:
         disagreement = abs(veto_value - mean)
         gross_ok = disagreement <= dis_thr
-        band_ok = not S_independent_overlap(lo, hi, veto_value - band_f,
-                                            veto_value + band_f)
+        band_ok = True  # Independent bucket band veto disabled by owner decision 2026-08-07
     else:
         disagreement, veto_value = None, None
         gross_ok = band_ok = True

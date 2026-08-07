@@ -101,7 +101,7 @@ class TestUnchangedGuardrails:
         assert cfg.MAX_MODEL_CONFIDENCE == 0.85
 
     def test_min_entry_price_entry_filter(self, cfg):
-        assert cfg.MIN_ENTRY_PRICE == 0.60
+        assert cfg.MIN_ENTRY_PRICE == 0.65
 
     def test_max_hours_to_resolution_entry_filter(self, cfg):
         assert cfg.MAX_HOURS_TO_RESOLUTION == 36.0

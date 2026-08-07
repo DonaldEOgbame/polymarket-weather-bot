@@ -724,7 +724,7 @@ def evaluate_veto(city, target_date, is_high, ensemble_mean,
     row["veto_band"] = _bucket_overlaps_band(bucket_low, bucket_high,
                                              lo_band, hi_band)
 
-    row["vetoed"] = bool(armed and (row["veto_gross"] or row["veto_band"]))
+    row["vetoed"] = bool(armed and row["veto_gross"])
     return row
 
 
@@ -747,7 +747,7 @@ def veto_gate_rows(veto):
     suffix = "" if armed else " [gate auto-disabled by tripwire — logged only]"
 
     gross_fired = bool(veto.get("veto_gross") and armed)
-    band_fired = bool(veto.get("veto_band") and armed)
+    band_fired = False  # Independent bucket band veto disabled by owner decision 2026-08-07
 
     return [
         {"gate": "independent_gross_disagreement",

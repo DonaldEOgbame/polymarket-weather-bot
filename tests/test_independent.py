@@ -533,7 +533,7 @@ class TestBucketBand:
         # band = [68, 72]; bucket [71, 73] overlaps
         v = veto_for(monkeypatch, 70.0, 70.0, 71.0, 73.0)
         assert v["veto_band"] is True
-        assert v["vetoed"] is True
+        assert v["vetoed"] is False  # Bucket band veto disabled per user request
 
     def test_does_not_fire_when_merely_adjacent(self, monkeypatch, armed):
         # band = [68, 72]; bucket [72, 74] touches at one point only
