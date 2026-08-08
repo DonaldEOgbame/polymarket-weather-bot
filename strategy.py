@@ -567,6 +567,16 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     # failure is what gets reported, but a sole-failure claim needs all of them.
     if ARMED_REENTRY_ENABLED and signal is None:
         gate_fails = [g for g in no_gates if not g["passed"]]
+        floor_fail = next((g for g in gate_fails
+                           if g["gate"] == "min_entry_price"), None)
+        # The floor is the REPORTED reason (first in decision order) while
+        # later gates also failed: say why this didn't arm, or the dashboard
+        # shows two identical-looking floor skips of which only one armed.
+        if (floor_fail is not None and len(gate_fails) > 1
+                and skip_reason == floor_fail["detail"]):
+            others = ", ".join(g["gate"] for g in gate_fails
+                               if g["gate"] != "min_entry_price")
+            skip_reason = f"{skip_reason} — not armed (also failed: {others})"
         if len(gate_fails) == 1 and gate_fails[0]["gate"] == "min_entry_price":
             try:
                 from db import arm_signal

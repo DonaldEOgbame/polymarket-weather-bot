@@ -122,7 +122,8 @@ def _deep_book(price):
     }
 
 
-def _evaluate(monkeypatch, db, no_price, prob=0.22, market_id="0xdallas"):
+def _evaluate(monkeypatch, db, no_price, prob=0.22, market_id="0xdallas",
+              ensemble_mean=103.1):
     """Run evaluate_opportunity on a narrow (1°F) bucket with a deep book at
     `no_price` and the bucket probability pinned to `prob`."""
     import config as C
@@ -137,8 +138,8 @@ def _evaluate(monkeypatch, db, no_price, prob=0.22, market_id="0xdallas"):
         question="Will the highest temperature in Dallas be between 98-99F?",
     )
     engine_res = {
-        "ensemble_mean": 103.1, "ensemble_std": 1.2, "model_agreement": 1.0,
-        "model_spread": 0.43, "model_count": 4, "raw_weighted_mean": 103.1,
+        "ensemble_mean": ensemble_mean, "ensemble_std": 1.2, "model_agreement": 1.0,
+        "model_spread": 0.43, "model_count": 4, "raw_weighted_mean": ensemble_mean,
         "raw_models": {"ecmwf_ifs025": 103.2, "icon_global": 102.8,
                        "gfs_global": 103.8, "gem_global": 102.6},
     }
@@ -171,6 +172,21 @@ class TestArming:
         assert arm is not None
         assert arm["arm_fill"] == pytest.approx(0.55)
         assert arm["arm_edge"] > 0.12            # passed the FULL surcharge
+
+    def test_floor_plus_other_failures_says_why_it_did_not_arm(self, monkeypatch):
+        """The reported skip reason is the FIRST failing gate, which can be the
+        floor even when later gates also failed (Helsinki 71.2-72 on
+        2026-08-08: floor + forecast_margin + forecast_direction, dashboard
+        showed only the floor). No arm — and the reason must say so."""
+        db = _fresh_db(monkeypatch)
+        # mean 0.1°F above the padded bucket edge: margin gate fails, floor fails
+        res = _evaluate(monkeypatch, db, no_price=0.55, ensemble_mean=99.6)
+        assert res is None
+        assert db.get_active_arm("0xdallas") is None
+        logged = db.fetch_query(
+            "SELECT signal_type FROM signals ORDER BY id DESC LIMIT 1"
+        )[0]["signal_type"]
+        assert "not armed" in logged and "forecast_margin" in logged
 
     def test_insufficient_edge_does_not_arm(self, monkeypatch):
         """Two failing gates (edge + floor) is not 'qualified but for the
