@@ -11,7 +11,7 @@ A market that passes EVERY entry gate except the MIN_ENTRY_PRICE floor is
     confidence-revocation rail are what tell them apart.
 
 Numbers used throughout (defaults: TAKER_FEE_RATE=0.05, EDGE_THRESHOLD=0.08,
-NARROW_BUCKET_EDGE_THRESHOLD=0.12, MIN_ENTRY_PRICE=0.62), with bucket
+NARROW_BUCKET_EDGE_THRESHOLD=0.12, MIN_ENTRY_PRICE=0.65), with bucket
 probability pinned to 0.22 so p_side = 0.78:
 
     no_price 0.55 -> edge 0.218  (>= 0.12, fill below floor: ARMS)

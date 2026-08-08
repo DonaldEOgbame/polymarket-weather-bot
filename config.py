@@ -538,16 +538,19 @@ MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "1.00"))
 # --- StormEdge Entry Filters (Owner Decision 2026-08-06: Moderate Gate) ---
 # Four constraints for trade entry, all of which must pass:
 #  1. Model confidence: p_side > 0.60 (MIN_MODEL_CONFIDENCE = 0.60)
-#  2. Entry price floor: fill >= 0.62 (MIN_ENTRY_PRICE = 0.62; owner lowered
-#     from 0.65 on 2026-08-08 after a Dallas skip showed the 0.65 floor +
-#     narrow-bucket edge 0.12 left a ~1-cent qualifying window for 1°F buckets)
+#  2. Entry price floor: fill >= 0.65 (MIN_ENTRY_PRICE = 0.65). Briefly 0.62 on
+#     2026-08-08 after a Dallas skip showed the 0.65 floor + narrow-bucket edge
+#     0.12 left a ~1-cent qualifying window for 1°F buckets — reverted to 0.65
+#     the same day by owner decision: armed re-entry (below) is the mechanism
+#     for those cases now. The bot waits for the market to reach the floor
+#     instead of lowering the floor to meet the market.
 #  3. Entry price cap: fill <= 0.85 (MAX_ENTRY_PRICE = 0.85)
 #  4. Time to resolution: < 36h (MAX_HOURS_TO_RESOLUTION = 36)
 #
 # Documented per owner decision on 2026-08-07. All four gates must pass for entry.
 MIN_MODEL_CONFIDENCE = float(os.getenv("MIN_MODEL_CONFIDENCE", "0.60"))
 MAX_MODEL_CONFIDENCE = float(os.getenv("MAX_MODEL_CONFIDENCE", "0.85"))
-MIN_ENTRY_PRICE = float(os.getenv("MIN_ENTRY_PRICE", "0.62"))
+MIN_ENTRY_PRICE = float(os.getenv("MIN_ENTRY_PRICE", "0.65"))
 MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.85"))
 
 # --- Armed re-entry (Owner decision 2026-08-08) ---
