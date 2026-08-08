@@ -15,6 +15,7 @@ Three defects, one per section below:
   3. slippage was modelled as `spread_fraction * price`, which describes
      crossing the spread and not walking the book — 4x under on this fill
 """
+import math
 import os
 import sys
 from types import SimpleNamespace
@@ -182,17 +183,57 @@ class TestTheAustinTradeIsNowRefused:
 
 class TestTheLimitPriceBinds:
     def test_the_limit_never_exceeds_the_cap(self):
-        """`quote + 0.01` is the allowance; MAX_ENTRY_PRICE is policy and wins.
+        """`basis + 0.01` is the allowance; MAX_ENTRY_PRICE is policy and wins.
         Before the fix this line capped at 0.99 — the DISABLED sentinel — so the
         configured 0.80 could not constrain what was paid."""
         src = open(os.path.join(os.path.dirname(__file__), "..", "executor.py")).read()
-        assert "min(quoted_price + 0.01, MAX_ENTRY_PRICE)" in src
+        assert "MAX_ENTRY_PRICE)" in src.split("def execute_trade")[1].split("price = min(")[1]
         assert "min(signal_data[\"price\"] + 0.01, 0.99)" not in src
 
     @pytest.mark.parametrize("quote", [0.10, 0.50, 0.64, 0.79, 0.795, 0.85, 0.99])
     def test_computed_limit_is_capped_for_every_quote(self, quote):
         limit = round(min(quote + 0.01, C.MAX_ENTRY_PRICE), 2)
         assert limit <= C.MAX_ENTRY_PRICE + 1e-9
+
+
+class TestTheLimitPricesTheWalkedBook:
+    """The gates approve a trade at the WALKED ask VWAP; the order must be
+    willing to pay it. Wellington 2026-08-08: the mid was 0.66-0.695 while the
+    ask sat wider, so a mid+1c FAK filled nothing on three consecutive
+    qualifying cycles and the market ran to 0.87 without us."""
+
+    @staticmethod
+    def _limit(quoted_price, walked):
+        # Mirrors execute_trade's computation exactly.
+        limit_basis = max(quoted_price, walked) if walked is not None else quoted_price
+        return min(math.ceil(round((limit_basis + 0.01) * 100, 6)) / 100,
+                   C.MAX_ENTRY_PRICE)
+
+    def test_the_executor_prices_from_the_walked_vwap(self):
+        src = open(os.path.join(os.path.dirname(__file__), "..", "executor.py")).read()
+        entry = src.split("def execute_trade")[1]
+        assert 'signal_data.get("walked_vwap")' in entry
+
+    def test_strategy_hands_the_walked_vwap_to_the_executor(self):
+        src = open(os.path.join(os.path.dirname(__file__), "..", "strategy.py")).read()
+        assert '"walked_vwap": walked_vwap' in src
+
+    def test_wellington_now_clears_the_ask(self):
+        # Mid 0.66, walked ask 0.695: the old mid+1c limit (0.67) undercut the
+        # book; the new limit must reach what the gates accepted, plus drift.
+        assert self._limit(0.66, 0.695) == 0.71
+
+    def test_a_stale_low_walk_cannot_drag_the_limit_below_the_quote(self):
+        assert self._limit(0.66, 0.60) == 0.67
+
+    def test_no_walk_falls_back_to_the_quote(self):
+        assert self._limit(0.66, None) == 0.67
+
+    @pytest.mark.parametrize("quote,walked",
+                             [(0.66, 0.695), (0.79, 0.85), (0.50, None),
+                              (0.795, 0.799), (0.10, 0.99)])
+    def test_the_cap_still_wins_over_the_walked_basis(self, quote, walked):
+        assert self._limit(quote, walked) <= C.MAX_ENTRY_PRICE + 1e-9
 
     def test_the_order_is_a_limit_not_a_market_order(self):
         """A market order on a $0-$1 instrument has no floor on execution

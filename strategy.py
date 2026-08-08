@@ -801,6 +801,11 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         "token_id": target_token,
         "size_usdc": final_size,
         "price": target_price,
+        # The walked ask VWAP the gates approved. The executor MUST price its
+        # limit from this, not from `price` (the mid): every gate — the entry
+        # floor, the cap, the netted edge — was evaluated at this fill, and a
+        # limit derived from the mid refuses the very book the gates accepted.
+        "walked_vwap": walked_vwap,
         "model_prob": prob,
         "edge": edge_used,
         "model_count": model_count,

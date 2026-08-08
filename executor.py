@@ -1,5 +1,6 @@
 import json
 import logging
+import math
 import threading
 from datetime import datetime, timezone
 from py_clob_client_v2.client import ClobClient
@@ -1230,16 +1231,29 @@ class Executor:
 
         side = signal_data["side"]
         size = signal_data["size_usdc"]
-        # Paper assumes a fill at the quote + 1¢. Live crosses the real ask and
-        # records whatever ACTUALLY fills (price + size), so the ledger and the
-        # measured cost reflect real execution, not an assumption.
+        # Paper assumes a fill at the limit computed below (walked book + 1¢).
+        # Live crosses the real ask and records whatever ACTUALLY fills
+        # (price + size), so the ledger and the measured cost reflect real
+        # execution, not an assumption.
         quoted_price = signal_data["price"]
-        # The limit the order is actually sent with. `quote + 1c` is the intended
-        # slippage allowance; MAX_ENTRY_PRICE is policy and must win. Before
-        # 2026-08-06 this line capped at 0.99 — the DISABLED sentinel — so the
-        # configured 0.80 cap could not constrain what was paid, and a market
-        # order filled at 0.9818.
-        price = round(min(quoted_price + 0.01, MAX_ENTRY_PRICE), 2)
+        # The limit the order is actually sent with, from the WALKED ask VWAP
+        # the gates approved, not the mid. The quote is the book mid, and on a
+        # wide-spread book mid+1c sits below the best ask, so the FAK kills
+        # against the exact book the gates just accepted — Wellington
+        # 2026-08-08 qualified on three consecutive cycles (0.66-0.695, armed
+        # waiver) and filled nothing while NO ran to 0.87. max(quote, walked)
+        # guards the other staleness direction, +1c is the drift allowance
+        # between scan and submit, and MAX_ENTRY_PRICE is policy and must win.
+        # Before 2026-08-06 this line capped at 0.99 — the DISABLED sentinel —
+        # so the configured 0.80 cap could not constrain what was paid, and a
+        # market order filled at 0.9818.
+        walked = signal_data.get("walked_vwap")
+        limit_basis = max(quoted_price, walked) if walked is not None else quoted_price
+        # Ceil to the tick, not round(): a VWAP basis lands between ticks and
+        # banker's rounding (0.705 -> 0.70) hands the allowance straight back.
+        # A limit is a cap, so rounding it UP never overpays the book.
+        price = min(math.ceil(round((limit_basis + 0.01) * 100, 6)) / 100,
+                    MAX_ENTRY_PRICE)
         shares = round(size / price, 2)
         entry_fee = 0.0  # paper mode: fee is modeled inside transaction_cost, not the ledger
 
