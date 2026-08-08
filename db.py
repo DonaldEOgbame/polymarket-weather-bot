@@ -6,7 +6,7 @@ from config import STARTING_BANKROLL
 import config as _cfg
 
 DB_PATH = os.path.abspath(_cfg.DB_PATH)
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 
 # Module-level lock: serialises all write operations so concurrent bot thread
 # and Flask thread never interleave mid-transaction on the bankroll ledger.
@@ -627,6 +627,36 @@ def init_db():
             )
         ''')
 
+        # Armed re-entry signals (2026-08-08). A market that passed EVERY entry
+        # gate except the MIN_ENTRY_PRICE floor is recorded here; while the arm
+        # lives, strategy waives the narrow-bucket edge surcharge down to the
+        # base EDGE_THRESHOLD for that market (market movement toward the model
+        # is confirmation against the overconfidence the surcharge hedges).
+        # Rows are a decision input, not pure telemetry — but strategy fails
+        # OPEN (no waiver) if this table can't be read, so a schema problem
+        # here can only remove trades, never add or block them.
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS armed_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id TEXT NOT NULL,
+                city TEXT,
+                target_date TEXT,
+                bucket_low REAL,
+                bucket_high REAL,
+                side TEXT NOT NULL DEFAULT 'NO',
+                armed_at TEXT NOT NULL,
+                expires_at TEXT NOT NULL,
+                last_seen TEXT,
+                arm_fill REAL,
+                arm_edge REAL,
+                arm_p_side REAL,
+                arm_threshold REAL,
+                status TEXT NOT NULL DEFAULT 'armed',
+                resolved_at TEXT,
+                resolved_reason TEXT
+            )
+        ''')
+
 
         # Indexes — safe to re-run; IF NOT EXISTS is idempotent
         conn.execute("CREATE INDEX IF NOT EXISTS idx_bankroll_id ON bankroll(id DESC)")
@@ -639,6 +669,7 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_positions_market ON positions(market_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_log_ts ON scan_log(id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_markets_market_id ON markets(market_id)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_armed_market_status ON armed_signals(market_id, status)")
 
         conn.commit()
 
@@ -1179,6 +1210,73 @@ def purge_old_scan_log(keep_days=14):
     execute_query("DELETE FROM scan_log WHERE timestamp < ?", (_iso_cutoff(keep_days),))
 
 
+# --- Armed re-entry signals -------------------------------------------------
+
+def get_active_arm(market_id):
+    """Return the live arm row for a market, or None.
+
+    Lazily retires TTL-elapsed arms for this market first, so callers can never
+    see (and act on) an arm past its expiry — the expiry check and the read
+    would otherwise race the clock between cycles."""
+    now = datetime.now(timezone.utc).isoformat()
+    execute_query(
+        "UPDATE armed_signals SET status='expired', resolved_at=?, "
+        "resolved_reason='ttl elapsed' "
+        "WHERE market_id=? AND status='armed' AND expires_at <= ?",
+        (now, market_id, now),
+    )
+    rows = fetch_query(
+        "SELECT * FROM armed_signals WHERE market_id=? AND status='armed' "
+        "ORDER BY id DESC LIMIT 1", (market_id,),
+    )
+    return rows[0] if rows else None
+
+
+def arm_signal(market_id, city, target_date, bucket_low, bucket_high,
+               fill, edge, p_side, threshold, ttl_hours):
+    """Create an arm for a market, or refresh last_seen on the existing one.
+
+    expires_at is deliberately NOT extended on re-sighting: the TTL runs from
+    the FIRST time the market qualified-but-for-the-floor. A market hovering
+    below the floor for days is a market the crowd persistently disagrees with,
+    and the confirmation argument the waiver rests on weakens with age."""
+    now = datetime.now(timezone.utc)
+    existing = fetch_query(
+        "SELECT id FROM armed_signals WHERE market_id=? AND status='armed' "
+        "AND expires_at > ? LIMIT 1", (market_id, now.isoformat()),
+    )
+    if existing:
+        execute_query("UPDATE armed_signals SET last_seen=? WHERE id=?",
+                      (now.isoformat(), existing[0]["id"]))
+        return existing[0]["id"]
+    execute_query(
+        "INSERT INTO armed_signals (market_id, city, target_date, bucket_low, "
+        "bucket_high, side, armed_at, expires_at, last_seen, arm_fill, "
+        "arm_edge, arm_p_side, arm_threshold, status) "
+        "VALUES (?, ?, ?, ?, ?, 'NO', ?, ?, ?, ?, ?, ?, ?, 'armed')",
+        (market_id, city, target_date, bucket_low, bucket_high,
+         now.isoformat(), (now + timedelta(hours=ttl_hours)).isoformat(),
+         now.isoformat(), fill, edge, p_side, threshold),
+    )
+    return None
+
+
+def resolve_arm(market_id, status, reason):
+    """Retire a market's live arm ('entered' or 'expired'). No-op if none."""
+    execute_query(
+        "UPDATE armed_signals SET status=?, resolved_at=?, resolved_reason=? "
+        "WHERE market_id=? AND status='armed'",
+        (status, datetime.now(timezone.utc).isoformat(), reason, market_id),
+    )
+
+
+def purge_old_armed_signals(keep_days=30):
+    """Delete armed_signals rows older than keep_days. Tiny table, but every
+    unpurged table here has eventually filled a volume."""
+    execute_query("DELETE FROM armed_signals WHERE armed_at < ?",
+                  (_iso_cutoff(keep_days),))
+
+
 def add_notification(kind, message, severity="info"):
     """Append a notification row for the dashboard feed.
 
@@ -1360,96 +1458,6 @@ def log_replay_signal(row, gates):
     except Exception as e:
         logging.error(f"replay logging failed: {e}", exc_info=True)
         return None
-
-
-def independent_veto_stats(hours=24, veto_gates=("independent_gross_disagreement",
-                                                 "independent_bucket_band")):
-    """Rolling-window fire rate for the independent veto, plus city concentration.
-
-    Returns {window_hours, considered, fired, fire_rate, by_city, top_city,
-    top_city_share}.
-
-    THE DENOMINATOR IS THE WHOLE POINT, so it is defined here rather than at the
-    call site. `considered` counts signals that passed EVERY OTHER GATE and for
-    which the provider actually returned DATA — real trade candidates that the
-    veto was both the last thing standing between and an order, AND was in a
-    position to refuse.
-
-    Two exclusions, each of which would otherwise blind the tripwire:
-
-      * signals refused by another gate. Most evaluations fail the edge
-        threshold and never reach the veto; including them divides by thousands
-        and guarantees the tripwire never fires however badly the gate behaves.
-      * signals where the provider returned NO_DATA or INCONCLUSIVE. These can
-        NEVER veto, so counting them measures provider coverage rather than gate
-        behaviour. This matters concretely right now: with no DataHub key, 40 of
-        51 cities are permanently INCONCLUSIVE, and a denominator including them
-        would let the veto fire on literally every US signal — a total failure of
-        the eleven armed cities — while reporting a rate near 11/51 x 100% = 22%
-        and never tripping. The plan's §5b says "25% of gate-passing signals";
-        this reads that as "of the signals the gate actually acted on", because
-        the other reading cannot detect the failure the tripwire exists for.
-
-    `all_gate_passing` is returned alongside so the looser denominator is still
-    reportable, but the tripwire runs on `considered`.
-
-    That is computed from replay_gates rather than from a stored flag, because
-    the gate rows are written by the same list the decision consumes — so this
-    cannot drift from what actually gated the trade, which is the property the
-    structured gate table was added for.
-
-    `fired` counts the veto's CONCLUSION (veto_gross or veto_band), not its
-    effect, so the rate keeps being measurable after the tripwire has disabled
-    the gate. Otherwise disabling would drive the rate to zero and the gate
-    would re-arm itself into the same storm."""
-    from datetime import timedelta
-    since = (datetime.now(timezone.utc) - timedelta(hours=hours)).isoformat()
-    marks = ", ".join("?" * len(veto_gates))
-    rows = fetch_query(
-        f"""
-        SELECT s.city_key AS city_key,
-               s.independent_state AS state,
-               COALESCE(s.veto_gross, 0) AS vg,
-               COALESCE(s.veto_band, 0)  AS vb
-        FROM replay_signals s
-        WHERE s.timestamp >= ?
-          AND s.independent_state IS NOT NULL
-          AND NOT EXISTS (
-                SELECT 1 FROM replay_gates g
-                WHERE g.signal_id = s.id
-                  AND g.passed = 0
-                  AND g.gate NOT IN ({marks})
-          )
-        """,
-        (since, *veto_gates),
-    )
-
-    all_gate_passing = len(rows)
-    actionable = [r for r in rows if r["state"] == "DATA"]
-    considered = len(actionable)
-    by_city = {}
-    fired = 0
-    for r in actionable:
-        if r["vg"] or r["vb"]:
-            fired += 1
-            city = r["city_key"] or "unknown"
-            by_city[city] = by_city.get(city, 0) + 1
-
-    top_city, top_share = None, 0.0
-    if fired:
-        top_city, top_n = max(by_city.items(), key=lambda kv: kv[1])
-        top_share = top_n / fired
-
-    return {
-        "window_hours": hours,
-        "considered": considered,
-        "all_gate_passing": all_gate_passing,
-        "fired": fired,
-        "fire_rate": (fired / considered) if considered else 0.0,
-        "by_city": by_city,
-        "top_city": top_city,
-        "top_city_share": top_share,
-    }
 
 
 def flag_impossible_bucket(market_id, question, city, bucket_low, bucket_high,

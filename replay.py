@@ -60,12 +60,6 @@ class ConfigOverride:
     max_entry_spread_fraction: float = None
     max_hours_to_resolution: float = None
     forecast_margin_f: float = None
-    # Independent veto. Replayable because the PROVIDER'S ANSWER is stored on
-    # the row (independent_state / independent_value), so re-scoring a different
-    # threshold needs no second fetch — and could not get one anyway, since a
-    # forecast for a date already past is no longer retrievable.
-    disagreement_veto_f: float = None
-    plausible_band_f: float = None
 
 
 def load_rows(since=None, until=None, limit=None, city=None, fingerprint=None):
@@ -114,23 +108,13 @@ def _corrected_temps(row, ov):
 
 
 def _col(row, name, default=None):
-    """A column that may not exist on older rows.
-
-    Rows written before REPLAY_SCHEMA_VERSION 2 have no independent-veto
-    columns. Missing is NOT False here — it means the veto had no opinion
-    because it did not exist yet, and the reconstruction below treats it as
-    "cannot refuse" rather than "did not fire"."""
+    """A column that may not exist on older rows. Missing means the field
+    did not exist when the row was written, not that its value was False."""
     try:
         v = row[name]
     except (KeyError, IndexError):
         return default
     return default if v is None else v
-
-
-def S_independent_overlap(lo, hi, band_lo, band_hi):
-    """Bucket/band overlap, shared with the live gate so the two cannot drift."""
-    from independent import _bucket_overlaps_band
-    return _bucket_overlaps_band(lo, hi, band_lo, band_hi)
 
 
 def replay_row(row, ov=None):
@@ -239,33 +223,9 @@ def replay_row(row, ov=None):
         ("forecast_direction", raw_wmean, None,
          S.forecast_direction_agrees("NO", raw_wmean, lo, hi)),
     ]
-
-    # --- Independent veto ---------------------------------------------------
-    # Reconstructed from stored columns, like every other gate. ONLY a stored
-    # state of DATA can refuse: a row logged as NO_DATA or INCONCLUSIVE carries
-    # no temperature, and inventing one at replay time would reproduce, offline
-    # and permanently, the exact error this gate was built to avoid.
-    #
-    # `armed` is deliberately NOT reconstructed. Whether the tripwire had fired
-    # at that moment is a property of the process, not of the row, so the replay
-    # scores the gate's CONDITIONS — which is the question a replay is for
-    # ("would this threshold have refused this trade?"), not the question of
-    # what the running bot happened to be doing.
-    veto_state = _col(row, "independent_state")
-    veto_value = _col(row, "independent_value")
-    dis_thr = pick(ov.disagreement_veto_f, C.DISAGREEMENT_VETO_F)
-    band_f = pick(ov.plausible_band_f, C.PLAUSIBLE_BAND_F)
-    if veto_state == "DATA" and veto_value is not None:
-        disagreement = abs(veto_value - mean)
-        gross_ok = disagreement <= dis_thr
-        band_ok = True  # Independent bucket band veto disabled by owner decision 2026-08-07
-    else:
-        disagreement, veto_value = None, None
-        gross_ok = band_ok = True
-    gates += [
-        ("independent_gross_disagreement", disagreement, dis_thr, gross_ok),
-        ("independent_bucket_band", veto_value, band_f, band_ok),
-    ]
+    # The independent-veto gates were removed with the feature on 2026-08-08.
+    # Historical v2 rows keep their stored independent_* columns, but a replay
+    # scores the CURRENT gate set — a removed gate can refuse nothing.
     return {
         "id": row["id"], "market_id": row["market_id"], "city_key": row["city_key"],
         "target_date": row["target_date"], "is_high": row["is_high"],

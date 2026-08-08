@@ -538,15 +538,32 @@ MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "1.00"))
 # --- StormEdge Entry Filters (Owner Decision 2026-08-06: Moderate Gate) ---
 # Four constraints for trade entry, all of which must pass:
 #  1. Model confidence: p_side > 0.60 (MIN_MODEL_CONFIDENCE = 0.60)
-#  2. Entry price floor: fill >= 0.65 (MIN_ENTRY_PRICE = 0.65)
+#  2. Entry price floor: fill >= 0.62 (MIN_ENTRY_PRICE = 0.62; owner lowered
+#     from 0.65 on 2026-08-08 after a Dallas skip showed the 0.65 floor +
+#     narrow-bucket edge 0.12 left a ~1-cent qualifying window for 1°F buckets)
 #  3. Entry price cap: fill <= 0.85 (MAX_ENTRY_PRICE = 0.85)
 #  4. Time to resolution: < 36h (MAX_HOURS_TO_RESOLUTION = 36)
 #
 # Documented per owner decision on 2026-08-07. All four gates must pass for entry.
 MIN_MODEL_CONFIDENCE = float(os.getenv("MIN_MODEL_CONFIDENCE", "0.60"))
 MAX_MODEL_CONFIDENCE = float(os.getenv("MAX_MODEL_CONFIDENCE", "0.85"))
-MIN_ENTRY_PRICE = float(os.getenv("MIN_ENTRY_PRICE", "0.65"))
+MIN_ENTRY_PRICE = float(os.getenv("MIN_ENTRY_PRICE", "0.62"))
 MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.85"))
+
+# --- Armed re-entry (Owner decision 2026-08-08) ---
+# A market that passes EVERY entry gate except the MIN_ENTRY_PRICE floor is
+# "armed". While the arm lives, the narrow-bucket edge surcharge
+# (NARROW_BUCKET_EDGE_THRESHOLD) is waived down to the base EDGE_THRESHOLD for
+# that market: the price rising toward the model's side is market confirmation,
+# which is evidence against the model overconfidence the surcharge hedges.
+# The waiver never goes below EDGE_THRESHOLD — confirmation justifies dropping
+# the narrow-bucket safety margin, not entering bets every other trade would
+# refuse (an entry with a stale-arm edge and no current edge is chasing).
+# An arm dies on TTL, or the moment model confidence falls to
+# MIN_MODEL_CONFIDENCE (the model retracting its view revokes the waiver
+# permanently — a later recovery must re-qualify from scratch).
+ARMED_REENTRY_ENABLED = os.getenv("ARMED_REENTRY_ENABLED", "true").lower() == "true"
+ARMED_SIGNAL_TTL_HOURS = float(os.getenv("ARMED_SIGNAL_TTL_HOURS", "24"))
 
 # One trade per city per target day (user rule 2026-07-28). The live log shows repeat
 # same-city/same-day entries stacking correlated risk on one weather outcome: two Hong
@@ -571,9 +588,9 @@ ONE_TRADE_PER_CITY_DATE = os.getenv("ONE_TRADE_PER_CITY_DATE", "true").lower() =
 # $2 -> $6 stake change is precisely what made this bug reachable. A fixed
 # dollar threshold would have let it happen again at the next raise.
 MIN_DEPTH_MULTIPLE = float(os.getenv("MIN_DEPTH_MULTIPLE", "10.0"))
-# Unknown depth REFUSES the trade. Deliberately the opposite of the veto gate's
-# fail-open: an unreadable book is exactly the condition under which a taker
-# order does the most damage, so "we could not check" must not mean "proceed".
+# Unknown depth REFUSES the trade: an unreadable book is exactly the condition
+# under which a taker order does the most damage, so "we could not check" must
+# not mean "proceed".
 REQUIRE_DEPTH_TO_TRADE = os.getenv("REQUIRE_DEPTH_TO_TRADE", "true").lower() == "true"
 # Marketable LIMIT orders instead of market orders. On a $0-$1 instrument in a
 # thin book a market order has no floor on execution quality — it walks until
@@ -1099,87 +1116,6 @@ DATA_API_URL = "https://data-api.polymarket.com"
 EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN = int(os.getenv("EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN", "15"))
 
 
-# --- Independent forecast veto gate (see independent.py) -------------------
-# A second opinion from OUTSIDE the Open-Meteo ensemble, used only to REFUSE
-# trades. Never to adjust a probability: blending an unweighted external
-# forecast into ensemble_mean or sigma would make it a fifth model with no
-# measured bias correction and no place in the family caps.
-#
-# It is a blunder detector, not a forecast improvement. It catches wrong
-# station, stale run, misparsed bucket, correlated-ensemble collapse and
-# wrong-signed bias correction — the failures that live UPSTREAM of the
-# probability calculation and are therefore invisible to it. Every one of those
-# has happened in this project at least once, and each loses the full stake.
-#
-# ARMED AT DEPLOY — OWNER DECISION 2026-08-05, no shadow period.
-#
-# The trade-off, on record. Arming without a shadow period means the fire rate
-# is UNKNOWN at deploy. If a station is mismatched or a provider returns a
-# different window than expected, the gate fires constantly and trade flow
-# stops. That is the same class of failure as MAX_MODEL_SPREAD_STD, which now
-# rejects 78% of evaluations — a gate correct in intent and wrong in units.
-#
-# Two mitigations replace the shadow period, and both are required:
-#   (a) loose thresholds, below;
-#   (b) the auto-disable tripwire, INDEPENDENT_VETO_MAX_FIRE_RATE.
-# Neither is optional and neither should be removed without the other.
-INDEPENDENT_VETO_ENABLED = os.getenv("INDEPENDENT_VETO_ENABLED", "true").lower() == "true"
-
-# ~2x the measured MAE of 2.59°F, and deliberately loose. Sized to catch a wrong
-# station or a stale run, NOT a marginal forecast difference: a 5°F disagreement
-# between two competent forecasts at a 24-48h horizon is not a difference of
-# opinion, it is a bug. Do not tighten without evidence from the 14-day review.
-DISAGREEMENT_VETO_F = float(os.getenv("DISAGREEMENT_VETO_F", "5.0"))
-
-# Half-width of the band around the independent forecast in which the outcome
-# being bet AGAINST is considered live. If a NO bet's bucket overlaps this band,
-# the second opinion thinks the bucket can happen — refuse.
-PLAUSIBLE_BAND_F = float(os.getenv("PLAUSIBLE_BAND_F", "2.0"))
-
-# 6h. Ceiling of 51 cities x 3 refreshes = 153 calls/day, inside DataHub's 360.
-# At the 10-minute scan interval an uncached gate would be ~7,300 calls/day.
-INDEPENDENT_CACHE_TTL_SECONDS = int(os.getenv("INDEPENDENT_CACHE_TTL_SECONDS", "21600"))
-
-# Short, and NOT the 10s used for Open-Meteo. This runs inside trade evaluation
-# for a signal that is allowed to be missing, so the design is "answer fast or
-# don't answer" — a slow provider must not slow the book down.
-INDEPENDENT_TIMEOUT_SECONDS = float(os.getenv("INDEPENDENT_TIMEOUT_SECONDS", "3.0"))
-
-# Auto-disable tripwire, evaluated over a rolling 24h window. A gate meant to
-# catch RARE blunders that is firing on a quarter of the signals it sees is
-# itself the blunder — so it disables itself, logs at ERROR and notifies, rather
-# than continuing to stop the book on what is almost certainly an artefact.
-INDEPENDENT_VETO_MAX_FIRE_RATE = float(os.getenv("INDEPENDENT_VETO_MAX_FIRE_RATE", "0.25"))
-
-# Don't evaluate the tripwire on a handful of signals: 1 veto out of 2 is 50%
-# and means nothing. This is the denominator below which the rate is noise.
-INDEPENDENT_VETO_MIN_SAMPLE = int(os.getenv("INDEPENDENT_VETO_MIN_SAMPLE", "20"))
-
-# Share of all vetoes in a single city that triggers an ERROR naming it. That
-# is the station-mismatch signature, and it is exactly what this gate exists to
-# surface — the response is to fix the station, never to loosen the threshold.
-INDEPENDENT_VETO_CITY_CONCENTRATION = float(
-    os.getenv("INDEPENDENT_VETO_CITY_CONCENTRATION", "0.50"))
-
-# Circuit breaker: consecutive failures before a provider is left alone, and for
-# how long. Per provider, so DataHub being down does not blind the NWS cities.
-INDEPENDENT_BREAKER_FAILURES = int(os.getenv("INDEPENDENT_BREAKER_FAILURES", "5"))
-INDEPENDENT_BREAKER_COOLDOWN_SECONDS = int(
-    os.getenv("INDEPENDENT_BREAKER_COOLDOWN_SECONDS", "3600"))
-
-# api.weather.gov REQUIRES a User-Agent identifying the application with a
-# contact address, and rejects requests without one. DataHub does not require it
-# but is sent the same string.
-INDEPENDENT_USER_AGENT = os.getenv(
-    "INDEPENDENT_USER_AGENT",
-    "stormedge-weather-bot (frederickrowley7@gmail.com)")
-
-# UK Met Office DataHub key, for the 40 non-US cities. Free plan, 360 calls/day.
-# ABSENT IS NOT ZERO: with no key those cities resolve to INCONCLUSIVE, never to
-# NO_DATA, so an unset key can never be misread as "UKMO covers nothing there".
-METOFFICE_DATAHUB_KEY = os.getenv("METOFFICE_DATAHUB_KEY", "").strip()
-
-
 # --- Runtime settings store (hot-reload, no restart) ---
 # The managed money/risk knobs are read through setting() at their CALL SITES
 # (strategy sizing, executor exits/concurrency, the circuit breaker) instead of
@@ -1357,45 +1293,12 @@ def validate_env_ranges():
             f"MAX_HOURS_TO_RESOLUTION={MAX_HOURS_TO_RESOLUTION} is outside [1.0, 168.0]."
         )
 
-    # --- Independent veto gate ---
-    # The gate ships ARMED by owner decision. A stale env value must not be able
-    # to silently disarm it, or to tighten it into the MAX_MODEL_SPREAD_STD
-    # failure mode where a correct-in-intent gate rejects most of the book.
-    if not INDEPENDENT_VETO_ENABLED:
+    if not 1.0 <= ARMED_SIGNAL_TTL_HOURS <= MAX_HOURS_TO_RESOLUTION:
         problems.append(
-            "INDEPENDENT_VETO_ENABLED is false. The gate was armed at deploy by "
-            "owner decision 2026-08-05 and there is no shadow period, so a false "
-            "here is either a deliberate re-decision or a stale env value that "
-            "has silently removed the only check on wrong-station, stale-run and "
-            "misparsed-bucket blunders. Note the automatic tripwire disables the "
-            "gate at RUNTIME without touching this constant — if the gate turned "
-            "itself off, fix the cause, don't record it here."
-        )
-
-    if not 3.0 <= DISAGREEMENT_VETO_F <= 15.0:
-        problems.append(
-            f"DISAGREEMENT_VETO_F={DISAGREEMENT_VETO_F} is outside [3.0, 15.0]. "
-            f"It is sized at ~2x the measured MAE of 2.59°F to catch a wrong "
-            f"station or a stale run, not a marginal forecast difference. Below "
-            f"3.0 it starts refusing ordinary forecast disagreement and will "
-            f"stop the book; above 15.0 nothing short of a coordinate typo can "
-            f"trip it and the gate is decorative."
-        )
-
-    if not 0.5 <= PLAUSIBLE_BAND_F <= 6.0:
-        problems.append(
-            f"PLAUSIBLE_BAND_F={PLAUSIBLE_BAND_F} is outside [0.5, 6.0]. This is "
-            f"a half-width: 6.0 makes a 12°F-wide band live on every bucket and "
-            f"refuses nearly every NO bet, which is indistinguishable from "
-            f"switching the bot off."
-        )
-
-    if not 0.05 <= INDEPENDENT_VETO_MAX_FIRE_RATE <= 1.0:
-        problems.append(
-            f"INDEPENDENT_VETO_MAX_FIRE_RATE={INDEPENDENT_VETO_MAX_FIRE_RATE} is "
-            f"outside [0.05, 1.0]. This is the auto-disable tripwire that stands "
-            f"in for the shadow period the owner decision skipped; a value of 1.0 "
-            f"can never fire and removes that mitigation entirely."
+            f"ARMED_SIGNAL_TTL_HOURS={ARMED_SIGNAL_TTL_HOURS} is outside "
+            f"[1.0, MAX_HOURS_TO_RESOLUTION={MAX_HOURS_TO_RESOLUTION}]. An arm can "
+            f"only form inside the entry window (the time gate must have passed), "
+            f"so a TTL longer than the window is a waiver that outlives the market."
         )
 
     if MIN_DEPTH_MULTIPLE < 1.0:
@@ -1436,7 +1339,11 @@ def validate_env_ranges():
 #      independent_* gate rows. Rows at version 1 have no veto counterfactual —
 #      which is NOT the same as a veto that did not fire, and a replay must not
 #      read the NULLs as zeros.
-REPLAY_SCHEMA_VERSION = 2
+#   3  the independent-veto feature was REMOVED (2026-08-08): no independent_*
+#      columns are written and no independent_* gate rows exist. The columns
+#      remain in the table for v2 history; NULL on a v3 row means "feature
+#      absent", exactly as on v1 rows.
+REPLAY_SCHEMA_VERSION = 3
 
 # --- Forecast-pipeline identity -------------------------------------------
 # Bump whenever what the models are ASKED FOR changes: the endpoint, the
@@ -1508,17 +1415,13 @@ _FINGERPRINT_KEYS = (
     # Intraday conditioning moves probabilities materially.
     "ENABLE_INTRADAY_CONDITIONING", "INTRADAY_MIN_HOURS_ELAPSED",
     "INTRADAY_SIGMA_FLOOR_F",
-    # The independent veto changes what is BOUGHT (it refuses trades) and what
-    # is believed about a bucket (the band condition is a plausibility claim).
-    # The fingerprint changes on the deploy that arms it, which SPLITS SIGNAL
-    # HISTORY at that boundary — intended, and recorded in the report, because a
-    # calibration must never pool vetoed and un-vetoed regimes.
-    "INDEPENDENT_VETO_ENABLED", "DISAGREEMENT_VETO_F", "PLAUSIBLE_BAND_F",
-    "INDEPENDENT_VETO_MAX_FIRE_RATE",
     # Execution safety & entry filters. These change which trades are ENTERABLE
     # and what the edge is net of real execution cost.
     "MIN_DEPTH_MULTIPLE", "REQUIRE_DEPTH_TO_TRADE", "USE_MARKETABLE_LIMIT",
     "MIN_MODEL_CONFIDENCE", "MAX_MODEL_CONFIDENCE", "MIN_ENTRY_PRICE", "MAX_HOURS_TO_RESOLUTION",
+    # Armed re-entry changes which trades are enterable (it waives the
+    # narrow-bucket surcharge for confirmed markets), so it splits history.
+    "ARMED_REENTRY_ENABLED", "ARMED_SIGNAL_TTL_HOURS",
 )
 
 

@@ -20,6 +20,7 @@ from config import (
     FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION, MAX_ENTRY_PRICE,
     MIN_DEPTH_MULTIPLE, REQUIRE_DEPTH_TO_TRADE,
     MIN_MODEL_CONFIDENCE, MAX_MODEL_CONFIDENCE, MIN_ENTRY_PRICE, MAX_HOURS_TO_RESOLUTION,
+    ARMED_REENTRY_ENABLED, ARMED_SIGNAL_TTL_HOURS,
     setting,
 )
 # FIXED_POSITION_SIZE / MAX_TOTAL_EXPOSURE_FRACTION are
@@ -135,7 +136,7 @@ def forecast_direction_agrees(side, raw_weighted_mean, bucket_low, bucket_high):
 def _log_replay_row(*, timestamp, opp, engine_res, prob_stages, sigma_final,
                     bucket_width, is_narrow, no_edge, yes_edge, prob,
                     edge_threshold, gates, no_spread_frac, decision, skip_reason,
-                    ask_depth_usd, bid_depth_usd, veto=None,
+                    ask_depth_usd, bid_depth_usd,
                     usable_depth_usd=None, stake_usd=None, walked_vwap=None):
     """Write the replay row for one evaluated opportunity.
 
@@ -158,7 +159,7 @@ def _log_replay_row(*, timestamp, opp, engine_res, prob_stages, sigma_final,
             yes_edge=yes_edge, prob=prob, edge_threshold=edge_threshold,
             gates=gates, no_spread_frac=no_spread_frac, decision=decision,
             skip_reason=skip_reason, ask_depth_usd=ask_depth_usd,
-            bid_depth_usd=bid_depth_usd, veto=veto,
+            bid_depth_usd=bid_depth_usd,
             usable_depth_usd=usable_depth_usd, stake_usd=stake_usd,
             walked_vwap=walked_vwap,
         )
@@ -169,7 +170,7 @@ def _log_replay_row(*, timestamp, opp, engine_res, prob_stages, sigma_final,
 def _log_replay_row_inner(*, timestamp, opp, engine_res, prob_stages, sigma_final,
                           bucket_width, is_narrow, no_edge, yes_edge, prob,
                           edge_threshold, gates, no_spread_frac, decision,
-                          skip_reason, ask_depth_usd, bid_depth_usd, veto=None,
+                          skip_reason, ask_depth_usd, bid_depth_usd,
                           usable_depth_usd=None, stake_usd=None, walked_vwap=None):
     from db import log_replay_signal
     from config import config_fingerprint, REPLAY_SCHEMA_VERSION, paper_mode
@@ -238,24 +239,9 @@ def _log_replay_row_inner(*, timestamp, opp, engine_res, prob_stages, sigma_fina
         "skip_reason": skip_reason,
     }
 
-    # The independent-veto counterfactual, on every row regardless of outcome.
-    # Booleans go to int rather than being left as bools so a NULL keeps meaning
-    # "this row predates the veto" and can never be confused with False — the
-    # REPLAY_SCHEMA_VERSION 1 rows have no opinion, which is not the same as an
-    # opinion of "did not fire".
-    if veto:
-        row.update({
-            "independent_source": veto.get("independent_source"),
-            "independent_state": veto.get("independent_state"),
-            "independent_value": veto.get("independent_value"),
-            "independent_fetched_at": veto.get("independent_fetched_at"),
-            "independent_detail": veto.get("independent_detail"),
-            "disagreement_f": veto.get("disagreement_f"),
-            "veto_gross": int(bool(veto.get("veto_gross"))),
-            "veto_band": int(bool(veto.get("veto_band"))),
-            "vetoed": int(bool(veto.get("vetoed"))),
-        })
-
+    # No independent_* columns since REPLAY_SCHEMA_VERSION 3: the veto feature
+    # was removed 2026-08-08. The columns stay in the table for the v2 history;
+    # NULL there now means "feature absent", exactly as it does on v1 rows.
     log_replay_signal(row, gates)
 
 
@@ -269,11 +255,8 @@ def _depth_gate(usable_depth_usd, stake):
     $2 -> $6 change is exactly what made the 2026-08-06 Austin fill reachable,
     which is why this is a multiple and not a dollar figure.
 
-    Unknown depth REFUSES when REQUIRE_DEPTH_TO_TRADE. Deliberately the opposite
-    of the independent veto, which fails OPEN: a veto that cannot read its
-    inputs should not block a trade the primary model likes, but an entry that
-    cannot see the book it is about to cross has no idea what it will pay. The
-    two behaviours must not be copied into each other."""
+    Unknown depth REFUSES when REQUIRE_DEPTH_TO_TRADE: an entry that cannot
+    see the book it is about to cross has no idea what it will pay."""
     required = MIN_DEPTH_MULTIPLE * stake
     if usable_depth_usd is None:
         return {
@@ -294,7 +277,7 @@ def _depth_gate(usable_depth_usd, stake):
 
 
 def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
-                   no_spread_frac, veto=None, usable_depth_usd=None, stake=None,
+                   no_spread_frac, usable_depth_usd=None, stake=None,
                    prob=0.0, walked_vwap=None):
     """Every NO-side gate as a structured record, in decision order.
 
@@ -316,15 +299,6 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
     fill = walked_vwap if walked_vwap is not None else price
     p_side = min(1.0 - prob, MAX_MODEL_CONFIDENCE)
     payoff = ((1.0 - fill) / fill) if fill and fill > 0 else float("inf")
-
-    # The independent-forecast veto sits LAST, after every gate derived from the
-    # ensemble. Order is load-bearing here (the first failure is the reason
-    # reported), and last is right: a trade blocked by thin liquidity or a
-    # missing edge should say so, not blame a second opinion that never got to
-    # matter. It also keeps the veto's reason meaningful — when it IS the
-    # reported reason, everything else about the trade was fine, which is
-    # exactly the situation the gate was built for.
-    from independent import veto_gate_rows
 
     return [
         {"gate": "edge_threshold", "observed": no_edge, "threshold": edge_threshold,
@@ -388,7 +362,7 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
          "detail": f"NO edge {no_edge:.3f} but raw model forecast points the other way "
                    f"(bet requires models to predict missing the bucket, before "
                    f"resolution-source correction)"},
-    ] + veto_gate_rows(veto or {})
+    ]
 
 
 def calculate_kelly(edge, price):
@@ -508,6 +482,44 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     spread = engine_res["model_spread"]
     model_count = engine_res.get("model_count", MIN_MODEL_COUNT)
 
+    # --- Armed re-entry waiver (2026-08-08) ---
+    # If this market previously passed every gate except the entry-price floor
+    # (see the arming block after the decision below), the narrow-bucket edge
+    # surcharge is waived down to the base EDGE_THRESHOLD while the arm lives:
+    # the market rising toward the model's side is confirmation, which is
+    # evidence against the overconfidence the surcharge hedges. The waiver
+    # floor is the base threshold — never below it — because a market that
+    # cannot clear the bar every ordinary trade clears has no current edge,
+    # only a stale one, and entering on a remembered edge is chasing.
+    #
+    # The arm is revoked PERMANENTLY the moment model confidence falls to
+    # MIN_MODEL_CONFIDENCE: "price reached the floor" cannot distinguish
+    # market-confirmed-the-model from model-quietly-gave-up, and the edge
+    # check plus this revocation are what tell them apart. Fails OPEN (no
+    # waiver, behaviour identical to unarmed) on any DB error — the arm store
+    # must only ever be able to add back trades the floor removed.
+    armed = None
+    if ARMED_REENTRY_ENABLED:
+        try:
+            from db import get_active_arm, resolve_arm
+            armed = get_active_arm(opp.market_id)
+            if armed and p_side <= MIN_MODEL_CONFIDENCE:
+                resolve_arm(
+                    opp.market_id, "expired",
+                    f"model confidence {p_side:.3f} fell to the "
+                    f"{MIN_MODEL_CONFIDENCE:.2f} floor")
+                armed = None
+        except Exception as e:
+            logging.error(f"armed-signal lookup failed for {opp.market_id}: {e}")
+            armed = None
+    if armed and is_narrow and effective_edge_threshold > EDGE_THRESHOLD:
+        effective_edge_threshold = EDGE_THRESHOLD
+        logging.info(
+            f"ARMED_WAIVER | {opp.city} {opp.date} | narrow-bucket threshold "
+            f"{NARROW_BUCKET_EDGE_THRESHOLD} waived to base {EDGE_THRESHOLD} "
+            f"(armed {armed['armed_at']} at fill {armed['arm_fill']:.3f}, "
+            f"edge then {armed['arm_edge']:.3f})")
+
     signal = None
     kelly = 0.0
     side = None
@@ -528,20 +540,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     # so what gets LOGGED and what actually gated the trade cannot diverge —
     # which is what made "which gate cut this trade?" unanswerable from the old
     # free-text skip_reason during the 2026-07-31 reconciliation.
-    # The independent second opinion. Evaluated for EVERY opportunity, including
-    # ones an earlier gate has already refused and ones the tripwire has
-    # disarmed the veto for, because the counterfactual is the only way to
-    # answer "was the veto right?" once outcomes populate — and a counterfactual
-    # that only exists for trades nothing else blocked is a biased sample of the
-    # exact question being asked. Cheap: it is a cache read after the scan's
-    # prefetch, and it fails open on anything but a clean numeric answer.
-    from independent import evaluate_veto
-    veto = evaluate_veto(opp.city, opp.date, opp.is_high,
-                         engine_res.get("ensemble_mean"),
-                         opp.bucket_low, opp.bucket_high)
-
     no_gates = _no_side_gates(opp, engine_res, no_edge, effective_edge_threshold,
-                              agreement, spread, no_spread_frac, veto=veto,
+                              agreement, spread, no_spread_frac,
                               usable_depth_usd=usable_depth, stake=intended_stake,
                               prob=prob, walked_vwap=walked_vwap)
 
@@ -558,6 +558,29 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             target_price = opp.no_price
             target_token = opp.token_id_no
             edge_used = no_edge
+
+    # Arm (or refresh) when the price floor is the ONLY failing gate: every
+    # other gate — edge at the FULL surcharged threshold, agreement, spread,
+    # confidence, time, liquidity — passed, so the arm records
+    # "qualified, waiting on market confirmation". Checking the full gate list
+    # rather than the reported skip_reason is what makes this exact: the first
+    # failure is what gets reported, but a sole-failure claim needs all of them.
+    if ARMED_REENTRY_ENABLED and signal is None:
+        gate_fails = [g for g in no_gates if not g["passed"]]
+        if len(gate_fails) == 1 and gate_fails[0]["gate"] == "min_entry_price":
+            try:
+                from db import arm_signal
+                arm_fill = walked_vwap if walked_vwap is not None else opp.no_price
+                arm_signal(opp.market_id, opp.city, opp.date,
+                           opp.bucket_low, opp.bucket_high,
+                           arm_fill, no_edge, p_side, effective_edge_threshold,
+                           ARMED_SIGNAL_TTL_HOURS)
+                skip_reason = (
+                    f"{gate_fails[0]['detail']} — armed {ARMED_SIGNAL_TTL_HOURS:.0f}h: "
+                    f"enters if fill reaches {MIN_ENTRY_PRICE:.2f} with edge >= "
+                    f"{EDGE_THRESHOLD} (narrow-bucket surcharge waived)")
+            except Exception as e:
+                logging.error(f"arming failed for {opp.market_id}: {e}")
 
     if not signal and not skip_reason:
         narrow_note = f" [narrow bucket {bucket_width:.1f}°F, threshold={effective_edge_threshold:.0%}]" if is_narrow else ""
@@ -744,7 +767,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         no_edge=no_edge, yes_edge=yes_edge, prob=prob,
         edge_threshold=effective_edge_threshold, gates=no_gates,
         no_spread_frac=no_spread_frac, decision=signal, skip_reason=skip_reason,
-        ask_depth_usd=ask_depth_usd, bid_depth_usd=bid_depth_usd, veto=veto,
+        ask_depth_usd=ask_depth_usd, bid_depth_usd=bid_depth_usd,
         usable_depth_usd=usable_depth, stake_usd=intended_stake,
         walked_vwap=walked_vwap,
     )

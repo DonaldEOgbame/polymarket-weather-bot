@@ -122,23 +122,13 @@ class TestTheDepthGate:
         assert S._depth_gate(depth, stake=6.0)["passed"] is False   # needs $60
 
     def test_unknown_depth_refuses(self, monkeypatch):
-        """The opposite of the independent veto, which fails OPEN. An entry that
-        cannot see the book it is about to cross has no idea what it will pay."""
+        """An entry that cannot see the book it is about to cross has no idea
+        what it will pay."""
         monkeypatch.setattr(S, "REQUIRE_DEPTH_TO_TRADE", True)
         g = S._depth_gate(None, stake=6.0)
         assert g["passed"] is False
         assert g["observed"] is None
         assert "unreadable" in g["detail"]
-
-    def test_the_veto_still_fails_open(self):
-        """Asserted alongside the above so the two opposite behaviours stay
-        deliberate and neither is copied into the other."""
-        from independent import veto_gate_rows
-        rows = veto_gate_rows({"independent_source": "none",
-                               "independent_state": "NO_DATA",
-                               "independent_value": None})
-        assert all(r["passed"] for r in rows), (
-            "the independent veto must fail OPEN on missing data")
 
     def test_the_gate_records_both_numbers(self):
         """The requirement is a multiple, so depth alone cannot reconstruct it."""

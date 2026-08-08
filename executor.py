@@ -10,7 +10,7 @@ from py_clob_client_v2.clob_types import (
 from db import (execute_query, fetch_query, get_open_position, close_position_atomic,
                 open_position_atomic, reduce_position_atomic, get_position_by_id,
                 update_bankroll, get_current_bankroll, add_notification, current_mode,
-                log_position_trail)
+                log_position_trail, resolve_arm)
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
 from scanner import (get_realtime_price, get_realtime_price_status, get_market_resolution,
                      get_gamma_mid_price, get_orderbook_depth_usd, get_orderbook_top_size,
@@ -1279,6 +1279,14 @@ class Executor:
             shares=shares, entry_fee=entry_fee, risk_direction=direction,
         )
         send_trade_entry(opp.question, price, signal_data["model_prob"], signal_data["edge"], size)
+        # Consume any armed re-entry waiver AFTER the position books, not at
+        # signal time: a FAK that fills nothing must leave the arm alive so the
+        # waiver still applies on the next cycle. Best-effort — the position is
+        # already open, so an arm-store error must not unwind or alarm the trade.
+        try:
+            resolve_arm(opp.market_id, "entered", f"position opened @ {price:.3f}")
+        except Exception as e:
+            logging.error(f"failed to consume arm for {opp.market_id}: {e}")
 
     def get_live_prices(self):
         """Return {market_id: current_mid_price} for all open positions."""

@@ -101,7 +101,10 @@ class TestUnchangedGuardrails:
         assert cfg.MAX_MODEL_CONFIDENCE == 0.85
 
     def test_min_entry_price_entry_filter(self, cfg):
-        assert cfg.MIN_ENTRY_PRICE == 0.65
+        """0.62 since the owner decision of 2026-08-08 (was 0.65 from
+        2026-08-06; a Dallas skip showed 0.65 + the narrow-bucket surcharge
+        left a ~1-cent qualifying window on 1°F buckets)."""
+        assert cfg.MIN_ENTRY_PRICE == 0.62
 
     def test_max_hours_to_resolution_entry_filter(self, cfg):
         assert cfg.MAX_HOURS_TO_RESOLUTION == 36.0
