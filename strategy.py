@@ -575,10 +575,12 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                            opp.bucket_low, opp.bucket_high,
                            arm_fill, no_edge, p_side, effective_edge_threshold,
                            ARMED_SIGNAL_TTL_HOURS)
+                waiver_note = (" (narrow-bucket surcharge waived)" if is_narrow
+                               else "")
                 skip_reason = (
                     f"{gate_fails[0]['detail']} — armed {ARMED_SIGNAL_TTL_HOURS:.0f}h: "
                     f"enters if fill reaches {MIN_ENTRY_PRICE:.2f} with edge >= "
-                    f"{EDGE_THRESHOLD} (narrow-bucket surcharge waived)")
+                    f"{EDGE_THRESHOLD}{waiver_note}")
             except Exception as e:
                 logging.error(f"arming failed for {opp.market_id}: {e}")
 
