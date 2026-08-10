@@ -603,6 +603,12 @@ USE_MARKETABLE_LIMIT = os.getenv("USE_MARKETABLE_LIMIT", "true").lower() == "tru
 # °F — every other _F constant in this file is a temperature, so the suffix is
 # deliberately absent here.
 MAX_FILL_SLIPPAGE_ALERT = float(os.getenv("MAX_FILL_SLIPPAGE_ALERT", "0.03"))
+# How far above the decision-time walked VWAP the submit-time re-walk may sit
+# before the entry is abandoned for this cycle (price units). The decision's
+# edge was computed at the decision fill; every cent of drift comes straight
+# out of that edge, so past this the market has moved enough that the NEXT
+# cycle should re-decide at the new price instead of this one chasing it.
+MAX_SUBMIT_DRIFT = float(os.getenv("MAX_SUBMIT_DRIFT", "0.02"))
 
 # --- Correlated-exposure caps (see risk.py) ---
 # ONE_TRADE_PER_CITY_DATE stops two buckets of one city-day being counted as two

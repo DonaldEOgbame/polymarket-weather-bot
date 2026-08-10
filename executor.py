@@ -15,7 +15,7 @@ from db import (execute_query, fetch_query, get_open_position, close_position_at
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
 from scanner import (get_realtime_price, get_realtime_price_status, get_market_resolution,
                      get_gamma_mid_price, get_orderbook_depth_usd, get_orderbook_top_size,
-                     get_wallet_token_sizes, get_wallet_sells)
+                     get_wallet_token_sizes, get_wallet_sells, estimate_fill)
 from zoneinfo import ZoneInfo
 from utils import parse_utc_datetime
 from weather import get_signal_engine, get_bucket_probability, _norm_cdf
@@ -29,7 +29,7 @@ from config import (
     SUSTAINED_LOSS_MIN_DROP, REENTRY_COOLDOWN_HOURS,
     ENABLE_SUSTAINED_LOSS_GUARD, ENABLE_THESIS_BREAK_EXIT,
     POLYMARKET_FUNDER, POLYMARKET_SIG_TYPE, EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN,
-    ONE_TRADE_PER_CITY_DATE, MAX_ENTRY_PRICE,
+    ONE_TRADE_PER_CITY_DATE, MAX_ENTRY_PRICE, MIN_ENTRY_PRICE, MAX_SUBMIT_DRIFT,
     USE_MARKETABLE_LIMIT, MAX_FILL_SLIPPAGE_ALERT,
     setting, paper_mode,
 )
@@ -318,6 +318,37 @@ class _UnloggedObservation:
 
     def record_rule(self, *args, **kwargs):
         pass
+
+
+def submit_time_basis(quoted_price, decision_walked, fresh_fill,
+                      floor=None, drift=None):
+    """The limit-price basis for a live entry, priced off the submit-time book.
+
+    Returns (basis, None) to send, or (None, reason) to stand down this cycle.
+    Stand-downs are cheap: the signal re-fires next scan if it still holds, and
+    an armed market's arm is untouched (only a BOOKED position consumes it).
+
+    - Unreadable book: don't send. An order priced off nothing is a market
+      order with extra steps.
+    - Fresh fill below the entry floor: the market slipped back under the
+      confirmation bar between decision and submit — the floor gate would
+      refuse this exact fill, so the submit path must too.
+    - Fresh fill more than MAX_SUBMIT_DRIFT above the decision fill: the edge
+      was computed at the decision fill and drift comes straight out of it;
+      let the next cycle re-decide at the new price rather than chase.
+    """
+    floor = MIN_ENTRY_PRICE if floor is None else floor
+    drift = MAX_SUBMIT_DRIFT if drift is None else drift
+    if fresh_fill is None:
+        return None, "book unreadable at submit"
+    if fresh_fill < floor:
+        return None, (f"submit-time fill {fresh_fill:.3f} is below the "
+                      f"{floor:.2f} entry floor")
+    if decision_walked is not None and fresh_fill > decision_walked + drift:
+        return None, (f"submit-time fill {fresh_fill:.3f} drifted "
+                      f"{fresh_fill - decision_walked:.3f} above the decision "
+                      f"fill {decision_walked:.3f} (cap {drift:.2f})")
+    return max(quoted_price, fresh_fill), None
 
 
 class Executor:
@@ -1248,7 +1279,26 @@ class Executor:
         # so the configured 0.80 cap could not constrain what was paid, and a
         # market order filled at 0.9818.
         walked = signal_data.get("walked_vwap")
-        limit_basis = max(quoted_price, walked) if walked is not None else quoted_price
+        if not paper_mode():
+            # The decision's walked VWAP came from the book cache warmed at
+            # scan START — minutes old by the time this line runs, and maker
+            # bots re-quote in seconds. Dallas 2026-08-10 03:49-05:15 UTC:
+            # nine BUY_NO decisions priced off a stale 0.65 walk, and (per the
+            # exchange's FAK semantics) nine "no orders found to match"
+            # rejections as the sub-limit ask kept vanishing before submit.
+            # Walk the book AS IT IS NOW; the floor and drift checks below
+            # keep a moved market honest instead of chased.
+            fresh = estimate_fill(signal_data["token_id"], size, MAX_ENTRY_PRICE,
+                                  force=True)
+            fresh_fill = fresh.get("vwap") if fresh else None
+            basis, skip = submit_time_basis(quoted_price, walked, fresh_fill)
+            if basis is None:
+                logging.info(f"SUBMIT_REPRICE | {opp.city} {opp.date} | {skip} "
+                             f"— not sending this cycle (any arm stays alive)")
+                return
+            limit_basis = basis
+        else:
+            limit_basis = max(quoted_price, walked) if walked is not None else quoted_price
         # Ceil to the tick, not round(): a VWAP basis lands between ticks and
         # banker's rounding (0.705 -> 0.70) hands the allowance straight back.
         # A limit is a cap, so rounding it UP never overpays the book.

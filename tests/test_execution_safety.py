@@ -235,6 +235,55 @@ class TestTheLimitPricesTheWalkedBook:
     def test_the_cap_still_wins_over_the_walked_basis(self, quote, walked):
         assert self._limit(quote, walked) <= C.MAX_ENTRY_PRICE + 1e-9
 
+
+class TestSubmitTimeRepricing:
+    """A live order must be priced off the book at SUBMIT time, not the scan
+    cache. Dallas 2026-08-10 03:49-05:15 UTC: nine BUY_NO decisions priced off
+    a stale 0.65 walk produced nine FAK no-match rejections as maker bots
+    re-quoted under the minutes-old limit."""
+
+    def _basis(self, quoted, walked, fresh, floor=0.65, drift=0.02):
+        from executor import submit_time_basis
+        return submit_time_basis(quoted, walked, fresh, floor=floor, drift=drift)
+
+    def test_fresh_walk_replaces_the_stale_one(self):
+        basis, skip = self._basis(0.635, 0.65, 0.67)
+        assert skip is None and basis == 0.67
+
+    def test_unreadable_book_stands_down(self):
+        basis, skip = self._basis(0.635, 0.65, None)
+        assert basis is None and "unreadable" in skip
+
+    def test_fill_that_slipped_under_the_floor_stands_down(self):
+        # The floor gate would refuse this fill; the submit path must too,
+        # or repricing becomes a floor bypass.
+        basis, skip = self._basis(0.66, 0.65, 0.64)
+        assert basis is None and "floor" in skip
+
+    def test_runaway_drift_stands_down_instead_of_chasing(self):
+        basis, skip = self._basis(0.635, 0.65, 0.68)
+        assert basis is None and "drifted" in skip
+
+    def test_drift_exactly_at_the_cap_sends(self):
+        basis, skip = self._basis(0.635, 0.65, 0.67)
+        assert skip is None and basis == 0.67
+
+    def test_quote_still_floors_the_basis(self):
+        # Fresh walk below the quote (stale mid): the higher of the two wins.
+        basis, skip = self._basis(0.70, 0.69, 0.68)
+        assert skip is None and basis == 0.70
+
+    def test_live_path_forces_a_fresh_book_read(self):
+        src = open(os.path.join(os.path.dirname(__file__), "..", "executor.py")).read()
+        entry = src.split("def execute_trade")[1]
+        assert "estimate_fill" in entry and "force=True" in entry
+        assert "submit_time_basis" in entry
+
+    def test_estimate_fill_force_bypasses_the_cache(self):
+        src = open(os.path.join(os.path.dirname(__file__), "..", "scanner.py")).read()
+        fn = src.split("def estimate_fill")[1].split("\ndef ")[0]
+        assert "force=force" in fn
+
     def test_the_order_is_a_limit_not_a_market_order(self):
         """A market order on a $0-$1 instrument has no floor on execution
         quality — it walks until filled at whatever the book charges."""
