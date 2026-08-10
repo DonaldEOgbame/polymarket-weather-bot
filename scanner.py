@@ -5,9 +5,11 @@ import logging
 import math
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
+from zoneinfo import ZoneInfo
 from weather import (get_station_coords, STATIONS, is_tradeable_window,
                      settlement_window)
+from metar import STATION_ICAO
 from lattice import star_tag
 from db import execute_query, fetch_query, flag_impossible_bucket
 from config import (
@@ -200,19 +202,32 @@ def parse_target_date(description: str, end_date, question: str = ""):
     date of a T00:00Z close can fall on the wrong local day — which mis-dated the
     forecast for cities like Wellington (UTC+12) and flipped real trades.
 
-    Prefers the description's "on <D Mon 'YY>"; falls back to the UTC date of end_date.
+    Prefers matching "on <DATE>" in description or question; falls back to the UTC date of end_date.
     """
-    if description:
-        m = re.search(
-            r"\bon\s+(\d{1,2})\s+([A-Za-z]{3,9})\s+'?(\d{2,4})\b",
-            description,
-        )
+    for text in (description, question):
+        if not text:
+            continue
+        m = re.search(r"\bon\s+([A-Za-z]{3,9})\s+(\d{1,2})(?:\s+'?(\d{2,4}))?\b", text, re.IGNORECASE)
+        if not m:
+            m = re.search(r"\bon\s+(\d{1,2})\s+([A-Za-z]{3,9})(?:\s+'?(\d{2,4}))?\b", text, re.IGNORECASE)
         if m:
-            day = int(m.group(1))
-            mon = _MONTHS.get(m.group(2)[:3].lower())
-            yr = int(m.group(3))
-            if yr < 100:
-                yr += 2000
+            groups = m.groups()
+            if groups[0].isdigit():
+                day = int(groups[0])
+                mon_str = groups[1]
+            else:
+                mon_str = groups[0]
+                day = int(groups[1])
+            mon = _MONTHS.get(mon_str[:3].lower())
+            yr_str = groups[2]
+            if yr_str:
+                yr = int(yr_str)
+                if yr < 100:
+                    yr += 2000
+            elif end_date:
+                yr = end_date.year
+            else:
+                yr = datetime.now(timezone.utc).year
             if mon and 1 <= day <= 31:
                 try:
                     return datetime(yr, mon, day, tzinfo=timezone.utc).strftime("%Y-%m-%d")
@@ -222,6 +237,33 @@ def parse_target_date(description: str, end_date, question: str = ""):
     if end_date is not None:
         return end_date.strftime("%Y-%m-%d")
     return None
+
+
+def get_target_day_end_utc(target_date_str: str, city_name: str = None) -> datetime:
+    """Return the UTC datetime representing the end of the target day for a city.
+
+    For a given target_date (e.g. '2026-08-10'), the civil measurement day ends at
+    23:59:59 local time in the station's IANA timezone. Converted to UTC, this gives
+    the exact end of the target observation day.
+    """
+    try:
+        yr, mon, day = map(int, target_date_str.split("-"))
+    except Exception:
+        return datetime.now(timezone.utc) + timedelta(hours=24)
+
+    tz_name = None
+    if city_name and city_name in STATION_ICAO:
+        tz_name = STATION_ICAO[city_name][1]
+
+    if tz_name:
+        try:
+            local_end = datetime(yr, mon, day, 23, 59, 59, tzinfo=ZoneInfo(tz_name))
+            return local_end.astimezone(timezone.utc)
+        except Exception:
+            pass
+
+    base_utc = datetime(yr, mon, day, 23, 59, 59, tzinfo=timezone.utc)
+    return base_utc + timedelta(hours=6)
 
 
 def get_or_store_bucket(market_id: str, question: str, city: str, target_date: str):
@@ -878,9 +920,9 @@ def _discover_weather_markets(now: datetime) -> tuple[list, dict]:
                 try:
                     event_end = parse_utc_datetime(event_end_str)
                     hours_away = (event_end - now).total_seconds() / 3600.0
-                    # Skip events already expired or too far out — but keep paginating
-                    # because createdAt order doesn't guarantee endDate monotonicity.
-                    if hours_away < 0 or hours_away > MAX_HOURS_TO_RESOLUTION:
+                    # Allow active events whose listed endDate was within the last 36h
+                    # (covering US 00:00Z endDate conventions during target day trading & settlement)
+                    if hours_away < -36.0 or hours_away > MAX_HOURS_TO_RESOLUTION + 24.0:
                         continue
                 except Exception:
                     pass
@@ -889,22 +931,23 @@ def _discover_weather_markets(now: datetime) -> tuple[list, dict]:
             for m in markets:
                 if not m.get("active") or m.get("closed"):
                     continue
-                # Gamma's active=true filter lags: events (and their nested bucket
-                # markets) commonly sit active=true/closed=false for hours after
-                # their own endDate passes, before Polymarket flips the flags.
-                # The event-level date check above catches the event's own
-                # endDate, but each market can carry a different endDate. Verified
-                # live: 220/248 unique markets scanned over 2026-07-07→09 were
-                # already past endDate, sailing through discovery every cycle only
-                # to be dropped as "Already expired" in Phase 2 — burning nearly
-                # all of MAX_CLOB_CANDIDATES on dead markets and starving out the
-                # few live ones (root cause of the 2-day trade drought).
+                # US daily-high markets carry a 00:00Z endDate (e.g. 7pm Houston time
+                # the evening BEFORE target day), while remaining active & traded on the CLOB
+                # all day long. Check target_date end-of-day UTC to determine true expiry.
                 m_end_str = m.get("endDateIso") or m.get("endDate")
                 if m_end_str:
                     try:
                         m_end = parse_utc_datetime(m_end_str)
-                        m_hours_away = (m_end - now).total_seconds() / 3600.0
-                        if m_hours_away < 0 or m_hours_away > MAX_HOURS_TO_RESOLUTION:
+                        q_text = m.get("question", "")
+                        d_text = m.get("description", "")
+                        t_date = parse_target_date(d_text, m_end, q_text)
+                        ck, _ = get_station_coords(q_text)
+                        if t_date:
+                            t_end = get_target_day_end_utc(t_date, ck)
+                            m_hours_away = (t_end - now).total_seconds() / 3600.0
+                        else:
+                            m_hours_away = (m_end - now).total_seconds() / 3600.0
+                        if m_hours_away < -24.0 or m_hours_away > MAX_HOURS_TO_RESOLUTION + 24.0:
                             continue
                     except Exception:
                         pass
@@ -1136,6 +1179,23 @@ def scan_markets():
         city_key, _ = get_station_coords(question)
         lb, ub = parse_bucket(question)
 
+        end_date = None
+        if end_date_str:
+            try:
+                end_date = parse_utc_datetime(end_date_str)
+            except ValueError:
+                pass
+
+        target_date = parse_target_date(m.get("description", ""), end_date, question)
+
+        if target_date:
+            target_end_dt = get_target_day_end_utc(target_date, city_key)
+            hours_to_res = (target_end_dt - now).total_seconds() / 3600.0
+        elif end_date:
+            hours_to_res = (end_date - now).total_seconds() / 3600.0
+        else:
+            hours_to_res = None
+
         # Per-candidate detail only in verbose debug mode
         if DEBUG_MARKET_SCAN_VERBOSE:
             bucket_str = "UNKNOWN"
@@ -1197,6 +1257,7 @@ def scan_markets():
             msg += "Time:\n"
             msg += f"- Raw End: {end_date_str}\n"
             msg += f"- Parsed UTC End: {end_date.isoformat() if end_date else 'N/A'}\n"
+            msg += f"- Target Date: {target_date}\n"
             msg += f"- Current UTC: {now.isoformat()}\n"
             hr_str_inner = f"{hours_to_res:.1f}" if hours_to_res is not None else "N/A"
             msg += f"- Hours to resolution: {hr_str_inner}\n\n"
@@ -1225,13 +1286,13 @@ def scan_markets():
                 do_skip(f"Volume too low ({volume:.0f} < {MIN_VOLUME})", "volume_too_low")
                 continue
 
-            if not end_date:
+            if hours_to_res is None:
                 checks["not_expired"] = False
                 checks["within_72h"] = False
                 do_skip("Invalid or missing end date", "other")
                 continue
 
-            checks["not_expired"] = hours_to_res >= 0
+            checks["not_expired"] = hours_to_res >= -24.0
 
             if not checks["not_expired"]:
                 checks["within_72h"] = False

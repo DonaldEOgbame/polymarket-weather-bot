@@ -559,6 +559,29 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             target_token = opp.token_id_no
             edge_used = no_edge
 
+    # Full Armed Re-entry Waiver:
+    # When a market was previously qualified & ARMED (having passed 100% of all quality,
+    # agreement, and spread gates at low price), its price rising to MIN_ENTRY_PRICE is market
+    # confirmation of the model. Edge naturally decays as price moves up, so we waive
+    # the edge threshold check and execute BUY_NO as long as price is within [MIN_ENTRY_PRICE, MAX_ENTRY_PRICE]
+    # and model confidence remains valid.
+    fill_price = walked_vwap if walked_vwap is not None else opp.no_price
+    if armed and signal is None and fill_price >= MIN_ENTRY_PRICE and fill_price <= MAX_ENTRY_PRICE and p_side > MIN_MODEL_CONFIDENCE:
+        depth_ok = usable_depth is None or usable_depth >= (intended_stake * MIN_DEPTH_MULTIPLE)
+        time_ok = opp.hours_to_resolution < MAX_HOURS_TO_RESOLUTION
+        if depth_ok and time_ok:
+            signal = "BUY_NO"
+            side = "NO"
+            kelly = calculate_kelly(max(no_edge, EDGE_THRESHOLD), opp.no_price)
+            target_price = opp.no_price
+            target_token = opp.token_id_no
+            edge_used = max(no_edge, EDGE_THRESHOLD)
+            skip_reason = None
+            logging.info(
+                f"ARMED_FULL_WAIVER_EXECUTION | {opp.city} {opp.date} | "
+                f"Armed signal executed on price floor reach ({fill_price:.3f} >= {MIN_ENTRY_PRICE:.2f}) "
+                f"waiving decaying edge check (armed at {armed['arm_fill']:.3f} with edge {armed['arm_edge']:.3f})")
+
     # Arm (or refresh) when the price floor is the ONLY failing gate: every
     # other gate — edge at the FULL surcharged threshold, agreement, spread,
     # confidence, time, liquidity — passed, so the arm records

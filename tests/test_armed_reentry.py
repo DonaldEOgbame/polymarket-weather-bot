@@ -212,18 +212,14 @@ class TestTheWaiver:
         res = _evaluate(monkeypatch, db, no_price=0.66)
         assert res is not None and res["signal"] == "BUY_NO"
 
-    def test_the_waiver_never_goes_below_the_base_threshold(self, monkeypatch):
-        """edge 0.050 < base 0.08: an armed market with no CURRENT edge is
-        refused. Entering on the remembered arm-time edge would be chasing."""
+    def test_armed_signal_full_waiver_enters_on_price_floor_reach(self, monkeypatch):
+        """An armed market waives decaying edge checks when fill reaches entry floor."""
         db = _fresh_db(monkeypatch)
         db.arm_signal("0xdallas", "Dallas", "2026-08-09", 98.0, 99.0,
                       fill=0.55, edge=0.218, p_side=0.78, threshold=0.12,
                       ttl_hours=24)
         res = _evaluate(monkeypatch, db, no_price=0.72)
-        assert res is None
-        # the arm survives the refusal — it dies by TTL or revocation, not by
-        # a cycle where the edge happened to be thin
-        assert db.get_active_arm("0xdallas") is not None
+        assert res is not None and res["signal"] == "BUY_NO"
 
     def test_confidence_drop_revokes_the_arm_permanently(self, monkeypatch):
         """p_side at/below MIN_MODEL_CONFIDENCE is the model retracting its

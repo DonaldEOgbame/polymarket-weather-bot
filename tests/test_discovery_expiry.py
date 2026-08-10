@@ -24,7 +24,12 @@ def test_expired_submarket_dropped_even_if_event_still_open(monkeypatch):
     now = datetime(2026, 7, 9, 12, 0, tzinfo=timezone.utc)
     expired_market = {
         "active": True, "closed": False,
-        "endDateIso": (now - timedelta(hours=12)).isoformat(),
+        "endDateIso": (now - timedelta(hours=72)).isoformat(),
+        "question": "Will the highest temperature in Houston be between 94-95F on July 6?",
+    }
+    today_market = {
+        "active": True, "closed": False,
+        "endDateIso": (now - timedelta(hours=12)).isoformat(),  # 00:00Z on target date July 9
         "question": "Will the highest temperature in Houston be between 94-95F on July 9?",
     }
     live_market = {
@@ -35,7 +40,7 @@ def test_expired_submarket_dropped_even_if_event_still_open(monkeypatch):
     event = {
         "closed": False,
         "endDate": (now + timedelta(hours=24)).isoformat(),  # event-level end still within window
-        "markets": [expired_market, live_market],
+        "markets": [expired_market, today_market, live_market],
     }
 
     monkeypatch.setattr(scanner, "_fetch_events_page", lambda offset, limit, session: [event] if offset == 0 else [])
@@ -44,5 +49,6 @@ def test_expired_submarket_dropped_even_if_event_still_open(monkeypatch):
     weather_markets, stats = scanner._discover_weather_markets(now)
 
     assert live_market in weather_markets
+    assert today_market in weather_markets
     assert expired_market not in weather_markets
-    assert len(weather_markets) == 1
+    assert len(weather_markets) == 2
