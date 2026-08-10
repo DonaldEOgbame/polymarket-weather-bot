@@ -285,12 +285,25 @@ class TestSubmitTimeRepricing:
         assert "force=force" in fn
 
     def test_the_order_is_a_limit_not_a_market_order(self):
-        """A market order on a $0-$1 instrument has no floor on execution
-        quality — it walks until filled at whatever the book charges."""
+        """An UNCAPPED market order on a $0-$1 instrument has no floor on
+        execution quality — it walks until filled at whatever the book charges.
+        The entry order is a market order ONLY because the CLOB validates buy
+        maker amounts to exact cents (a (price, size) limit order from a
+        rounded share count 400s with "invalid amounts"); the binding
+        limit_price cap is what preserves the safety property."""
         src = open(os.path.join(os.path.dirname(__file__), "..", "executor.py")).read()
         entry = src.split("def execute_trade")[1]
         assert "_submit_marketable_limit" in entry
-        assert "OrderArgsV2" in src
+        fn = src.split("def _submit_marketable_limit")[1].split("\n    def ")[0]
+        assert "price=limit_price" in fn      # the cap travels with the order
+        assert "round(amount, 2)" in fn       # maker amount is exact cents
+
+    def test_the_buy_amount_is_exact_cents(self):
+        """15.38 sh x 0.65 = $9.9970 — three decimals — was rejected by the
+        exchange for every entry attempt 2026-08-06..10. The USDC amount must
+        go up whole-cent; the share count is the exchange's derivation."""
+        stake, limit = 10.0, 0.65
+        assert round(round(stake, 2) * 100, 6) == int(round(stake, 2) * 100)
 
     def test_partial_fills_are_preferred_to_walking(self):
         """$3.50 filled at an acceptable price beats $6.00 filled at any."""

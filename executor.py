@@ -1071,10 +1071,27 @@ class Executor:
             logging.warning(f"{side} size rounds to zero at limit {limit_price}; not sending")
             return None
         try:
-            signed = self.client.create_order(
-                OrderArgsV2(token_id=token_id, price=limit_price, size=shares,
-                            side=side)
-            )
+            if side == "BUY":
+                # A price-CAPPED market order, not a (price, size) limit order.
+                # The CLOB validates a buy's maker amount (USDC) to exact cents,
+                # and price*shares from a rounded share count almost never is:
+                # 15.38 sh x 0.65 = $9.9970 -> HTTP 400 "invalid amounts".
+                # Every marketable-limit entry from Phase 0.3 (2026-08-06) to
+                # 2026-08-10 was rejected this way — Wellington's 3 cycles and
+                # Dallas's 9 included. MarketOrderArgsV2.price is the worst
+                # acceptable fill (create_market_order uses it verbatim), so
+                # this keeps the binding cap while sending amount as exact
+                # cents, which always validates.
+                signed = self.client.create_market_order(
+                    MarketOrderArgsV2(token_id=token_id, amount=round(amount, 2),
+                                      side=side, price=limit_price,
+                                      order_type=OrderType.FAK)
+                )
+            else:
+                signed = self.client.create_order(
+                    OrderArgsV2(token_id=token_id, price=limit_price, size=shares,
+                                side=side)
+                )
             resp = self.client.post_order(signed, OrderType.FAK)
         except Exception as e:
             logging.error(
