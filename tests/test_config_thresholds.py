@@ -120,12 +120,24 @@ class TestUnchangedGuardrails:
         assert cfg.PAPER_MODE is True
         assert cfg.paper_mode() is True
 
-    def test_stop_loss_untouched(self, cfg):
-        """Frozen until the monitor trail covers >=10 closed positions incl.
-        >=2 losses. Re-tuning it now would be fitting to the same blind window
-        that made every previous stop-loss replay unanswerable."""
+    def test_the_percentage_stop_ships_disabled(self, cfg):
+        """The freeze this test used to enforce — "until the monitor trail covers
+        >=10 closed positions incl. >=2 losses" — was MET on 2026-08-11 at 10 closed
+        and 5 losses, and the answer was to retire the rule, not retune it.
+
+        Every threshold scored net-negative against those 10 resolutions (20%:
+        -$15.69, 25%: -$4.69, 30%: +$0.25, 35%: -$4.75, 40%: -$5.55, 45%: -$9.65,
+        50%: -$10.15), and optimistically so — the grid fills at the exact threshold
+        price while Qingdao really filled 5c through a gutted book. The threshold was
+        never the problem: winners drew down to -55%, -28%, -24% and losers to -42%,
+        -31%, with one loser never passing -10%, so no cut separates them.
+
+        STOP_LOSS_PCT itself is left at 0.50 deliberately. It is dead code while the
+        flag is off, and moving it would imply some level is defensible."""
         assert cfg.STOP_LOSS_PCT == 0.50
-        assert cfg.ENABLE_STOP_LOSS is True
+        assert cfg.ENABLE_STOP_LOSS is False
+        # What replaced it: observations decide, price only proposes.
+        assert cfg.ENABLE_PHYSICS_EXIT_GATE is True
 
     def test_sigma_and_bias_constants_untouched(self, cfg):
         """The 2026-07-31 direction-split recalibration, unchanged."""

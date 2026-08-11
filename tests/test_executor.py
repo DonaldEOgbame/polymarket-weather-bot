@@ -485,14 +485,58 @@ class TestIntradayMetarExit:
         
         exits_called = []
         monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits_called.append(reason))
-        
+
+        # Since 2026-08-11 a thesis-break IN A LOSS also answers to the physics gate,
+        # so the day has to agree the position is dead. That is the honest reading of
+        # this scenario: the min has fallen into the bucket AND the fall is spent, so
+        # nothing can carry it back out. The gate blocking the mid-transit version of
+        # the same reading is asserted in TestSustainedLossGuard.
+        monkeypatch.setattr(e, "_settlement_state", lambda p: {
+            "state": "LOCKED_LOSS", "observed": 64.0, "reason": "stubbed: fall spent"})
+        monkeypatch.setattr(ex, "estimate_sale", lambda tok, sh, force=False: {
+            "vwap": 0.19, "filled_shares": sh, "exhausted": False,
+            "best_bid": 0.19, "slippage_frac": 0.0})
+
         e._check_exit_for_position(pos)
-        
+
         # YES prob = 1.0 - CDF(63.5) = 1.0 - 0.1286 = 0.8714. NO prob = 0.1286.
         # Edge = 0.1286 - 0.19 = -0.0614 < 0.05. Price is below entry, so thesis broken.
         assert len(exits_called) == 1
         assert "Edge decayed" in exits_called[0]
         assert "thesis broken" in exits_called[0]
+
+    def test_a_losing_thesis_break_is_blocked_while_the_day_can_still_turn(self, monkeypatch):
+        """The Qingdao inversion applied to the thesis-break rule. Same collapsing
+        price, same broken forecast — but if the observations have not finished the
+        job, the position is not sold. _thesis_broken returns True on 'we are in a
+        real loss', which is precisely the trigger that cost $11.07."""
+        import executor as ex
+        monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", True)
+        monkeypatch.setitem(__import__("config")._RUNTIME, "ENABLE_STOP_LOSS", False)
+        e = self._exec()
+
+        today_str = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        pos = {"id": 1, "market_id": "0x1", "token_id": "tok_1", "side": "NO",
+               "entry_price": 0.62, "size_usdc": 2.0,
+               "entry_time": "2026-06-30T10:00:00+00:00", "target_date": today_str,
+               "city": "New York", "is_high": 0}
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.19, 0.19))
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [{
+            "id": 1, "model_prob": 0.22, "target_date": today_str,
+            "bucket_low": 64.0, "bucket_high": 65.0}])
+        monkeypatch.setattr(ex, "get_signal_engine", lambda *a, **k: {
+            "ensemble_mean": 66.0, "ensemble_std": 2.0, "is_high": False,
+            "city_key": "New York", "model_count": 4})
+        monkeypatch.setattr(ex, "get_bucket_probability", lambda *a, **k: 0.22)
+        monkeypatch.setattr(ex, "get_station", lambda c: ("KNYC", "America/New_York"))
+        monkeypatch.setattr(ex, "fetch_day_extremes", lambda *a: (17.8, 17.8))
+
+        exits_called = []
+        monkeypatch.setattr(e, "_close_position", lambda *a, **k: exits_called.append(a))
+        monkeypatch.setattr(e, "_settlement_state", lambda p: {
+            "state": "UNDECIDED", "observed": 64.0, "reason": "stubbed: fall left"})
+        e._check_exit_for_position(pos)
+        assert exits_called == [], f"must hold while undecided, got {exits_called}"
 
     def test_low_temp_market_holds_when_obs_outside_bucket(self, monkeypatch):
         import executor as ex
@@ -555,6 +599,28 @@ class TestSustainedLossGuard:
         e._loss_streak = {}
         return e
 
+    @staticmethod
+    def _open_the_physics_gate(e, monkeypatch, state="LOCKED_LOSS"):
+        """Stub the 2026-08-11 physics gate to `state`.
+
+        These tests are about the PRICE rules, and since Qingdao no price rule can
+        close a losing position on its own — the day's observations have to agree
+        it is dead. Stubbing LOCKED_LOSS isolates the rule under test; the gate's
+        own behaviour lives in tests/test_physics_exit_gate.py, and the blocking
+        direction is asserted end-to-end below."""
+        monkeypatch.setattr(
+            e, "_settlement_state",
+            lambda pos: {"state": state, "observed": 64.0, "reason": "stubbed"})
+
+    @staticmethod
+    def _deep_bid_book(monkeypatch):
+        """A bid side that can absorb the sale at the quote, so the exit-liquidity
+        guard is not the thing under test here."""
+        import executor as ex
+        monkeypatch.setattr(ex, "estimate_sale", lambda tok, sh, force=False: {
+            "vwap": 0.2299, "filled_shares": sh, "exhausted": False,
+            "best_bid": 0.23, "slippage_frac": 0.0})
+
     def _pos(self):
         return {
             "id": 99,
@@ -582,9 +648,11 @@ class TestSustainedLossGuard:
         monkeypatch.setitem(__import__("config")._RUNTIME, "STOP_LOSS_PCT", 0.60)
         monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
 
+        self._deep_bid_book(monkeypatch)
         for price, should_exit in [(0.23, True), (0.25, False)]:
             monkeypatch.setattr(ex, "get_realtime_price", lambda *a, _p=price: (_p, _p))
             e = self._exec()
+            self._open_the_physics_gate(e, monkeypatch)
             exits = []
             monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits.append(reason))
             e._check_exit_for_position(self._pos())
@@ -592,6 +660,51 @@ class TestSustainedLossGuard:
                 assert len(exits) == 1 and exits[0].startswith("Stop Loss"), exits
             else:
                 assert exits == [], exits
+
+    @pytest.mark.parametrize("state", ["LOCKED_WIN", "UNDECIDED", "UNKNOWN"])
+    def test_the_physics_gate_blocks_the_stop_loss_end_to_end(self, monkeypatch, state):
+        """Qingdao 2026-08-11, through the real exit path. Entry 0.60 -> 0.23 is
+        -61.7%, comfortably past a 0.60 threshold, and the stop is switched ON — yet
+        nothing may close while the day's observations have not killed the position.
+        UNDECIDED is the state Qingdao was actually stopped out in; LOCKED_WIN is
+        where it sat 42 minutes later; UNKNOWN is a dead station."""
+        import executor as ex
+        monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", False)
+        monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", False)
+        monkeypatch.setitem(__import__("config")._RUNTIME, "ENABLE_STOP_LOSS", True)
+        monkeypatch.setitem(__import__("config")._RUNTIME, "STOP_LOSS_PCT", 0.60)
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.23, 0.23))
+        self._deep_bid_book(monkeypatch)
+
+        e = self._exec()
+        self._open_the_physics_gate(e, monkeypatch, state)
+        exits = []
+        monkeypatch.setattr(e, "_close_position", lambda *a, **k: exits.append(a))
+        e._check_exit_for_position(self._pos())
+        assert exits == [], f"{state} must not permit a loss exit, got {exits}"
+
+    def test_a_thin_bid_book_stands_the_loss_exit_down(self, monkeypatch):
+        """Even with the physics agreeing the position is dead, the sale must not
+        sweep a book that cannot absorb it. Qingdao's fill landed 7.9% through its
+        own top bid; the arm stays live and the next cycle re-reads the book."""
+        import executor as ex
+        monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", False)
+        monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", False)
+        monkeypatch.setitem(__import__("config")._RUNTIME, "ENABLE_STOP_LOSS", True)
+        monkeypatch.setitem(__import__("config")._RUNTIME, "STOP_LOSS_PCT", 0.60)
+        monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
+        monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.23, 0.23))
+        monkeypatch.setattr(ex, "estimate_sale", lambda tok, sh, force=False: {
+            "vwap": 0.20, "filled_shares": sh, "exhausted": False,
+            "best_bid": 0.23, "slippage_frac": 0.13})
+
+        e = self._exec()
+        self._open_the_physics_gate(e, monkeypatch)
+        exits = []
+        monkeypatch.setattr(e, "_close_position", lambda *a, **k: exits.append(a))
+        e._check_exit_for_position(self._pos())
+        assert exits == [], f"a 13% walk must stand down, got {exits}"
 
     def _past_date_pos(self):
         p = self._pos()
@@ -611,18 +724,25 @@ class TestSustainedLossGuard:
         monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
 
         # entry 0.60, shares held = 2.0/0.60 = 3.333
-        # bid 0.20 => -66.7% (past the stop). Need depth >= 3.333*0.20 = $0.67.
+        # bid 0.20 => -66.7%. Need depth >= 3.333*0.20 = $0.67.
+        #
+        # The -33% case no longer turns on a percentage: since 2026-08-11 this path
+        # is gated on the physics saying LOCKED_LOSS, and past the target date the
+        # day is over so that verdict is deterministic. It is expressed here by
+        # stubbing the gate, which is what "the temperature already decided" means.
         cases = [
-            (0.20, 5.00, True,  "real bid with depth -> salvage"),
-            (0.20, 0.10, False, "real bid but no depth -> phantom, must hold"),
-            (0.20, None, False, "depth unreadable -> fail closed, must hold"),
-            (0.40, 5.00, False, "-33% only, above the stop -> must hold"),
-            (0.00, 5.00, False, "no bid at all -> must hold"),
+            (0.20, 5.00, "LOCKED_LOSS", True,  "real bid with depth -> salvage"),
+            (0.20, 0.10, "LOCKED_LOSS", False, "real bid but no depth -> phantom, must hold"),
+            (0.20, None, "LOCKED_LOSS", False, "depth unreadable -> fail closed, must hold"),
+            (0.20, 5.00, "LOCKED_WIN",  False, "settles at $1 -> must never sell"),
+            (0.20, 5.00, "UNKNOWN",     False, "no observation -> fail closed, must hold"),
+            (0.00, 5.00, "LOCKED_LOSS", False, "no bid at all -> must hold"),
         ]
-        for bid, depth, should_exit, label in cases:
+        for bid, depth, state, should_exit, label in cases:
             monkeypatch.setattr(ex, "get_realtime_price", lambda *a, _b=bid: (_b, _b))
             monkeypatch.setattr(ex, "get_orderbook_depth_usd", lambda *a, _d=depth: (None, _d))
             e = self._exec()
+            self._open_the_physics_gate(e, monkeypatch, state)
             exits = []
             monkeypatch.setattr(e, "_close_position",
                                 lambda pos, pnl_dollars=None, exit_reason=None: exits.append(exit_reason))
@@ -632,21 +752,29 @@ class TestSustainedLossGuard:
             else:
                 assert exits == [], f"{label}: {exits}"
 
-    def test_post_date_salvage_respects_disabled_stop_loss(self, monkeypatch):
-        """With the stop loss off, the post-date gate holds everything as before."""
+    def test_post_date_salvage_has_its_own_switch(self, monkeypatch):
+        """Split from ENABLE_STOP_LOSS on 2026-08-11. The salvage is a different
+        animal — it fires only once the temperature is realized and sweeps cents off
+        a position already heading to $0 — so turning off the harmful mid-day stop
+        must NOT disable it, and its own flag must still hold everything."""
         import executor as ex
         monkeypatch.setattr(ex, "ENABLE_SUSTAINED_LOSS_GUARD", False)
         monkeypatch.setattr(ex, "ENABLE_THESIS_BREAK_EXIT", False)
+        # The mid-day stop off, the salvage on: the salvage must still fire.
         monkeypatch.setitem(__import__("config")._RUNTIME, "ENABLE_STOP_LOSS", False)
         monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
         monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.05, 0.05))
         monkeypatch.setattr(ex, "get_orderbook_depth_usd", lambda *a: (None, 50.0))
-        e = self._exec()
-        exits = []
-        monkeypatch.setattr(e, "_close_position",
-                            lambda pos, pnl_dollars=None, exit_reason=None: exits.append(exit_reason))
-        e._check_exit_for_position(self._past_date_pos())
-        assert exits == []
+
+        for salvage_on, expect_exit in [(True, True), (False, False)]:
+            monkeypatch.setattr(ex, "ENABLE_POST_DATE_SALVAGE", salvage_on)
+            e = self._exec()
+            self._open_the_physics_gate(e, monkeypatch)
+            exits = []
+            monkeypatch.setattr(e, "_close_position",
+                                lambda pos, pnl_dollars=None, exit_reason=None: exits.append(exit_reason))
+            e._check_exit_for_position(self._past_date_pos())
+            assert bool(exits) is expect_exit, f"salvage={salvage_on}: {exits}"
 
     def test_fires_after_threshold_polls(self, monkeypatch):
         import executor as ex
@@ -656,7 +784,9 @@ class TestSustainedLossGuard:
         monkeypatch.setattr(ex, "get_realtime_price", lambda *a: (0.40, 0.40))
         monkeypatch.setattr(ex, "fetch_query", lambda *a, **k: [])
 
+        self._deep_bid_book(monkeypatch)
         e = self._exec()
+        self._open_the_physics_gate(e, monkeypatch)
         pos = self._pos()
         exits = []
         monkeypatch.setattr(e, "_close_position", lambda pos, pnl, reason: exits.append(reason))

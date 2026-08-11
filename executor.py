@@ -15,7 +15,8 @@ from db import (execute_query, fetch_query, get_open_position, close_position_at
 from alerts import send_trade_entry, send_trade_exit, send_model_alert
 from scanner import (get_realtime_price, get_realtime_price_status, get_market_resolution,
                      get_gamma_mid_price, get_orderbook_depth_usd, get_orderbook_top_size,
-                     get_wallet_token_sizes, get_wallet_sells, estimate_fill)
+                     get_wallet_token_sizes, get_wallet_sells, estimate_fill,
+                     estimate_sale)
 from zoneinfo import ZoneInfo
 from utils import parse_utc_datetime
 from weather import get_signal_engine, get_bucket_probability, _norm_cdf
@@ -31,8 +32,11 @@ from config import (
     POLYMARKET_FUNDER, POLYMARKET_SIG_TYPE, EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN,
     ONE_TRADE_PER_CITY_DATE, MAX_ENTRY_PRICE, MIN_ENTRY_PRICE, MAX_SUBMIT_DRIFT,
     USE_MARKETABLE_LIMIT, MAX_FILL_SLIPPAGE_ALERT,
+    ENABLE_PHYSICS_EXIT_GATE, EXIT_MAX_SLIPPAGE_FRAC,
+    ENABLE_POST_DATE_SALVAGE, SALVAGE_MIN_DEPTH_MULTIPLE,
     setting, paper_mode,
 )
+from intraday import settlement_state, LOCKED_LOSS, UNKNOWN
 # MAX_CONCURRENT_POSITIONS / ENABLE_STOP_LOSS / STOP_LOSS_PCT / TAKE_PROFIT_PRICE
 # are dashboard-tunable at runtime and read via config.setting() at each
 # decision point — a settings change applies to the next entry/exit check
@@ -1483,6 +1487,107 @@ class Executor:
             return False
         return target_date < now.strftime("%Y-%m-%d")
 
+    def _settlement_state(self, pos):
+        """Where the day's observations have already put this position.
+
+        The bucket lives in `signals`, never in `positions`, so this costs one
+        indexed lookup plus one observation fetch per position per cycle — both
+        already paid for by the edge-decay path further down. It runs EARLIER
+        than that path on purpose: the old ordering let a price rule decide the
+        position before the physics was even consulted.
+
+        Fails CLOSED. Every error path returns UNKNOWN, which blocks loss exits
+        rather than permitting them.
+        """
+        if not ENABLE_PHYSICS_EXIT_GATE:
+            return {"state": UNKNOWN, "observed": None, "reason": "gate disabled"}
+        try:
+            rows = fetch_query(
+                "SELECT bucket_low, bucket_high FROM signals WHERE market_id=? "
+                "ORDER BY id DESC LIMIT 1", (pos["market_id"],))
+            if not rows:
+                return {"state": UNKNOWN, "observed": None,
+                        "reason": "no signal row — bucket unknown"}
+            return settlement_state(
+                pos["city"], pos["target_date"], bool(pos["is_high"]),
+                rows[0]["bucket_low"], rows[0]["bucket_high"], pos["side"])
+        except Exception as e:
+            logging.warning(
+                f"settlement_state unavailable for {pos['market_id']} "
+                f"({pos['city']} {pos.get('target_date')}): {e}")
+            return {"state": UNKNOWN, "observed": None, "reason": f"error: {e}"}
+
+    def _loss_exit_allowed(self, pos, st, obs):
+        """May we sell this position at a loss right now?
+
+        Only when the observations say it is already dead (LOCKED_LOSS). The
+        three refusals are each deliberate:
+
+          LOCKED_WIN  the position settles at $1. Selling is pure destruction —
+                      this is the Qingdao case once its max cleared 30°C.
+          UNDECIDED   the outcome is genuinely open, and if the observed extreme
+                      is sitting inside the bucket the book is pricing the
+                      transit rather than the outcome. This is the state Qingdao
+                      was stopped out in.
+          UNKNOWN     no observation, no station, day not started, or the lookup
+                      threw. Holding risks the stake, which was a known and
+                      accepted number at entry; selling blind into a book that
+                      may be dislocated risks far more in regret.
+
+        Gains are unaffected — take-profit never consults this.
+
+        Call this only where a loss exit is actually being attempted: the state
+        itself is recorded on the trail every cycle regardless (see
+        _check_exit_for_position), so the WARNING here marks the genuinely
+        interesting event — a price rule wanted out and the physics overruled it.
+        """
+        state = st.get("state", UNKNOWN)
+        if state == LOCKED_LOSS:
+            return True
+        logging.warning(
+            f"PHYSICS GATE BLOCKED a loss exit | {pos['city']} "
+            f"{pos.get('target_date')} {pos['side']} | {state} | {st.get('reason')}")
+        return False
+
+    def _exit_liquidity_ok(self, token_id, shares, obs=None):
+        """Whether the bid side can absorb `shares` near the quote we measured on.
+
+        Walks the live bid book (force=True — the Qingdao book lost 91% of its bid
+        depth over the life of that position, and depth read minutes before a
+        submit is not depth) and requires both:
+          * the full size fills — no partial sweep of a collapsing book, and
+          * the average fill lands within EXIT_MAX_SLIPPAGE_FRAC of the top bid.
+
+        Slippage, not total depth, because total depth is what made Qingdao look
+        safe: $109 resting against a $12.73 sale. See scanner._walk_bids.
+
+        Returns (ok, detail). An unreadable book is NOT ok — same fail-closed rule
+        as the physics gate.
+        """
+        est = estimate_sale(token_id, shares, force=True)
+        if est is None or est.get("vwap") is None:
+            detail = "bid book unreadable"
+            ok = False
+            slip = None
+        else:
+            slip = est.get("slippage_frac")
+            ok = (not est["exhausted"] and slip is not None
+                  and slip <= EXIT_MAX_SLIPPAGE_FRAC)
+            detail = (
+                f"{shares:.2f}sh -> vwap ${est['vwap']:.4f} vs top bid "
+                f"${est['best_bid']:.3f}, slippage "
+                f"{f'{slip:.2%}' if slip is not None else 'n/a'} vs cap "
+                f"{EXIT_MAX_SLIPPAGE_FRAC:.2%}"
+                + (f", BOOK EXHAUSTED (only {est['filled_shares']:.2f}sh fillable)"
+                   if est["exhausted"] else ""))
+        if obs is not None:
+            obs.record_rule("exit_liquidity", basis="bid", observed=slip,
+                            threshold=EXIT_MAX_SLIPPAGE_FRAC, fired=not ok,
+                            detail=detail)
+        if not ok:
+            logging.warning(f"EXIT LIQUIDITY BLOCK | {token_id[:12]}… | {detail}")
+        return ok, detail
+
     def _check_exit_for_position(self, pos, obs=None):
         obs = obs if obs is not None else _UnloggedObservation()
         entry_time = datetime.fromisoformat(pos["entry_time"])
@@ -1511,6 +1616,20 @@ class Executor:
         if hold_minutes < 30:
             return
 
+        # Resolved ONCE per position per cycle and consulted by every loss exit
+        # below. Computed here — ahead of the target-date branch and the price
+        # reads — because the ordering is the whole point: until 2026-08-11 a
+        # percentage stop measured on the mid could close a position before
+        # anything looked at what the day had actually done.
+        st = self._settlement_state(pos)
+        # Recorded every cycle, fired or not. The question the trail exists for is
+        # "would a different rule have behaved differently here", and that needs
+        # the observed state on the quiet cycles too.
+        obs.record_rule("physics_gate", basis="observation",
+                        enabled=ENABLE_PHYSICS_EXIT_GATE,
+                        fired=st.get("state") == LOCKED_LOSS,
+                        detail=f"{st.get('state')}: {st.get('reason')}")
+
         # Once the target date has passed the temperature is already realized and
         # the market is converging to $1/$0. Do NOT run the paper edge-decay /
         # stop-loss market-exit path here: on a resolving book the only resting
@@ -1529,7 +1648,14 @@ class Executor:
             # Measured 2026-07-26 on the three live collapses: by the time the target
             # date has passed the bid is $0.001-0.02, so this recovers cents, not
             # dollars. The real value is not leaving a fillable bid on the table.
-            if setting("ENABLE_STOP_LOSS"):
+            #
+            # Split off ENABLE_STOP_LOSS 2026-08-11: this is not the mid-day stop
+            # and must survive that knob being turned off. By this point the local
+            # day is over, so settlement_state reads the FINAL extreme and answers
+            # LOCKED_WIN or LOCKED_LOSS deterministically — which means the physics
+            # gate below is what now decides this, and it can only ever fire on a
+            # position genuinely heading to $0.
+            if ENABLE_POST_DATE_SALVAGE:
                 sl_ask, sl_bid = get_realtime_price(pos["token_id"])
                 entry = pos["entry_price"]
                 # Deliberately bid-based, and the ONLY bid-based stop in the
@@ -1541,17 +1667,27 @@ class Executor:
                                 threshold=-setting("STOP_LOSS_PCT"),
                                 fired=sl_frac is not None and sl_frac <= -setting("STOP_LOSS_PCT"),
                                 detail="post-target-date salvage; needs confirmed bid depth")
-                if sl_bid > 0 and entry > 0 and (sl_bid - entry) / entry <= -setting("STOP_LOSS_PCT"):
+                # The percentage that used to trigger this is gone: with the day
+                # over, LOCKED_LOSS already means "settles at $0", so any real bid
+                # beats holding and no threshold adds information. The gate is
+                # strictly tighter than the old -50% test — it cannot fire on a
+                # position that settlement will pay out.
+                if sl_bid > 0 and entry > 0 and self._loss_exit_allowed(pos, st, obs):
                     _, bid_depth = get_orderbook_depth_usd(pos["token_id"])
                     shares_held = pos["size_usdc"] / entry
-                    if bid_depth is not None and bid_depth >= shares_held * sl_bid:
+                    # Plain depth test, and deliberately NOT the slippage guard the
+                    # mid-day exits use: this position settles at $0, so any
+                    # fillable bid beats holding and there is no better price to
+                    # slip away from. Guarding slippage here would just forfeit the
+                    # cents this path exists to collect.
+                    if bid_depth is not None and bid_depth >= shares_held * sl_bid * SALVAGE_MIN_DEPTH_MULTIPLE:
                         obs.exit_rule_fired = "stop_loss_post_date_salvage"
                         self._close_position(
                             pos, pnl_dollars=None,
                             exit_reason=(
-                                f"Stop Loss post-date salvage "
+                                f"Post-date salvage "
                                 f"({(sl_bid - entry) / entry:.1%}, bid ${sl_bid:.3f}, "
-                                f"depth ${bid_depth:.2f})"
+                                f"{st.get('state')}, depth ${bid_depth:.2f})"
                             ),
                         )
                         return
@@ -1653,15 +1789,22 @@ class Executor:
                         fired=bid_price > 0 and exit_fill >= setting("TAKE_PROFIT_PRICE"),
                         detail="requires a real bid; Gamma fallback cannot fire this")
 
-        if ENABLE_SUSTAINED_LOSS_GUARD and streak >= SUSTAINED_LOSS_POLLS:
+        # Both price-based loss rules now answer to the physics gate. Neither can
+        # close a position the day's observations have not already killed — that
+        # inversion (observations decide, price only proposes) is the fix for
+        # Qingdao 2026-08-11, and it holds even if a future operator turns
+        # ENABLE_STOP_LOSS back on.
+        if (ENABLE_SUSTAINED_LOSS_GUARD and streak >= SUSTAINED_LOSS_POLLS
+                and self._loss_exit_allowed(pos, st, obs)):
             obs.exit_rule_fired = "sustained_loss"
             exit_reason = (
                 f"Sustained loss ({streak} polls below entry, "
                 f"mid=${current_price:.3f} vs entry=${entry_price:.3f}, pnl={pnl_pct:.1%})"
             )
-        elif setting("ENABLE_STOP_LOSS") and pnl_pct <= -setting("STOP_LOSS_PCT"):
+        elif (setting("ENABLE_STOP_LOSS") and pnl_pct <= -setting("STOP_LOSS_PCT")
+                and self._loss_exit_allowed(pos, st, obs)):
             obs.exit_rule_fired = "stop_loss"
-            exit_reason = f"Stop Loss ({pnl_pct:.1%})"
+            exit_reason = f"Stop Loss ({pnl_pct:.1%}, {st.get('state')})"
         elif bid_price > 0 and exit_fill >= setting("TAKE_PROFIT_PRICE"):
             obs.exit_rule_fired = "take_profit"
             # bid_price > 0 guard: on the Gamma fallback exit_fill is a stale
@@ -1772,7 +1915,17 @@ class Executor:
                     # DISABLED by default: backtest showed the thesis-break fired on 4
                     # eventual winners (intraday forecast swings) for every 1 real loss cut.
                     thesis_broken = self._thesis_broken(pos, latest_prob, current_price, entry_price)
-                    if thesis_broken or not HOLD_WINNERS_TO_RESOLUTION:
+                    # _thesis_broken returns True on "we are in a real loss", so
+                    # this rule reaches for the same trigger the stop did and needs
+                    # the same gate. Note the guard cannot live inside the
+                    # condition below: `not HOLD_WINNERS_TO_RESOLUTION` exits
+                    # regardless of thesis_broken, so it gets its own branch. A
+                    # thesis-break IN PROFIT is a different decision and passes
+                    # through untouched.
+                    if (exit_fill < entry_price
+                            and not self._loss_exit_allowed(pos, st, obs)):
+                        pass
+                    elif thesis_broken or not HOLD_WINNERS_TO_RESOLUTION:
                         obs.exit_rule_fired = "thesis_break"
                         exit_reason = (
                             f"Edge decayed ({current_edge:.3f} < {adaptive_floor:.3f}"
@@ -1787,6 +1940,29 @@ class Executor:
                         )
 
         if exit_reason:
+            # Choke point. Every mid-day loss exit funnels through here, so both
+            # guards are re-asserted at the last instant before real money moves —
+            # deliberately duplicating the per-branch checks above. A guard that
+            # only exists on the paths someone remembered to wire it into is not a
+            # guard, and the branch above is an elif chain a future rule can be
+            # appended to. Gains skip both: take-profit selling into a thin book
+            # only forgoes upside, it cannot manufacture a Qingdao.
+            if exit_fill < entry_price:
+                if not self._loss_exit_allowed(pos, st, obs):
+                    return
+                shares_held = pos["size_usdc"] / entry_price if entry_price > 0 else 0
+                liq_ok, _ = self._exit_liquidity_ok(pos["token_id"], shares_held, obs)
+                if not liq_ok:
+                    # Standing down, not cancelling: the rule stays armed and the
+                    # next cycle re-reads the book. Qingdao's exit swept 15.15
+                    # shares into $109 of depth and realized 2.2c THROUGH the top
+                    # bid; refusing that print costs nothing when the position is
+                    # genuinely dead, because a dead position stays dead.
+                    logging.warning(
+                        f"Loss exit STOOD DOWN for {pos['city']} "
+                        f"{pos.get('target_date')} ({exit_reason}) — insufficient "
+                        f"bid liquidity; will retry next cycle")
+                    return
             self._close_position(pos, pnl_dollars, exit_reason)
 
     def _thesis_broken(self, pos, latest_prob, current_price, entry_price):

@@ -56,7 +56,8 @@ class TestOverridePrecedence:
         # the old fixed default, so behavior is continuous across the redesign
         assert config.daily_loss_limit() == -8.0
         assert config.MAX_TOTAL_EXPOSURE_FRACTION == 0.70
-        assert config.ENABLE_STOP_LOSS is True
+        # Default flipped 2026-08-11 — see test_config_thresholds for the evidence.
+        assert config.ENABLE_STOP_LOSS is False
         assert config.STOP_LOSS_PCT == 0.50
         assert config.TAKE_PROFIT_PRICE == 0.98
 

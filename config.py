@@ -658,8 +658,73 @@ MAX_DIRECTION_STAKES_PER_DATE = float(os.getenv("MAX_DIRECTION_STAKES_PER_DATE",
 # tradeoff is explicit: 50% cuts losses ~$0.20/trade sooner than 60%, but it would
 # have stopped out Chongqing 07-25 at its -56.2% dip, which then recovered to a win
 # (-$2.29 vs the +$1.27 it actually made). Editable in the dashboard Settings tab.
+#
+# DEFAULT FLIPPED TO false 2026-08-11, and the prediction on line 651 came true:
+# Qingdao 2026-08-11 stopped out at mid 0.295 (-55.3%) and settled at $1.00, a
+# realized -$6.09 where holding paid +$4.98. That single print was 94% of the
+# live-2 era's entire loss. Scored against all 10 resolved positions, EVERY
+# threshold is net-negative versus holding to settlement (20%: -$15.69, 25%:
+# -$4.69, 30%: +$0.25, 35%: -$4.75, 40%: -$5.55, 45%: -$9.65, 50%: -$10.15) and
+# that grid is OPTIMISTIC — it fills at the exact threshold price, while Qingdao
+# really filled 5c through a gutted book. The reason is not the threshold: the
+# drawdown distributions do not separate. Winners dipped to -55%, -28%, -24%;
+# losers to -42%, -31%, and Beijing lost having never dipped past -10%. Price
+# drawdown carries almost no information about the outcome in a same-day weather
+# book. The payoff asymmetry seals it: on a NO at 0.65 the stop saves $0.325/sh
+# on a true loser but forfeits $0.675/sh on a recoverable winner, so it must be
+# right better than 2:1 merely to break even.
+#
+# What replaced it: ENABLE_PHYSICS_EXIT_GATE below. Loss exits are now decided by
+# the one-way diurnal ratchet, not by price. Leaving this knob live means a future
+# operator can re-enable it, which is why the gate wraps it rather than trusting
+# the default.
 STOP_LOSS_PCT = float(_tunable("STOP_LOSS_PCT", "0.50"))
-ENABLE_STOP_LOSS = str(_tunable("ENABLE_STOP_LOSS", "true")).lower() == "true"
+ENABLE_STOP_LOSS = str(_tunable("ENABLE_STOP_LOSS", "false")).lower() == "true"
+
+# --- Physics exit gate (2026-08-11) -----------------------------------------
+# Refuse to sell at a loss unless the day's OBSERVATIONS say the position is
+# dead — see intraday.settlement_state. A daily max only rises and a daily min
+# only falls, so mid-day the observed extreme decides some positions outright and
+# leaves the rest genuinely open; price does neither. UNKNOWN (station down, no
+# observation, day not started) means hold: the downside of holding is bounded at
+# the stake and already known at entry, while the downside of selling a locked
+# winner into a dislocated book is unbounded in regret.
+ENABLE_PHYSICS_EXIT_GATE = str(
+    os.getenv("ENABLE_PHYSICS_EXIT_GATE", "true")).lower() == "true"
+# Fraction of the day's diurnal range still to come, below which the peak counts
+# as passed and the observed extreme as final. From REMAINING_RISE_TABLE: 0.02
+# lands at ~15:00 local for a max (14:00 is 0.0258, 15:00 is 0.0123), which keeps
+# the gate refusing loss exits through the whole afternoon transit window.
+EXIT_PEAK_PASSED_FRACTION = float(os.getenv("EXIT_PEAK_PASSED_FRACTION", "0.02"))
+# Half-degree tolerance on the bucket edges, matching the ±0.5°F pad the exit
+# path's METAR check has always used. Shared so the two cannot disagree about
+# whether a reading sits inside the bucket.
+BUCKET_EDGE_PAD_F = float(os.getenv("BUCKET_EDGE_PAD_F", "0.5"))
+
+# --- Exit liquidity guard (2026-08-11) --------------------------------------
+# No mid-day loss exit may sweep a book that cannot absorb it at the price the
+# exit rule measured itself against. Qingdao's stop sold 15.15 shares with only
+# 5.76 on the top bid and realized $0.2578 against a $0.28 quote — 7.9% of
+# slippage, 2.2c THROUGH the number that triggered it.
+#
+# Measured as slippage off the top bid, NOT as total bid depth: Qingdao's book
+# held $109 against a $12.73 sale, so a depth-multiple test (even 3x) waves it
+# through — the depth was real, it just sat far below the quote. See
+# scanner._walk_bids. 3% is tight enough to have blocked that print by a wide
+# margin and loose enough to clear any book worth selling into.
+EXIT_MAX_SLIPPAGE_FRAC = float(os.getenv("EXIT_MAX_SLIPPAGE_FRAC", "0.03"))
+# Bid depth the post-date salvage requires, as a multiple of the notional. Kept
+# separate and permissive at 1x with no slippage test: once the temperature is
+# realized the position settles at $0, so ANY fillable bid beats holding and
+# there is no better price to slip away from.
+SALVAGE_MIN_DEPTH_MULTIPLE = float(os.getenv("SALVAGE_MIN_DEPTH_MULTIPLE", "1.0"))
+# Split from ENABLE_STOP_LOSS 2026-08-11. These are different animals: the
+# post-date salvage fires only once the temperature is already realized, sweeps a
+# confirmed bid off a position heading to $0, and recovers cents. Turning off the
+# harmful mid-day stop must not also disable it.
+ENABLE_POST_DATE_SALVAGE = str(
+    os.getenv("ENABLE_POST_DATE_SALVAGE", "true")).lower() == "true"
+
 EXIT_EDGE_FLOOR = float(os.getenv("EXIT_EDGE_FLOOR", "0.05"))
 TAKE_PROFIT_PRICE = float(_tunable("TAKE_PROFIT_PRICE", "0.98"))
 # Number of consecutive monitor cycles (each 5 min) the mid-price must sit materially

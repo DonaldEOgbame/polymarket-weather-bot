@@ -518,6 +518,63 @@ def estimate_fill(token_id, usd_amount, max_price=None, force=False):
             "best_ask": best_ask}
 
 
+def _walk_bids(data, shares):
+    """What SELLING `shares` would actually realize, by consuming the real book.
+
+    Returns (vwap, filled_shares, exhausted_book). Levels are taken dearest-first,
+    which is how a taker sells. `vwap` is None when nothing is fillable.
+
+    The exit-side mirror of _walk_asks, and it exists because total bid depth in
+    dollars answers the wrong question. Qingdao 2026-08-11 showed $109 of bid
+    depth against a $12.73 sale — a 9x cushion by that measure, and a 3x depth
+    test would have waved it straight through. But the top bid held only 5.76 of
+    the 15.15 shares and the rest of the book sat far below, so the sale realized
+    $0.2578 against a $0.28 top bid: 2.2c THROUGH the quote the stop had measured
+    its own trigger against. Slippage off the top bid is the quantity that
+    actually describes that, and it needs the walk to compute.
+    """
+    levels = []
+    for lvl in data.get("bids", []) or []:
+        try:
+            p, s = float(lvl["price"]), float(lvl["size"])
+        except (TypeError, ValueError, KeyError):
+            continue
+        if p > 0 and s > 0:
+            levels.append((p, s))
+    levels.sort(reverse=True)   # a seller takes the HIGHEST bids first
+
+    got = filled = 0.0
+    for price, size in levels:
+        if filled >= shares - 1e-9:
+            break
+        take = min(size, shares - filled)
+        filled += take
+        got += take * price
+    if filled <= 0:
+        return None, 0.0, True
+    return got / filled, filled, filled < shares - 1e-9
+
+
+def estimate_sale(token_id, shares, force=False):
+    """What selling `shares` would really realize, by walking the live bid side.
+
+    Returns {"vwap", "filled_shares", "exhausted", "best_bid", "slippage_frac"}
+    or None when the book cannot be read. `slippage_frac` is how far below the
+    top bid the average fill lands — the number the exit guard tests, because it
+    is the one the Qingdao print blew through. force=True bypasses the 30s book
+    cache; an exit about to move real money must price the book as it is NOW."""
+    data = get_book(token_id, force=force)
+    if data is None:
+        return None
+    _, best_bid = _best_ask_bid_from_book(data)
+    vwap, filled, exhausted = _walk_bids(data, shares)
+    slippage = None
+    if vwap is not None and best_bid and best_bid > 0:
+        slippage = (best_bid - vwap) / best_bid
+    return {"vwap": vwap, "filled_shares": filled, "exhausted": exhausted,
+            "best_bid": best_bid, "slippage_frac": slippage}
+
+
 def get_orderbook_depth_usd(token_id):
     """Total $ resting on each side of the book for `token_id`: (ask_depth, bid_depth).
     Piggybacks on the same 30s price cache get_realtime_price_status populates — call

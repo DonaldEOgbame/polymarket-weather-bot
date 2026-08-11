@@ -351,7 +351,12 @@ class TestExitPathRecordsWhatItActuallyTested:
         assert len(keys) == len(set(keys)), f"duplicate rule rows: {keys}"
         assert set(keys) == {("stop_loss", "mid"), ("stop_loss", "bid"),
                              ("take_profit", "bid"), ("sustained_loss", "mid"),
-                             ("thesis_break", None)}
+                             ("thesis_break", None),
+                             # 2026-08-11: the physics gate is recorded every cycle,
+                             # fired or not — the trail's whole purpose is answering
+                             # "would a different rule have behaved differently here",
+                             # and that needs the observed state on quiet cycles too.
+                             ("physics_gate", "observation")}
         # the main-path record won, and it is the one with the live evaluation
         tp = [r for r in rules if r["rule"] == "take_profit"][0]
         assert tp["evaluated"] == 1
