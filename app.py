@@ -75,6 +75,8 @@ SETTING_SPECS = {
     'ENABLE_STOP_LOSS':           ('bool',  None,    None,  'Stop loss'),
     'STOP_LOSS_PCT':              ('float', 0.05,    0.95,  'Stop loss level'),
     'TAKE_PROFIT_PRICE':          ('float', 0.50,    0.999, 'Take profit price'),
+    'MAX_HOURS_TO_RESOLUTION':    ('float', 1.0,     168.0, 'Max hours to resolution'),
+    'REQUIRE_SAME_DAY':           ('bool',  None,    None,  'Require same-day trade'),
 }
 
 _TRUE_STRINGS = {'true', '1', 'yes', 'on'}
@@ -823,16 +825,32 @@ def api_data():
         text = signal_type or ''
         if 'YES entries are disabled' in text:
             return 'YES disabled'
-        if 'agreement too low' in text:
-            return 'Models disagreed'
+        # 2026-08-12 minimal rule set: only these gates bind. Ordered to match
+        # decision order so the label names the gate that actually refused.
+        if 'time to resolution too long' in text:
+            return 'Outside same-day window'
+        if 'not today' in text:
+            return 'Outside same-day window'
+        if 'walk the book' in text:
+            return 'Book too thin'
+        if 'order-book spread unreadable' in text:
+            return 'Book unreadable'
         if 'spread too wide' in text and 'market spread' in text:
             return 'Market spread too wide'
-        if 'spread too wide' in text:
-            return 'Model spread too wide'
+        if 'entry fill price too low' in text:
+            return 'Below 0.70 floor'
+        if 'entry fill price too high' in text:
+            return 'Above 0.80 cap'
         if 'forecast too close to bucket edge' in text:
-            return 'Too close to bucket edge'
+            return 'Margin too small'
         if 'raw model forecast points the other way' in text:
             return 'Direction mismatch'
+        # Pre-2026-08-12 vocabularies (edge and model-quality gates no longer
+        # bind); kept so historical rows classify instead of falling to Other.
+        if 'agreement too low' in text:
+            return 'Models disagreed'
+        if 'spread too wide' in text:
+            return 'Model spread too wide'
         if 'Insufficient edge' in text:
             return 'Edge below threshold'
         return 'Other skip'

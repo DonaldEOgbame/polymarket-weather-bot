@@ -46,13 +46,12 @@ class TestNarrowBucketThreshold:
         is a decision, and the comment block in config.py must be rewritten to
         say who made it and why, exactly as the 0.20 -> 0.12 change did.
         """
-        assert cfg.NARROW_BUCKET_EDGE_THRESHOLD == 0.12
+        assert cfg.NARROW_BUCKET_EDGE_THRESHOLD == 0.00
 
     def test_narrow_gate_is_never_looser_than_the_general_gate(self, cfg):
         """The narrow-bucket gate exists to be STRICTER. Below EDGE_THRESHOLD it
         would make thin buckets the EASIEST markets to enter — the inverse of
-        the guard. At 0.12 vs 0.08 the margin is thin by design; below it, the
-        regime is not merely abolished but reversed."""
+        the guard."""
         assert cfg.NARROW_BUCKET_EDGE_THRESHOLD >= cfg.EDGE_THRESHOLD
 
     def test_inversion_is_caught_by_the_boot_time_guard(self, tmp_path, monkeypatch):
@@ -61,7 +60,8 @@ class TestNarrowBucketThreshold:
         for name in _SHADOWING:
             monkeypatch.delenv(name, raising=False)
         monkeypatch.setenv("DB_PATH", str(tmp_path / "bot.db"))
-        monkeypatch.setenv("NARROW_BUCKET_EDGE_THRESHOLD", "0.05")
+        monkeypatch.setenv("EDGE_THRESHOLD", "0.05")
+        monkeypatch.setenv("NARROW_BUCKET_EDGE_THRESHOLD", "0.02")
         import config
         importlib.reload(config)
         try:
@@ -69,6 +69,7 @@ class TestNarrowBucketThreshold:
             assert any("NARROW_BUCKET_EDGE_THRESHOLD" in p for p in problems)
         finally:
             monkeypatch.delenv("NARROW_BUCKET_EDGE_THRESHOLD", raising=False)
+            monkeypatch.delenv("EDGE_THRESHOLD", raising=False)
             importlib.reload(config)
 
     def test_clean_config_reports_no_stale_values(self, cfg):
@@ -91,8 +92,10 @@ class TestUnchangedGuardrails:
     would make the next replay uninterpretable — two changes, one sample."""
 
     def test_max_entry_price_still_armed(self, cfg):
-        """0.85, decided by the owner on 2026-08-06."""
-        assert cfg.MAX_ENTRY_PRICE == 0.85
+        """0.80 (owner decision 2026-08-12, same-day minimal rule set): the
+        band 0.70-0.80 IS the strategy — market-implied 70-80% in our
+        favour. Was 0.85 (2026-08-06)."""
+        assert cfg.MAX_ENTRY_PRICE == 0.80
 
     def test_min_model_confidence_entry_filter(self, cfg):
         assert cfg.MIN_MODEL_CONFIDENCE == 0.60
@@ -105,10 +108,29 @@ class TestUnchangedGuardrails:
         brief same-day move to 0.62): armed re-entry, not a lower floor, is
         how qualified-but-cheap markets get in — the bot waits for the price
         to reach the floor."""
-        assert cfg.MIN_ENTRY_PRICE == 0.65
+        assert cfg.MIN_ENTRY_PRICE == 0.70
 
     def test_max_hours_to_resolution_entry_filter(self, cfg):
-        assert cfg.MAX_HOURS_TO_RESOLUTION == 36.0
+        """16h to the local civil day end (owner decision 2026-08-12): only
+        markets resolving the same day, entered on the target day itself.
+        Was 24.0."""
+        assert cfg.MAX_HOURS_TO_RESOLUTION == 16.0
+
+    def test_armed_ttl_never_outlives_the_trading_window(self, cfg):
+        """validate_env_ranges refuses TTL > MAX_HOURS_TO_RESOLUTION; the two
+        must move together (an arm outliving the window could only fire
+        outside it)."""
+        assert cfg.ARMED_SIGNAL_TTL_HOURS <= cfg.MAX_HOURS_TO_RESOLUTION
+
+    def test_non_binding_gates_membership(self, cfg):
+        """Drift guard on the 2026-08-12 owner decision: exactly the edge and
+        model-quality rows are non-binding. Adding a gate here loosens the
+        strategy silently; removing one re-tightens it — both are owner
+        calls, not refactors."""
+        import strategy
+        assert strategy.NON_BINDING_GATES == {
+            "edge_threshold", "model_agreement", "model_spread_sd",
+            "model_confidence", "max_model_confidence"}
 
     def test_narrow_bucket_std_inflation_still_on(self, cfg):
         """Second corrector of the same defect. Removing it too would be the

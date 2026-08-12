@@ -357,14 +357,13 @@ def daily_summary():
 
 def _print_startup_summary():
     from config import (
-        STARTING_BANKROLL, EDGE_THRESHOLD, MIN_MODEL_AGREEMENT,
-        MAX_MODEL_SPREAD_STD, KELLY_CAP, MIN_POSITION_SIZE,
-        MAX_HOURS_TO_RESOLUTION,
+        STARTING_BANKROLL, MAX_HOURS_TO_RESOLUTION, FORECAST_MARGIN_F,
+        MIN_ENTRY_PRICE, MAX_ENTRY_PRICE, MIN_DEPTH_MULTIPLE,
+        MAX_ENTRY_SPREAD_FRACTION,
         MIN_VOLUME, MARKET_DISCOVERY_MAX_PAGES, MARKET_DISCOVERY_LIMIT,
         SHADOW_MIN_AGREEMENT, SHADOW_MAX_SPREAD_STD, SHADOW_MAX_SIZE_USDC,
-        ENABLE_SHADOW_EXPLORATION, TAKER_FEE_RATE, SLIPPAGE_FRACTION,
-        HARD_MAX_POSITION_SIZE,
-        setting, daily_loss_limit, paper_mode,
+        ENABLE_SHADOW_EXPLORATION,
+        setting, daily_loss_limit, paper_mode, effective_stake,
     )
     portfolio = get_portfolio_state()
     open_pos = fetch_query("SELECT COUNT(*) as c FROM positions WHERE mode=?",
@@ -379,8 +378,8 @@ def _print_startup_summary():
         "=" * 52,
         f"  Bankroll     : ${portfolio['total_equity']:.2f}  (cash ${portfolio['available_cash']:.2f}  locked ${portfolio['locked_cash']:.2f})",
         f"  Open pos     : {open_pos} / {setting('MAX_CONCURRENT_POSITIONS')}  |  Daily loss limit: ${daily_loss_limit():.2f} ({setting('DAILY_LOSS_STAKES'):g} stakes)",
-        f"  Edge thresh  : {EDGE_THRESHOLD:.0%} (net of taker fee {TAKER_FEE_RATE:.0%}·p·(1-p) + {SLIPPAGE_FRACTION:.1%} slippage)  |  Kelly cap: {KELLY_CAP:.0%}  |  Kelly-path max size: ${HARD_MAX_POSITION_SIZE:.2f}",
-        f"  Strict gates : agreement ≥ {MIN_MODEL_AGREEMENT:.0%} (weighted)  |  spread < {MAX_MODEL_SPREAD_STD}°F sd",
+        f"  Entry rules  : same-day ≤ {MAX_HOURS_TO_RESOLUTION:.0f}h to local day end  |  direction agrees  |  margin ≥ {FORECAST_MARGIN_F:g}°F  |  price {MIN_ENTRY_PRICE:.2f}–{MAX_ENTRY_PRICE:.2f}  (2026-08-12 minimal set; edge/agreement/spread logged, non-binding)",
+        f"  Book safety  : depth ≥ {MIN_DEPTH_MULTIPLE:g}× stake  |  spread frac ≤ {MAX_ENTRY_SPREAD_FRACTION:.0%}  |  stake ${effective_stake():.2f} flat, slots capped by cash",
         f"  Shadow gates : agreement ≥ {SHADOW_MIN_AGREEMENT:.0%}  |  spread < {SHADOW_MAX_SPREAD_STD}°F sd  |  {shadow_label}",
         f"  Market filter: vol ≥ ${MIN_VOLUME:,.0f}  |  ≤ {MAX_HOURS_TO_RESOLUTION:.0f}h to resolution",
         f"  Discovery    : {MARKET_DISCOVERY_MAX_PAGES} pages × {MARKET_DISCOVERY_LIMIT} events  (tag_id=84, weather)",

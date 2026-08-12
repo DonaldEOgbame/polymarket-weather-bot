@@ -1095,6 +1095,55 @@ class TestOneTradePerCityDate:
         assert opened == []  # blocked at max-concurrent, i.e. restriction passed
 
 
+class TestDailyTradeCap:
+    """MAX_TRADES_PER_DAY (owner decision 2026-08-12): at most N new entries
+    per UTC day. The take-everything rule set makes qualifying markets the
+    norm, so worst-case daily exposure must be bounded at the entry point."""
+
+    class _Opp:
+        market_id = "0xnew"
+        city = "Seoul"
+        date = "2026-08-12"
+        question = "q"
+        is_high = True
+
+    def _exec(self):
+        return Executor.__new__(Executor)
+
+    def _signal(self):
+        return {"opp": self._Opp(), "side": "NO", "size_usdc": 3.0, "price": 0.75,
+                "edge": 0.1, "model_prob": 0.2, "token_id": "t", "model_count": 4}
+
+    def _run(self, monkeypatch, entries_today):
+        import executor as ex
+        monkeypatch.setattr(ex, "get_open_position", lambda mid: None)
+        calls = []
+        def fake_fetch(sql, params=()):
+            calls.append(sql)
+            if "COUNT(*)" in sql and "entry_time >=" in sql:
+                return [{"c": entries_today}]
+            if "FROM trades WHERE city=?" in sql:
+                return [{"id": 1}]   # city/date guard fires AFTER the cap
+            return []
+        monkeypatch.setattr(ex, "fetch_query", fake_fetch)
+        opened = []
+        monkeypatch.setattr(ex, "open_position_atomic", lambda **kw: opened.append(kw))
+        self._exec().execute_trade(self._signal())
+        return calls, opened
+
+    def test_at_cap_refuses_before_any_other_guard(self, monkeypatch):
+        import executor as ex
+        assert ex.MAX_TRADES_PER_DAY == 15   # deployed value, change deliberately
+        calls, opened = self._run(monkeypatch, entries_today=15)
+        assert opened == []
+        assert not any("WHERE city=?" in c for c in calls)   # stopped at the cap
+
+    def test_under_cap_proceeds_to_later_guards(self, monkeypatch):
+        calls, opened = self._run(monkeypatch, entries_today=14)
+        assert opened == []                                  # blocked later...
+        assert any("WHERE city=?" in c for c in calls)       # ...past the cap
+
+
 class TestManualClose:
     """Dashboard 'Close' button — Executor.close_position_manual.
 

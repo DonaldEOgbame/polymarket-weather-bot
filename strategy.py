@@ -6,7 +6,7 @@ from scanner import (get_realtime_price, get_orderbook_depth_usd, estimate_fill,
                      PARSER_VERSION)
 from risk import risk_direction
 from db import execute_query
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 from config import (
     EDGE_THRESHOLD, MIN_MODEL_AGREEMENT, MAX_MODEL_SPREAD_STD,
     KELLY_CAP, MIN_POSITION_SIZE,
@@ -20,6 +20,7 @@ from config import (
     FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION, MAX_ENTRY_PRICE,
     MIN_DEPTH_MULTIPLE, REQUIRE_DEPTH_TO_TRADE,
     MIN_MODEL_CONFIDENCE, MAX_MODEL_CONFIDENCE, MIN_ENTRY_PRICE, MAX_HOURS_TO_RESOLUTION,
+    REQUIRE_SAME_DAY,
     ARMED_REENTRY_ENABLED, ARMED_SIGNAL_TTL_HOURS,
     setting,
 )
@@ -85,6 +86,29 @@ def forecast_margin_ok(side, ensemble_mean, bucket_low, bucket_high, margin_f):
     half_width = (hi - lo) / 2.0
     effective_margin = min(margin_f, half_width * YES_MARGIN_WIDTH_FRACTION)
     return lo + effective_margin <= ensemble_mean <= hi - effective_margin
+
+
+def is_same_day_trade(target_date_str, city_name=None, hours_to_resolution=None):
+    """True if target_date_str matches current date in UTC/local time or hours_to_resolution <= 24.0."""
+    if hours_to_resolution is not None and hours_to_resolution <= 24.0:
+        return True
+    if not target_date_str:
+        return False
+    now_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    if target_date_str == now_utc:
+        return True
+    if city_name:
+        try:
+            from weather import get_station_coords
+            lat, lon = get_station_coords(city_name)
+            if lon is not None:
+                offset_hours = round(lon / 15.0)
+                station_now = datetime.now(timezone.utc) + timedelta(hours=offset_hours)
+                if target_date_str == station_now.strftime("%Y-%m-%d"):
+                    return True
+        except Exception:
+            pass
+    return False
 
 
 def forecast_direction_agrees(side, raw_weighted_mean, bucket_low, bucket_high):
@@ -276,6 +300,25 @@ def _depth_gate(usable_depth_usd, stake):
     }
 
 
+# Gates that are EVALUATED AND LOGGED but no longer bind the entry decision.
+# Owner decision 2026-08-12: the strategy takes every same-day (<=16h) market
+# priced 0.70-0.80 whose forecast direction and margin support the bet. Edge
+# and the model-quality gates stay in the log as counterfactuals — "would the
+# old rule set have refused this?" is a question the replay must keep being
+# able to answer — but they refuse nothing. The 2026-08-08/11 replay behind
+# the decision: 24 such trades, 22W/2L, while every edge-family gate either
+# blocked profitable flow (narrow-bucket 0.12 blocked all 24) or anti-selected
+# (the two highest-edge entries were the two losses; see the Aug-11 Dallas
+# sigma post-mortem).
+NON_BINDING_GATES = frozenset({
+    "edge_threshold",
+    "model_agreement",
+    "model_spread_sd",
+    "model_confidence",
+    "max_model_confidence",
+})
+
+
 def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
                    no_spread_frac, usable_depth_usd=None, stake=None,
                    prob=0.0, walked_vwap=None):
@@ -322,9 +365,14 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
                    f"({p_side:.3f} > {MAX_MODEL_CONFIDENCE:.2f})"},
         {"gate": "time_to_resolution", "observed": opp.hours_to_resolution,
          "threshold": MAX_HOURS_TO_RESOLUTION,
-         "passed": opp.hours_to_resolution < MAX_HOURS_TO_RESOLUTION,
+         "passed": opp.hours_to_resolution is not None and opp.hours_to_resolution <= MAX_HOURS_TO_RESOLUTION,
          "detail": f"NO edge {no_edge:.3f} but time to resolution too long "
-                   f"({opp.hours_to_resolution:.1f}h >= {MAX_HOURS_TO_RESOLUTION:.0f}h)"},
+                   f"({(opp.hours_to_resolution or 0):.1f}h > {MAX_HOURS_TO_RESOLUTION:.0f}h)"},
+        {"gate": "same_day_trade",
+         "observed": 1.0 if is_same_day_trade(opp.date, opp.city, opp.hours_to_resolution) else 0.0,
+         "threshold": 1.0 if REQUIRE_SAME_DAY else 0.0,
+         "passed": (not REQUIRE_SAME_DAY) or is_same_day_trade(opp.date, opp.city, opp.hours_to_resolution),
+         "detail": f"NO edge {no_edge:.3f} but market target date {opp.date} is not today's date"},
         # Liquidity, before anything about price. A book that cannot absorb the
         # stake at an acceptable price makes every downstream number — the edge,
         # the entry price, the payoff ratio — a statement about a fill that will
@@ -545,10 +593,12 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                               usable_depth_usd=usable_depth, stake=intended_stake,
                               prob=prob, walked_vwap=walked_vwap)
 
-    # Evaluate NO side (independent check)
-    if signal is None and no_edge >= effective_edge_threshold:
+    # Evaluate NO side. Only BINDING gates can refuse; the edge/model-quality
+    # rows are logged counterfactuals (see NON_BINDING_GATES). no_edge is still
+    # computed above because sizing, Brier and the replay log consume it.
+    if signal is None:
         failed = next((g for g in no_gates if not g["passed"]
-                       and g["gate"] != "edge_threshold"), None)
+                       and g["gate"] not in NON_BINDING_GATES), None)
         if failed is not None:
             skip_reason = failed["detail"]
         else:
@@ -559,37 +609,28 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             target_token = opp.token_id_no
             edge_used = no_edge
 
-    # Full Armed Re-entry Waiver:
-    # When a market was previously qualified & ARMED (having passed 100% of all quality,
-    # agreement, and spread gates at low price), its price rising to MIN_ENTRY_PRICE is market
-    # confirmation of the model. Edge naturally decays as price moves up, so we waive
-    # the edge threshold check and execute BUY_NO as long as price is within [MIN_ENTRY_PRICE, MAX_ENTRY_PRICE]
-    # and model confidence remains valid.
-    fill_price = walked_vwap if walked_vwap is not None else opp.no_price
-    if armed and signal is None and fill_price >= MIN_ENTRY_PRICE and fill_price <= MAX_ENTRY_PRICE and p_side > MIN_MODEL_CONFIDENCE:
-        depth_ok = usable_depth is None or usable_depth >= (intended_stake * MIN_DEPTH_MULTIPLE)
-        time_ok = opp.hours_to_resolution < MAX_HOURS_TO_RESOLUTION
-        if depth_ok and time_ok:
-            signal = "BUY_NO"
-            side = "NO"
-            kelly = calculate_kelly(max(no_edge, EDGE_THRESHOLD), opp.no_price)
-            target_price = opp.no_price
-            target_token = opp.token_id_no
-            edge_used = max(no_edge, EDGE_THRESHOLD)
-            skip_reason = None
-            logging.info(
-                f"ARMED_FULL_WAIVER_EXECUTION | {opp.city} {opp.date} | "
-                f"Armed signal executed on price floor reach ({fill_price:.3f} >= {MIN_ENTRY_PRICE:.2f}) "
-                f"waiving decaying edge check (armed at {armed['arm_fill']:.3f} with edge {armed['arm_edge']:.3f})")
+    # Armed re-entry, post-2026-08-12 rule set: there is no waiver execution
+    # path any more. The old block waived the EDGE check for an armed market
+    # whose price rose back to the floor — but edge no longer binds anything,
+    # so the ordinary decision above already enters the moment an armed (or
+    # any) market sits in [MIN_ENTRY_PRICE, MAX_ENTRY_PRICE] with the binding
+    # gates green. Keeping the waiver would have let an armed market enter
+    # while a BINDING gate (direction, margin, book safety) failed, which is
+    # the one thing it must never do. The arm itself survives as the record
+    # of "qualified below the floor" — dashboard telemetry and the confidence
+    # revocation above — not as an entry path.
 
-    # Arm (or refresh) when the price floor is the ONLY failing gate: every
-    # other gate — edge at the FULL surcharged threshold, agreement, spread,
-    # confidence, time, liquidity — passed, so the arm records
-    # "qualified, waiting on market confirmation". Checking the full gate list
-    # rather than the reported skip_reason is what makes this exact: the first
-    # failure is what gets reported, but a sole-failure claim needs all of them.
+    # Arm (or refresh) when the price floor is the ONLY failing BINDING gate:
+    # direction, margin, time, liquidity all passed, so the arm records
+    # "qualified, waiting on market confirmation". Non-binding rows are
+    # ignored here for the same reason they are ignored at entry — a market
+    # blocked only by the (non-binding) agreement row plus the floor must
+    # still arm, or the floor's removal silently disables re-entry tracking.
+    # Checking the gate list rather than the reported skip_reason is what
+    # makes the sole-failure claim exact.
     if ARMED_REENTRY_ENABLED and signal is None:
-        gate_fails = [g for g in no_gates if not g["passed"]]
+        gate_fails = [g for g in no_gates if not g["passed"]
+                      and g["gate"] not in NON_BINDING_GATES]
         floor_fail = next((g for g in gate_fails
                            if g["gate"] == "min_entry_price"), None)
         # The floor is the REPORTED reason (first in decision order) while
@@ -600,7 +641,13 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             others = ", ".join(g["gate"] for g in gate_fails
                                if g["gate"] != "min_entry_price")
             skip_reason = f"{skip_reason} — not armed (also failed: {others})"
-        if len(gate_fails) == 1 and gate_fails[0]["gate"] == "min_entry_price":
+        # p_side must clear the same floor that REVOKES a live arm
+        # (MIN_MODEL_CONFIDENCE, above): an arm born below it would be
+        # expired on the very next lookup, so creating it records nothing
+        # but churn. This is arm hygiene, not an entry selector — the
+        # confidence rows stay non-binding for entry itself.
+        if (len(gate_fails) == 1 and gate_fails[0]["gate"] == "min_entry_price"
+                and p_side > MIN_MODEL_CONFIDENCE):
             try:
                 from db import arm_signal
                 arm_fill = walked_vwap if walked_vwap is not None else opp.no_price

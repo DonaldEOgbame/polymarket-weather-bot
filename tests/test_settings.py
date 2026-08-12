@@ -49,12 +49,12 @@ class TestOverridePrecedence:
     def test_empty_table_yields_pristine_defaults(self, tmp_path, monkeypatch):
         """The property that makes this safe to deploy: no rows == no change."""
         _, config, _ = _fresh_db(tmp_path, monkeypatch)
-        assert config.FIXED_POSITION_SIZE == 2.0
+        assert config.FIXED_POSITION_SIZE == 3.0     # 2026-08-12 rule set ($3 first)
         assert config.MAX_CONCURRENT_POSITIONS == 4
         assert config.DAILY_LOSS_STAKES == 4.0
-        # the DOLLAR limit is derived: 4 stakes x $2 default = -$8, identical to
-        # the old fixed default, so behavior is continuous across the redesign
-        assert config.daily_loss_limit() == -8.0
+        # the DOLLAR limit is derived: 4 stakes x $3 default = -$12; the
+        # stake-denominated budget scaled with the 2026-08-12 stake change
+        assert config.daily_loss_limit() == -12.0
         assert config.MAX_TOTAL_EXPOSURE_FRACTION == 0.70
         # Default flipped 2026-08-11 — see test_config_thresholds for the evidence.
         assert config.ENABLE_STOP_LOSS is False
@@ -94,11 +94,11 @@ class TestOverridePrecedence:
         """The no-restart property: swapping the store changes what the very
         next decision reads, in the SAME process, no reload anywhere."""
         _, config, _ = _fresh_db(tmp_path, monkeypatch)
-        assert config.setting("FIXED_POSITION_SIZE") == 2.0
-        config.apply_runtime_overrides({"FIXED_POSITION_SIZE": 5.0,
+        assert config.setting("FIXED_POSITION_SIZE") == 3.0
+        config.apply_runtime_overrides({"FIXED_POSITION_SIZE": 7.0,
                                         "DAILY_LOSS_STAKES": 3.0})
-        assert config.effective_stake() == 5.0
-        assert config.daily_loss_limit() == -15.0     # scales with the stake
+        assert config.effective_stake() == 7.0
+        assert config.daily_loss_limit() == -21.0     # scales with the stake
         with pytest.raises(KeyError):
             config.apply_runtime_overrides({"PROB_CALIBRATION_SLOPE": 1.0})
 
@@ -117,7 +117,7 @@ class TestOverrideFailsSafe:
         monkeypatch.setenv("DB_PATH", str(tmp_path / "does-not-exist.db"))
         import config
         importlib.reload(config)
-        assert config.FIXED_POSITION_SIZE == 2.0
+        assert config.FIXED_POSITION_SIZE == 3.0
 
     def test_corrupt_db_uses_defaults(self, tmp_path, monkeypatch):
         bad = tmp_path / "corrupt.db"
@@ -125,7 +125,7 @@ class TestOverrideFailsSafe:
         monkeypatch.setenv("DB_PATH", str(bad))
         import config
         importlib.reload(config)
-        assert config.FIXED_POSITION_SIZE == 2.0
+        assert config.FIXED_POSITION_SIZE == 3.0
 
     def test_missing_table_uses_defaults(self, tmp_path, monkeypatch):
         """init_db() runs AFTER config is imported, so on a fresh volume the
@@ -135,7 +135,7 @@ class TestOverrideFailsSafe:
         monkeypatch.setenv("DB_PATH", str(empty))
         import config
         importlib.reload(config)
-        assert config.FIXED_POSITION_SIZE == 2.0
+        assert config.FIXED_POSITION_SIZE == 3.0
 
     def test_unknown_key_in_table_is_ignored(self, tmp_path, monkeypatch):
         db, _, db_file = _fresh_db(tmp_path, monkeypatch)
@@ -282,10 +282,10 @@ class TestSettingsAPI:
     def test_get_returns_values_and_context(self, client):
         c, _, _ = client
         d = c.get("/api/settings").get_json()
-        assert d["values"]["FIXED_POSITION_SIZE"] == 2.0
+        assert d["values"]["FIXED_POSITION_SIZE"] == 3.0
         assert d["values"]["DAILY_LOSS_STAKES"] == 4.0
         assert "total_equity" in d["context"]
-        assert d["context"]["daily_loss_limit"] == -8.0
+        assert d["context"]["daily_loss_limit"] == -12.0
 
     def test_stake_is_the_only_size_authority(self, client):
         """There is no second knob that can silently shrink the stake: raising
@@ -332,7 +332,7 @@ class TestSettingsAPI:
         the bot reads is ALREADY updated — same process, no reload, no restart."""
         c, app_mod, db = client
         import config
-        assert config.setting("FIXED_POSITION_SIZE") == 2.0
+        assert config.setting("FIXED_POSITION_SIZE") == 3.0
         r = c.post("/api/settings", json={"settings": {"FIXED_POSITION_SIZE": 4.0,
                                                        "DAILY_LOSS_STAKES": 3.0}})
         assert r.status_code == 200

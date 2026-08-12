@@ -81,7 +81,7 @@ _SENTINEL_TABLES = ("trades", "bankroll", "resolutions")
 # would report a 12-day-old manual copy as the latest backup forever — and (b)
 # made it eligible for rotation, i.e. the automation would eventually delete a
 # backup a human took on purpose. Files that do not match are left alone.
-_SNAPSHOT_RE = re.compile(r"^bot-\d{8}T\d{6}Z\.db\.gz$")
+_SNAPSHOT_RE = re.compile(r"^bot-\d{8}T\d{6}Z\.db(\.gz)?$")
 
 
 class BackupError(RuntimeError):

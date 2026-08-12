@@ -1442,12 +1442,19 @@ def log_replay_signal(row, gates):
                 )
                 sig_id = cur.lastrowid
                 if gates:
+                    def _safe_flt(v):
+                        if v is None:
+                            return None
+                        try:
+                            return float(v)
+                        except (ValueError, TypeError):
+                            return None
                     conn.executemany(
                         "INSERT INTO replay_gates (signal_id, gate, observed, threshold,"
                         " passed, detail) VALUES (?, ?, ?, ?, ?, ?)",
                         [(sig_id, g["gate"],
-                          None if g.get("observed") is None else float(g["observed"]),
-                          None if g.get("threshold") is None else float(g["threshold"]),
+                          _safe_flt(g.get("observed")),
+                          _safe_flt(g.get("threshold")),
                           1 if g["passed"] else 0, g.get("detail"))
                          for g in gates],
                     )

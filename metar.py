@@ -192,6 +192,51 @@ def fetch_day_extremes(icao, tz, date_str):
     return result
 
 
+def prewarm_day_extremes(icao, tz, start_date, end_date):
+    """Fill _METAR_CACHE for every COMPLETE local day in [start_date, end_date]
+    with ONE IEM request, so subsequent day_extremes_f calls are cache hits.
+
+    Exists for calibration backfills: 48 stations x N days as individual
+    fetch_day_extremes calls is 48*N sequential 30s-timeout requests; the IEM
+    API takes an arbitrary date range, so one call per station covers them
+    all. Same semantics as fetch_day_extremes — raw °C obs bucketed by the
+    station-LOCAL calendar day, incomplete days never cached, quantisation
+    left to the callers (day_extremes_f / resolved_extreme_f) so the two
+    paths cannot disagree. Returns the number of days cached."""
+    y1, m1, d1 = (int(x) for x in start_date.split("-"))
+    y2, m2, d2 = (int(x) for x in end_date.split("-"))
+    nd = _date(y2, m2, d2) + timedelta(days=1)
+    params = {
+        "station": icao, "data": "tmpc",
+        "year1": y1, "month1": m1, "day1": d1,
+        "year2": nd.year, "month2": nd.month, "day2": nd.day,
+        "tz": tz, "format": "onlycomma", "latlon": "no", "missing": "M",
+    }
+    by_day = {}
+    try:
+        resp = safe_get(MESONET_URL, params=params, timeout=60)
+        if resp.status_code != 200:
+            return 0
+        for row in csv.DictReader(io.StringIO(resp.text)):
+            day = row.get("valid", "")[:10]
+            v = row.get("tmpc", "M")
+            if len(day) == 10 and v not in ("M", ""):
+                try:
+                    by_day.setdefault(day, []).append(float(v))
+                except ValueError:
+                    continue
+    except Exception as e:
+        logging.error(f"METAR range fetch failed for {icao} "
+                      f"{start_date}..{end_date}: {e}")
+        return 0
+    cached = 0
+    for day, temps in by_day.items():
+        if start_date <= day <= end_date and temps and day_complete(tz, day):
+            _METAR_CACHE[(icao, day)] = (max(temps), min(temps))
+            cached += 1
+    return cached
+
+
 def day_complete(tz, date_str):
     """True once the station's LOCAL calendar day date_str has fully elapsed, with a
     2h grace after local midnight because IEM's archive can lag its final obs."""

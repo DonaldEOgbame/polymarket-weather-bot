@@ -30,7 +30,8 @@ from config import (
     SUSTAINED_LOSS_MIN_DROP, REENTRY_COOLDOWN_HOURS,
     ENABLE_SUSTAINED_LOSS_GUARD, ENABLE_THESIS_BREAK_EXIT,
     POLYMARKET_FUNDER, POLYMARKET_SIG_TYPE, EXTERNAL_CLOSE_SYNC_MIN_AGE_MIN,
-    ONE_TRADE_PER_CITY_DATE, MAX_ENTRY_PRICE, MIN_ENTRY_PRICE, MAX_SUBMIT_DRIFT,
+    ONE_TRADE_PER_CITY_DATE, MAX_TRADES_PER_DAY,
+    MAX_ENTRY_PRICE, MIN_ENTRY_PRICE, MAX_SUBMIT_DRIFT,
     USE_MARKETABLE_LIMIT, MAX_FILL_SLIPPAGE_ALERT,
     ENABLE_PHYSICS_EXIT_GATE, EXIT_MAX_SLIPPAGE_FRAC,
     ENABLE_POST_DATE_SALVAGE, SALVAGE_MIN_DEPTH_MULTIPLE,
@@ -1200,6 +1201,23 @@ class Executor:
         if get_open_position(opp.market_id):
             logging.info(f"Already holding position in {opp.market_id} — skipping")
             return
+
+        # Daily entry cap (owner decision 2026-08-12): at most MAX_TRADES_PER_DAY
+        # NEW entries per UTC day, bounding worst-case daily exposure under the
+        # take-everything rule set. Counted here, at the single serialized entry
+        # point, so a burst of qualifying markets in one scan cannot overshoot.
+        if MAX_TRADES_PER_DAY > 0:
+            today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            rows = fetch_query(
+                "SELECT COUNT(*) AS c FROM trades WHERE mode=? AND entry_time >= ?",
+                (current_mode(), today),
+            )
+            n_today = rows[0]["c"] if rows else 0
+            if n_today >= MAX_TRADES_PER_DAY:
+                logging.info(
+                    f"Daily trade cap reached ({n_today}/{MAX_TRADES_PER_DAY} "
+                    f"entries today) — skipping {opp.city} {opp.date}")
+                return
 
         # One trade per city per target day. Sibling buckets on the same city/date all
         # settle on the SAME realized temperature, so a second entry there is stacked

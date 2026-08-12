@@ -39,6 +39,8 @@ MANAGED_SETTINGS = (
     "ENABLE_STOP_LOSS",
     "STOP_LOSS_PCT",
     "TAKE_PROFIT_PRICE",
+    "MAX_HOURS_TO_RESOLUTION",
+    "REQUIRE_SAME_DAY",
 )
 
 
@@ -96,7 +98,7 @@ PAPER_MODE = str(_tunable("PAPER_MODE", "true")).strip().lower() == "true"
 STARTING_BANKROLL = float(os.getenv("STARTING_BANKROLL", "40.0"))
 
 # --- Strategy Thresholds ---
-EDGE_THRESHOLD = float(os.getenv("EDGE_THRESHOLD", "0.08"))
+EDGE_THRESHOLD = float(os.getenv("EDGE_THRESHOLD", "0.00"))
 # Raised 0.6->0.75 by user preference 2026-07-10 as a deliberately stricter stance
 # pending more resolved trades; it was never validated by outcome data as better
 # than 0.6, and the evidence below suggests it is not measuring what it claims to.
@@ -205,7 +207,7 @@ METAR_WARM_CORRECTION_F = float(os.getenv("METAR_WARM_CORRECTION_F", "0.0"))
 # losers all sat within ~2.1°F of a boundary. Requiring real daylight between the
 # forecast and the boundary is what separates a defensible bet from a gamble.
 # Set to 0 to disable. Applies only to bounded (exact/range) buckets.
-FORECAST_MARGIN_F = float(os.getenv("FORECAST_MARGIN_F", "2.5"))
+FORECAST_MARGIN_F = float(os.getenv("FORECAST_MARGIN_F", "2.0"))
 
 # YES-side margin cap, as a fraction of the padded bucket's half-width. Every real
 # bucket here (0.8-2.8°F padded-wide) is narrower than 2*FORECAST_MARGIN_F, so an
@@ -271,7 +273,7 @@ NARROW_BUCKET_WIDTH_F = float(os.getenv("NARROW_BUCKET_WIDTH_F", "2.0"))
 # defect, it buys nothing on this sample, and PROB_CALIBRATION_INTERCEPT/SLOPE
 # were fitted on probabilities that had already been through the inflation step
 # (see the COUPLING note on those constants) — dropping it silently invalidates them.
-NARROW_BUCKET_EDGE_THRESHOLD = float(os.getenv("NARROW_BUCKET_EDGE_THRESHOLD", "0.12"))
+NARROW_BUCKET_EDGE_THRESHOLD = float(os.getenv("NARROW_BUCKET_EDGE_THRESHOLD", "0.00"))
 
 # Std inflation multiplier applied to narrow buckets (≤ NARROW_BUCKET_WIDTH_F).
 # Makes the probability estimate more conservative on thin windows.
@@ -439,6 +441,56 @@ SIGMA_SPREAD_COEF = float(os.getenv("SIGMA_SPREAD_COEF", "2.78"))
 SIGMA_SCALE_HIGH = float(os.getenv("SIGMA_SCALE_HIGH", "1.02"))
 SIGMA_SCALE_LOW = float(os.getenv("SIGMA_SCALE_LOW", "0.80"))
 
+
+# --- Per-city sigma scales (2026-08-12, fitted by calibrate_city_sigma.py) ---
+# "City:high:low,..." — a fitted direction scale per city, replacing the
+# global SIGMA_SCALE_HIGH/LOW for that (city, direction). A 0 (or blank) field
+# means "no fitted value here": that direction falls back to the global scale.
+# A city with a fitted value SKIPS CONVECTIVE_STD_INFLATION — the fit is done
+# against the pre-convective sigma, so the fitted scale already absorbs it and
+# applying both would double-count (see calibrate_city_sigma.py).
+#
+# Fitted values are pasted from the script's output IN A COMMIT, never edited
+# ad hoc: n per city is small (~7 target days at first fit), so every value is
+# shrunk toward the global re-fit and must carry its provenance.
+def _parse_city_sigma(raw):
+    """Parse "City:high:low,..." into {(city, is_high): scale}. Strict like
+    _parse_dir_bias: an env var is wholly valid or the process refuses to
+    boot — a partial table would silently leave exactly the mis-typed cities
+    on the global scale while claiming to be fitted. Empty string is valid
+    (no per-city fits yet) and yields an empty table."""
+    out = {}
+    if not raw.strip():
+        return out
+    for part in raw.split(","):
+        token = part.strip()
+        if not token:
+            raise ValueError(
+                f"CITY_SIGMA_SCALES: empty entry in {raw!r} (trailing or "
+                f"doubled comma). Expected 'City:high:low' per entry.")
+        bits = token.split(":")
+        if len(bits) != 3:
+            raise ValueError(
+                f"CITY_SIGMA_SCALES: entry {token!r} has {len(bits)} field(s), "
+                f"expected 3 ('City:high:low'; use 0 for an unfitted side).")
+        city = bits[0].strip()
+        if not city:
+            raise ValueError(f"CITY_SIGMA_SCALES: entry {token!r} has an empty city.")
+        for field, is_high in ((bits[1].strip(), True), (bits[2].strip(), False)):
+            if field in ("", "0", "0.0"):
+                continue  # unfitted side — global scale applies
+            try:
+                v = float(field)
+            except ValueError:
+                raise ValueError(
+                    f"CITY_SIGMA_SCALES: entry {token!r} has unparseable "
+                    f"scale {field!r}.")
+            out[(city, is_high)] = v
+    return out
+
+
+CITY_SIGMA_SCALES = _parse_city_sigma(os.getenv("CITY_SIGMA_SCALES", ""))
+
 # Hard floor on sigma (°F), replacing the old max(std, 0.5) clamp. Tight model
 # agreement is not evidence of accuracy — Seoul 2026-07-25 had the tightest
 # ensemble in the record (pstdev 0.24) and missed by 5.70°F. Without a floor the
@@ -490,14 +542,21 @@ SIGMA_STUDENT_T_DF = float(os.getenv("SIGMA_STUDENT_T_DF", "4"))
 # that clamped it via min(); with flat staking that could only ever silently
 # shrink a stake the user had just raised, so it is no longer a setting. It
 # survives below purely as the dollar cap on the dormant Kelly path.
-FIXED_POSITION_SIZE = float(_tunable("FIXED_POSITION_SIZE", "2.0"))
+# 3.0 (owner decision 2026-08-12, at deploy of the same-day rule set: "per
+# trade capital should be $3 first"): $3 flat while the rule set proves out
+# live, slots capped by cash — the flat-stake path skips entries when
+# available_cash < stake, which IS the floor(cash/stake) concurrency cap.
+# Paired with MAX_TRADES_PER_DAY below. NOTE the live settings-table row
+# beats this default; the deploy sets that row to 3.0 too.
+FIXED_POSITION_SIZE = float(_tunable("FIXED_POSITION_SIZE", "3.0"))
 # Daily loss budget, expressed in FULL STAKES rather than dollars, so it scales
 # automatically when the stake changes (user decision 2026-07-29: "the daily loss
 # limit is supposed to be dynamic — based off the position size"). The dollar
 # limit the circuit breaker enforces is derived at CHECK TIME:
 #     limit = -(effective_stake * DAILY_LOSS_STAKES)
-# via daily_loss_limit() below. Default 4 stakes × the $2 default stake = -$8,
-# identical to the old fixed DAILY_LOSS_LIMIT default, so behavior is continuous.
+# via daily_loss_limit() below. Default 4 stakes × the $3 default stake = -$12
+# (stake default moved 2.0 → 3.0 with the 2026-08-12 same-day rule set; the
+# stake-denominated budget scaled with it by design).
 DAILY_LOSS_STAKES = float(_tunable("DAILY_LOSS_STAKES", "4"))
 # Code-level backstop for the Kelly path ONLY (reached when FIXED_POSITION_SIZE
 # is 0). Not runtime-tunable and absent from the dashboard: in flat-stake mode
@@ -535,23 +594,29 @@ MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "1.00"))
 # is the only losing band in the book. The arithmetic is unforgiving — paying 85c
 # to win 15c needs ~85% accuracy, and measured accuracy at that confidence is 70%.
 #
-# --- StormEdge Entry Filters (Owner Decision 2026-08-06: Moderate Gate) ---
-# Four constraints for trade entry, all of which must pass:
-#  1. Model confidence: p_side > 0.60 (MIN_MODEL_CONFIDENCE = 0.60)
-#  2. Entry price floor: fill >= 0.65 (MIN_ENTRY_PRICE = 0.65). Briefly 0.62 on
-#     2026-08-08 after a Dallas skip showed the 0.65 floor + narrow-bucket edge
-#     0.12 left a ~1-cent qualifying window for 1°F buckets — reverted to 0.65
-#     the same day by owner decision: armed re-entry (below) is the mechanism
-#     for those cases now. The bot waits for the market to reach the floor
-#     instead of lowering the floor to meet the market.
-#  3. Entry price cap: fill <= 0.85 (MAX_ENTRY_PRICE = 0.85)
-#  4. Time to resolution: < 36h (MAX_HOURS_TO_RESOLUTION = 36)
+# --- StormEdge Entry Rules (Owner Decision 2026-08-12: same-day minimal set) ---
+# The strategy takes EVERY market that satisfies, at scan time:
+#  1. Same-day resolution: true time-to-resolution <= 16h, measured to the
+#     station's local civil day end (MAX_HOURS_TO_RESOLUTION = 16).
+#  2. Forecast direction agrees with the bet (forecast_direction gate).
+#  3. Forecast margin: ensemble mean >= 2.0°F clear of the bucket
+#     (FORECAST_MARGIN_F = 2.0).
+#  4. Entry price band 0.70-0.80 (MIN_ENTRY_PRICE / MAX_ENTRY_PRICE) —
+#     market-implied 70-80% chance of resolving in our favour.
+# Plus the book-safety gates (depth, readable book, spread fraction), which
+# block unfillable entries, not trades.
 #
-# Documented per owner decision on 2026-08-07. All four gates must pass for entry.
+# NOTHING ELSE binds. Edge, model agreement, model spread and the confidence
+# window are still computed and logged (strategy.NON_BINDING_GATES) but do not
+# select entries. Basis: the 2026-08-08..11 replay under this rule set took 24
+# trades and went 22W/2L (+$25.85 at $5 stakes, break-even ~75% for the band),
+# while the edge-family gates blocked all 24 (narrow-bucket 0.12) and edge
+# ranking anti-selected — the two highest-edge entries were the two losses.
+# MIN/MAX_MODEL_CONFIDENCE survive as logging bounds only (p_side cap).
 MIN_MODEL_CONFIDENCE = float(os.getenv("MIN_MODEL_CONFIDENCE", "0.60"))
 MAX_MODEL_CONFIDENCE = float(os.getenv("MAX_MODEL_CONFIDENCE", "0.85"))
-MIN_ENTRY_PRICE = float(os.getenv("MIN_ENTRY_PRICE", "0.65"))
-MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.85"))
+MIN_ENTRY_PRICE = float(os.getenv("MIN_ENTRY_PRICE", "0.70"))
+MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.80"))
 
 # --- Armed re-entry (Owner decision 2026-08-08) ---
 # A market that passes EVERY entry gate except the MIN_ENTRY_PRICE floor is
@@ -566,7 +631,10 @@ MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.85"))
 # MIN_MODEL_CONFIDENCE (the model retracting its view revokes the waiver
 # permanently — a later recovery must re-qualify from scratch).
 ARMED_REENTRY_ENABLED = os.getenv("ARMED_REENTRY_ENABLED", "true").lower() == "true"
-ARMED_SIGNAL_TTL_HOURS = float(os.getenv("ARMED_SIGNAL_TTL_HOURS", "24"))
+# 16 to match MAX_HOURS_TO_RESOLUTION (2026-08-12): validate_env_ranges refuses
+# a TTL longer than the trading window, and an arm outliving the window could
+# only ever fire outside it.
+ARMED_SIGNAL_TTL_HOURS = float(os.getenv("ARMED_SIGNAL_TTL_HOURS", "16"))
 
 # One trade per city per target day (user rule 2026-07-28). The live log shows repeat
 # same-city/same-day entries stacking correlated risk on one weather outcome: two Hong
@@ -577,6 +645,15 @@ ARMED_SIGNAL_TTL_HOURS = float(os.getenv("ARMED_SIGNAL_TTL_HOURS", "24"))
 # Checked against the trades table (any prior entry for the city/date blocks, open or
 # closed, so a stopped-out city can't be re-entered via a sibling bucket either).
 ONE_TRADE_PER_CITY_DATE = os.getenv("ONE_TRADE_PER_CITY_DATE", "true").lower() == "true"
+
+# Hard cap on NEW entries per UTC day (owner decision 2026-08-12, set with the
+# same-day rule set's deploy: "max 15 trades a day"). A throughput brake, not a
+# risk gate: the minimal rule set takes every qualifying market (~15/day at
+# full coverage), and this bounds worst-case daily exposure at
+# MAX_TRADES_PER_DAY x stake regardless of how many markets qualify. Counted
+# from the trades table per mode, so paper and live budgets are independent.
+# 0 disables the cap.
+MAX_TRADES_PER_DAY = int(float(os.getenv("MAX_TRADES_PER_DAY", "15")))
 
 # --- Execution safety (Phase 0.3) ---------------------------------------
 # 2026-08-06: a $6 market order went into a book holding $26.49 of ask depth and
@@ -778,7 +855,12 @@ ENABLE_THESIS_BREAK_EXIT = os.getenv("ENABLE_THESIS_BREAK_EXIT", "false").lower(
 
 # --- Market Filters ---
 MIN_VOLUME = float(os.getenv("MIN_VOLUME", "500"))
-MAX_HOURS_TO_RESOLUTION = float(os.getenv("MAX_HOURS_TO_RESOLUTION", "36"))
+# 16.0 (owner decision 2026-08-12): only same-day markets, entered on the
+# target day itself. Hours are measured to the station's LOCAL civil day end
+# (scanner.get_target_day_end_utc, the 5e0bce4 fix) — <=16h implies the local
+# calendar day has already started, so this bound alone enforces same-day.
+MAX_HOURS_TO_RESOLUTION = float(_tunable("MAX_HOURS_TO_RESOLUTION", "16.0"))
+REQUIRE_SAME_DAY = str(_tunable("REQUIRE_SAME_DAY", "true")).strip().lower() == "true"
 
 # --- Market Discovery ---
 # Markets per API page (Gamma API max is 100)
@@ -1217,6 +1299,8 @@ _RUNTIME = {
     "ENABLE_STOP_LOSS": ENABLE_STOP_LOSS,
     "STOP_LOSS_PCT": STOP_LOSS_PCT,
     "TAKE_PROFIT_PRICE": TAKE_PROFIT_PRICE,
+    "MAX_HOURS_TO_RESOLUTION": MAX_HOURS_TO_RESOLUTION,
+    "REQUIRE_SAME_DAY": REQUIRE_SAME_DAY,
 }
 
 
@@ -1296,6 +1380,16 @@ def validate_env_ranges():
             f"per-direction correction is the supported replacement — not a "
             f"global shift."
         )
+
+    for (city, is_high), scale in sorted(CITY_SIGMA_SCALES.items()):
+        if not 0.4 <= scale <= 2.5:
+            problems.append(
+                f"CITY_SIGMA_SCALES[{city}:{'high' if is_high else 'low'}]="
+                f"{scale} is outside [0.4, 2.5]. Fitted scales are shrunk "
+                f"toward the global SIGMA_SCALE_* (~0.8-1.1), so a value out "
+                f"here is a units mistake or an unshrunk raw fit — re-run "
+                f"calibrate_city_sigma.py rather than hand-editing."
+            )
 
     for hours, value in sorted(BASE_FORECAST_ERROR.items()):
         if not 0.3 <= value <= 1.5:
@@ -1480,7 +1574,8 @@ _FINGERPRINT_KEYS = (
     "ENABLE_PROB_CALIBRATION", "PROB_CALIBRATION_INTERCEPT",
     "PROB_CALIBRATION_SLOPE", "MIN_BUCKET_PROB",
     "BASE_FORECAST_ERROR", "SIGMA_SPREAD_COEF", "SIGMA_SCALE_HIGH",
-    "SIGMA_SCALE_LOW", "MIN_SIGMA_F", "MAX_SIGMA_F", "SIGMA_STUDENT_T_DF",
+    "SIGMA_SCALE_LOW", "CITY_SIGMA_SCALES",
+    "MIN_SIGMA_F", "MAX_SIGMA_F", "SIGMA_STUDENT_T_DF",
     "METAR_WARM_CORRECTION_F", "GFS_BIAS_CORRECTIONS", "MODEL_BIAS_CORRECTIONS",
     "TAKER_FEE_RATE", "SLIPPAGE_FRACTION",
     # Family grouping changes both gated statistics and the blend weights, so

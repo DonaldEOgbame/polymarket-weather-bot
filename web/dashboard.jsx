@@ -856,12 +856,19 @@ function ScanFeed({ scanLog }) {
 // far a market got, rather than shuffling with whatever the data contains.
 const GATE_COLOR = {
   'Taken':                    '#6cbf85',
-  'Models disagreed':         '#f5b13c',
-  'Model spread too wide':    '#e39c33',
-  'Too close to bucket edge': '#c1913f',
+  // Binding gates of the 2026-08-12 minimal rule set, in decision order.
+  'Outside same-day window':  '#f5b13c',
+  'Book too thin':            '#e39c33',
+  'Book unreadable':          '#d4922f',
   'Market spread too wide':   '#8a7a55',
+  'Below 0.70 floor':         '#c1913f',
+  'Above 0.80 cap':           '#a8853a',
+  'Margin too small':         '#7d7048',
   'Direction mismatch':       '#6b6455',
   'YES disabled':             '#4a5560',
+  // Historical vocabularies (pre-2026-08-12 rows only).
+  'Models disagreed':         '#454d38',
+  'Model spread too wide':    '#3f4638',
   'Edge below threshold':     '#3d4550',
   'Other skip':               '#2f353d',
 };

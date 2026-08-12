@@ -9,7 +9,8 @@ from config import (
     GFS_BIAS_CORRECTIONS, model_bias_correction,
     ENABLE_PROB_CALIBRATION, PROB_CALIBRATION_INTERCEPT, PROB_CALIBRATION_SLOPE,
     METAR_WARM_CORRECTION_F, MIN_BUCKET_PROB,
-    SIGMA_SPREAD_COEF, SIGMA_SCALE_HIGH, SIGMA_SCALE_LOW, MIN_SIGMA_F, MAX_SIGMA_F,
+    SIGMA_SPREAD_COEF, SIGMA_SCALE_HIGH, SIGMA_SCALE_LOW, CITY_SIGMA_SCALES,
+    MIN_SIGMA_F, MAX_SIGMA_F,
     SIGMA_STUDENT_T_DF,
     ENABLE_FAMILY_WEIGHTING, FAMILY_WEIGHT_CAP, GATE_ACROSS_FAMILIES,
 )
@@ -114,15 +115,21 @@ def compute_sigma_stages(spread_std, lead_hours, is_high, city_key=None):
     to look at."""
     base = _interpolate_base_error(lead_hours)
     post_spread = base + SIGMA_SPREAD_COEF * float(spread_std)
-    k = SIGMA_SCALE_HIGH if is_high else SIGMA_SCALE_LOW
+    city_k = CITY_SIGMA_SCALES.get((city_key, bool(is_high))) if city_key else None
+    k = city_k if city_k else (SIGMA_SCALE_HIGH if is_high else SIGMA_SCALE_LOW)
     post_direction = k * post_spread
-    convective = bool(city_key and city_key in CONVECTIVE_CITIES)
+    # A fitted per-city scale was fitted against the PRE-convective sigma, so
+    # it already absorbs the convective inflation — applying both would
+    # double-count (calibrate_city_sigma.py). Cities without a fitted value
+    # keep the coarse convective multiplier.
+    convective = bool(city_key and city_key in CONVECTIVE_CITIES and not city_k)
     post_convective = post_direction * (CONVECTIVE_STD_INFLATION if convective else 1.0)
     post_clamp = min(max(post_convective, MIN_SIGMA_F), MAX_SIGMA_F)
     return {
         "base": base,
         "post_spread": post_spread,
         "direction_scale": k,
+        "city_scaled": bool(city_k),
         "post_direction": post_direction,
         "convective": convective,
         "post_convective": post_convective,
@@ -911,7 +918,9 @@ def validate_city_tables():
     validate_config_tables() for the raising entrypoint."""
     problems = []
     for label, names in (("CONVECTIVE_CITIES", CONVECTIVE_CITIES),
-                         ("GFS_BIAS_CORRECTIONS", GFS_BIAS_CORRECTIONS)):
+                         ("GFS_BIAS_CORRECTIONS", GFS_BIAS_CORRECTIONS),
+                         ("CITY_SIGMA_SCALES",
+                          {c for c, _ in CITY_SIGMA_SCALES})):
         for missing in sorted(set(names) - set(STATIONS)):
             problems.append(f"{label} names '{missing}', which is not in STATIONS "
                             f"(its setting has never applied)")

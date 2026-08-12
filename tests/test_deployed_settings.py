@@ -40,9 +40,13 @@ import config as C
 #
 # 2026-07-18: PAPER_MODE -> false ($18.86 real bankroll).
 # 2026-08-05: FIXED_POSITION_SIZE 2.0 -> 6.0 after the $120.83 deposit.
+# 2026-08-12: FIXED_POSITION_SIZE -> 3.0 with the same-day minimal rule set
+#   ($3 flat, 15/day cap, slots capped by cash). NOTE the live settings row read 10.0 on
+#   2026-08-09 while this pin still said 6.0 — the pin had gone stale; set the
+#   dashboard to 3.0 at deploy and keep this pin honest from here.
 DEPLOYED_PIN = {
     "PAPER_MODE": "false",
-    "FIXED_POSITION_SIZE": 6.0,
+    "FIXED_POSITION_SIZE": 3.0,
 }
 # ---------------------------------------------------------------------------
 

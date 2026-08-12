@@ -39,7 +39,7 @@ class _Opp:
             market_id="0xabc", token_id_yes="ty", token_id_no="tn",
             city="Tokyo", date="2026-08-02", bucket_low=88.0, bucket_high=88.8,
             yes_price=0.30, no_price=0.70, volume=50000.0,
-            hours_to_resolution=24.0, question="q", is_high=True,
+            hours_to_resolution=12.0, question="q", is_high=True,
         )
         defaults.update(kw)
         for k, v in defaults.items():
@@ -219,12 +219,16 @@ class TestReplayLogContents:
         assert set(by) == expected
         assert len(gates) == len(expected)
         assert by["max_entry_price"]["observed"] == 0.70
-        assert by["max_entry_price"]["threshold"] == pytest.approx(0.85)
+        assert by["max_entry_price"]["threshold"] == pytest.approx(0.80)
 
     def test_skips_are_logged_too(self, wired, monkeypatch):
         """A log that only records trades cannot answer counterfactuals, which
         is the entire purpose of the shadow run."""
-        opp = _Opp(no_price=0.99)   # fails the price gate
+        # 20h fails the 16h same-day window — a BINDING gate under the
+        # 2026-08-12 rule set. (A high no_price no longer works here: the
+        # estimate_fill stub pins the walked vwap at 0.70, and the edge gate
+        # that used to catch the mismatch is non-binding now.)
+        opp = _Opp(hours_to_resolution=20.0)
         _evaluate(monkeypatch, wired, opp, _engine())
         rows = wired.fetch_query("SELECT decision, skip_reason FROM replay_signals")
         assert len(rows) == 1

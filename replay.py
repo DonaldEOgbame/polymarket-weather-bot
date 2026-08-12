@@ -23,6 +23,7 @@ import logging
 from dataclasses import dataclass, field
 
 from db import fetch_query
+from strategy import is_same_day_trade, NON_BINDING_GATES
 
 
 @dataclass
@@ -33,6 +34,9 @@ class ConfigOverride:
     silently replays the wrong configuration and looks like a result."""
     sigma_scale_high: float = None
     sigma_scale_low: float = None
+    # {(city, is_high): scale}; None = live table. A city with a scale (from
+    # either source) skips the convective multiplier, as in production.
+    city_sigma_scales: dict = None
     sigma_spread_coef: float = None
     base_forecast_error: dict = None
     min_sigma_f: float = None
@@ -151,10 +155,14 @@ def replay_row(row, ov=None):
     base = _interp(pick(ov.base_forecast_error, C.BASE_FORECAST_ERROR),
                    row["lead_hours"])
     coef = pick(ov.sigma_spread_coef, C.SIGMA_SPREAD_COEF)
-    k = (pick(ov.sigma_scale_high, C.SIGMA_SCALE_HIGH) if row["is_high"]
-         else pick(ov.sigma_scale_low, C.SIGMA_SCALE_LOW))
+    city_scales = pick(ov.city_sigma_scales, C.CITY_SIGMA_SCALES)
+    city_k = city_scales.get((row["city_key"], bool(row["is_high"])))
+    k = city_k if city_k else (
+        pick(ov.sigma_scale_high, C.SIGMA_SCALE_HIGH) if row["is_high"]
+        else pick(ov.sigma_scale_low, C.SIGMA_SCALE_LOW))
     sigma = k * (base + coef * spread_sd)
-    if row["city_key"] in C.CONVECTIVE_CITIES:
+    # Per-city scales absorb the convective inflation (weather.py mirror).
+    if row["city_key"] in C.CONVECTIVE_CITIES and not city_k:
         sigma *= pick(ov.convective_std_inflation, C.CONVECTIVE_STD_INFLATION)
     max_sigma = pick(ov.max_sigma_f, C.MAX_SIGMA_F)
     sigma = min(max(sigma, pick(ov.min_sigma_f, C.MIN_SIGMA_F)), max_sigma)
@@ -188,7 +196,7 @@ def replay_row(row, ov=None):
            if row["is_narrow"] else pick(ov.edge_threshold, C.EDGE_THRESHOLD))
 
     fill = walked if walked is not None else no_px
-    hours_res = _col(row, "hours_to_resolution") if _col(row, "hours_to_resolution") is not None else row.get("lead_time_hours")
+    hours_res = _col(row, "hours_to_resolution") if _col(row, "hours_to_resolution") is not None else row.get("lead_hours")
 
     lo, hi = row["bucket_low"], row["bucket_high"]
     margin_f = pick(ov.forecast_margin_f, C.FORECAST_MARGIN_F)
@@ -203,7 +211,10 @@ def replay_row(row, ov=None):
         ("max_model_confidence", p_side, pick(ov.max_model_confidence, C.MAX_MODEL_CONFIDENCE),
          p_side <= pick(ov.max_model_confidence, C.MAX_MODEL_CONFIDENCE)),
         ("time_to_resolution", hours_res, pick(ov.max_hours_to_resolution, C.MAX_HOURS_TO_RESOLUTION),
-         hours_res is None or hours_res < pick(ov.max_hours_to_resolution, C.MAX_HOURS_TO_RESOLUTION)),
+         hours_res is None or hours_res <= pick(ov.max_hours_to_resolution, C.MAX_HOURS_TO_RESOLUTION)),
+        ("same_day_trade", 1.0 if is_same_day_trade(row.get("target_date"), row.get("city"), hours_res) else 0.0,
+         1.0 if C.REQUIRE_SAME_DAY else 0.0,
+         (not C.REQUIRE_SAME_DAY) or is_same_day_trade(row.get("target_date"), row.get("city"), hours_res)),
         ("book_depth", _col(row, "usable_depth_usd"),
          pick(ov.min_depth_multiple, C.MIN_DEPTH_MULTIPLE) * (_col(row, "stake_usd") or 0.0),
          _col(row, "usable_depth_usd") is None
@@ -237,7 +248,12 @@ def replay_row(row, ov=None):
         "edge_post_fee": no_edge, "edge_threshold": thr,
         "gates": [{"gate": g, "observed": o, "threshold": t, "passed": p}
                   for g, o, t, p in gates],
-        "would_trade": all(p for _, _, _, p in gates),
+        # Mirrors the live decision exactly: only BINDING gates refuse.
+        # would_trade_all_gates keeps the pre-2026-08-12 semantics as the
+        # counterfactual ("would the old rule set have taken this?").
+        "would_trade": all(p for g, _, _, p in gates
+                           if g not in NON_BINDING_GATES),
+        "would_trade_all_gates": all(p for _, _, _, p in gates),
         "settled_value": row["settled_value"], "settled_outcome": row["settled_outcome"],
     }
 

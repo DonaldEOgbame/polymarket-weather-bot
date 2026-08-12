@@ -131,7 +131,9 @@ def _evaluate(monkeypatch, db, no_price, prob=0.22, market_id="0xdallas",
     import strategy as S
 
     opp = SimpleNamespace(
-        city="Dallas", date="2026-08-09", is_high=True, hours_to_resolution=24.0,
+        # 12h: inside the 16h same-day window of the 2026-08-12 rule set, so
+        # the time gate passes and the floor can be the sole binding failure.
+        city="Dallas", date="2026-08-09", is_high=True, hours_to_resolution=12.0,
         bucket_low=98.0, bucket_high=99.0,
         yes_price=round(1.0 - no_price, 2), no_price=no_price,
         token_id_yes="y", token_id_no="n", market_id=market_id, volume=50000.0,
@@ -179,14 +181,14 @@ class TestArming:
         2026-08-08: floor + forecast_margin + forecast_direction, dashboard
         showed only the floor). No arm — and the reason must say so."""
         db = _fresh_db(monkeypatch)
-        # mean 0.1°F above the padded bucket edge: margin gate fails, floor fails
-        res = _evaluate(monkeypatch, db, no_price=0.55, ensemble_mean=99.6)
+        # mean inside the bucket [98, 99]: forecast_direction gate fails, floor fails
+        res = _evaluate(monkeypatch, db, no_price=0.55, ensemble_mean=98.5)
         assert res is None
         assert db.get_active_arm("0xdallas") is None
         logged = db.fetch_query(
             "SELECT signal_type FROM signals ORDER BY id DESC LIMIT 1"
         )[0]["signal_type"]
-        assert "not armed" in logged and "forecast_margin" in logged
+        assert "not armed" in logged and "forecast_direction" in logged
 
     def test_insufficient_edge_does_not_arm(self, monkeypatch):
         """Two failing gates (edge + floor) is not 'qualified but for the
@@ -209,7 +211,7 @@ class TestTheWaiver:
         db.arm_signal("0xdallas", "Dallas", "2026-08-09", 98.0, 99.0,
                       fill=0.55, edge=0.218, p_side=0.78, threshold=0.12,
                       ttl_hours=24)
-        res = _evaluate(monkeypatch, db, no_price=0.66)
+        res = _evaluate(monkeypatch, db, no_price=0.71)
         assert res is not None and res["signal"] == "BUY_NO"
 
     def test_armed_signal_full_waiver_enters_on_price_floor_reach(self, monkeypatch):
@@ -218,7 +220,7 @@ class TestTheWaiver:
         db.arm_signal("0xdallas", "Dallas", "2026-08-09", 98.0, 99.0,
                       fill=0.55, edge=0.218, p_side=0.78, threshold=0.12,
                       ttl_hours=24)
-        res = _evaluate(monkeypatch, db, no_price=0.72)
+        res = _evaluate(monkeypatch, db, no_price=0.71)
         assert res is not None and res["signal"] == "BUY_NO"
 
     def test_confidence_drop_revokes_the_arm_permanently(self, monkeypatch):

@@ -205,7 +205,7 @@ class TestYesEntriesDisabled:
         from types import SimpleNamespace
 
         opp = SimpleNamespace(
-            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=24.0,
+            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=12.0,
             bucket_low=bucket_low, bucket_high=bucket_high, yes_price=yes_price, no_price=no_price,
             token_id_yes="y", token_id_no="n", market_id="m1",
         )
@@ -255,7 +255,7 @@ class TestOrderbookDepthLogging:
         from types import SimpleNamespace
 
         opp = SimpleNamespace(
-            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=24.0,
+            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=12.0,
             bucket_low=bucket_low, bucket_high=bucket_high, yes_price=1.0 - no_price, no_price=no_price,
             token_id_yes="y", token_id_no="n", market_id="m1",
         )
