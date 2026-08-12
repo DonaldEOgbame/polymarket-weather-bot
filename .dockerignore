@@ -13,10 +13,12 @@ __pycache__
 
 # Local database & runtime data — the Fly volume provides /data
 data
+backups
 *.db
 *.db-wal
 *.db-shm
 *.sqlite
+*.db.gz
 
 # Version control
 .git
