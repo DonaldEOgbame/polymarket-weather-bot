@@ -130,7 +130,11 @@ class TestUnchangedGuardrails:
         import strategy
         assert strategy.NON_BINDING_GATES == {
             "edge_threshold", "model_agreement", "model_spread_sd",
-            "model_confidence", "max_model_confidence"}
+            "model_confidence", "max_model_confidence",
+            # 2026-08-13 evening: forecast_margin demoted — owner picked the
+            # direction-gate row (lows 83.8%/n=425/+$138.51 vs full stack
+            # 89.8%/n=128/+$71.93; margin's rejects were profitable flow).
+            "forecast_margin"}
 
     def test_narrow_bucket_std_inflation_still_on(self, cfg):
         """Second corrector of the same defect. Removing it too would be the

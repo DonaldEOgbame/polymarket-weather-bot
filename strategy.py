@@ -316,6 +316,15 @@ NON_BINDING_GATES = frozenset({
     "model_spread_sd",
     "model_confidence",
     "max_model_confidence",
+    # forecast_margin demoted 2026-08-13 evening (owner: "use this instead",
+    # picking the direction-gate row of the five-window backtest): on lows the
+    # margin gate's rejects still win 81.1% vs 75.5% break-even (+$66.7/yr at
+    # $3) — profitable flow it was discarding. Direction-only lows: 83.8% on
+    # n=425 over the year, +$138.51, ~3.8 trades/day recent quarter. The cost
+    # is ride quality (median drawdown -15% vs -1%, ~93 deep transits/yr) —
+    # the physics-gated exits and trapped-min guard stay on to manage exactly
+    # that. Margin keeps logging for the counterfactual.
+    "forecast_margin",
 })
 
 
