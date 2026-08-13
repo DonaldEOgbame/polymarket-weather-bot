@@ -143,7 +143,7 @@ class TestTheAustinTradeIsNowRefused:
 
     def _evaluate(self, monkeypatch, book):
         opp = SimpleNamespace(
-            city="Austin", date="2026-08-07", is_high=True, hours_to_resolution=12.0,
+            city="Austin", date="2026-08-07", is_high=False, hours_to_resolution=12.0,  # low: highs are gated off since 2026-08-13
             bucket_low=94.0, bucket_high=95.0, yes_price=0.29, no_price=0.71,
             token_id_yes="y", token_id_no="n", market_id="0xaustin", volume=50000.0,
             question="Will the highest temperature in Austin be between 94-95F?",

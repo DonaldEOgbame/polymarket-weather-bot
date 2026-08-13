@@ -133,7 +133,7 @@ def _evaluate(monkeypatch, db, no_price, prob=0.22, market_id="0xdallas",
     opp = SimpleNamespace(
         # 12h: inside the 16h same-day window of the 2026-08-12 rule set, so
         # the time gate passes and the floor can be the sole binding failure.
-        city="Dallas", date="2026-08-09", is_high=True, hours_to_resolution=12.0,
+        city="Dallas", date="2026-08-09", is_high=False, hours_to_resolution=12.0,  # low: highs are gated off since 2026-08-13
         bucket_low=98.0, bucket_high=99.0,
         yes_price=round(1.0 - no_price, 2), no_price=no_price,
         token_id_yes="y", token_id_no="n", market_id=market_id, volume=50000.0,

@@ -1353,6 +1353,34 @@ class Executor:
         shares = round(size / price, 2)
         entry_fee = 0.0  # paper mode: fee is modeled inside transaction_cost, not the ledger
 
+        # Observed-min guard for LOW markets (owner 2026-08-13, with lows-only):
+        # if the settlement station's running minimum already sits inside the
+        # bucket (±0.5 settlement pad), the bet is fighting an observation, not
+        # a forecast. Year-scale backtest: trapped-at-entry lows run ~77% vs
+        # ~74.6% break-even (dead weight), and excluding them lifts the full
+        # stack ~89.8% -> 91.3%. Checked HERE, at the serialized entry point,
+        # not in the gate chain — the gates run on every scanned market and
+        # this needs a live METAR read (one call per actual entry attempt).
+        # Fails OPEN on missing data: no observation is not a refusal.
+        if not opp.is_high:
+            try:
+                from metar import resolved_extreme_f
+                rmin = resolved_extreme_f(opp.city, opp.date, False)
+                sig = fetch_query(
+                    "SELECT bucket_low, bucket_high FROM signals WHERE market_id=? "
+                    "ORDER BY id DESC LIMIT 1", (opp.market_id,))
+                if rmin is not None and sig:
+                    lo, hi = sig[0]["bucket_low"], sig[0]["bucket_high"]
+                    if (lo is not None and hi is not None
+                            and lo - 0.5 <= rmin <= hi + 0.5):
+                        logging.info(
+                            f"TRAPPED_LOW | {opp.city} {opp.date} | running min "
+                            f"{rmin:.1f}F already inside bucket [{lo}, {hi}] — "
+                            f"skipping entry")
+                        return
+            except Exception as e:
+                logging.error(f"observed-min guard failed for {opp.market_id}: {e}")
+
         if not paper_mode():
             # THE WALLET IS THE LEDGER OF LAST RESORT (Moscow 2026-08-13): when
             # /data filled overnight, four consecutive scans each bought this

@@ -201,3 +201,29 @@ class TestExcludedCities:
     def test_fingerprint_tracks_the_set(self):
         import config
         assert "EXCLUDED_CITIES" in config._FINGERPRINT_KEYS
+
+
+class TestLowsOnly:
+    """Owner decision 2026-08-13 ('only the lows'): the five-window backtest
+    showed highs efficiently priced everywhere (74.9-75.3% vs ~75.2% BE) while
+    the full stack on lows held 88.9-100% in every window (year n=128, ~3.7s)."""
+
+    def test_market_kind_defaults(self):
+        import config
+        assert config.TRADE_HIGH_MARKETS is False
+        assert config.TRADE_LOW_MARKETS is True
+
+    def test_market_kind_is_a_binding_gate(self):
+        import strategy, inspect
+        assert "market_kind" not in strategy.NON_BINDING_GATES
+        assert "market_kind" in inspect.getsource(strategy._no_side_gates)
+
+    def test_trapped_low_guard_sits_before_the_submit(self):
+        import executor, inspect
+        src = inspect.getsource(executor.Executor.execute_trade)
+        assert src.index("resolved_extreme_f") < src.index("get_wallet_token_sizes")
+
+    def test_fingerprint_tracks_market_kind(self):
+        import config
+        assert "TRADE_HIGH_MARKETS" in config._FINGERPRINT_KEYS
+        assert "TRADE_LOW_MARKETS" in config._FINGERPRINT_KEYS

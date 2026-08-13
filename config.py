@@ -287,6 +287,20 @@ CONVECTIVE_STD_INFLATION = float(os.getenv("CONVECTIVE_STD_INFLATION", "1.3"))
 # now warns at startup if a phantom city is reintroduced here.
 CONVECTIVE_CITIES = set(os.getenv("CONVECTIVE_CITIES", "Miami,Houston,Dallas,Atlanta").split(","))
 
+# --- Market-kind selection (owner decision 2026-08-13: "only the lows") ---
+# The five-window Polymarket backtest (week/2w/month/3mo/year, see the
+# StormEdge Horizons report): the HIGH band is efficiently priced at every
+# tested horizon (74.9-75.3% vs ~75.2% break-even — pays fees for coin flips),
+# while the LOW band carries a persistent premium (79-82%) and the full
+# forecast stack on lows held 88.9-100% across ALL windows (year: 115/128 =
+# 89.8% vs 75.9% BE, ~3.7 sigma). Mechanism: minima are radiative, decided by
+# dawn, immune to the two regimes that produced every high-side loss
+# (afternoon convection, sea-breeze capping). Highs remain EVALUATED AND
+# LOGGED (binding gate, not a scanner filter) so the counterfactual record
+# keeps accumulating for a future re-enable decision.
+TRADE_HIGH_MARKETS = os.getenv("TRADE_HIGH_MARKETS", "false").lower() == "true"
+TRADE_LOW_MARKETS = os.getenv("TRADE_LOW_MARKETS", "true").lower() == "true"
+
 # --- Wrong-thermometer exclusions (owner decision 2026-08-13) ---
 # Cities whose SETTLEMENT STATION is structurally divergent from the air mass
 # the models (and every public weather source) describe — marine-layer or
@@ -1599,6 +1613,7 @@ _FINGERPRINT_KEYS = (
     "NARROW_BUCKET_WIDTH_F", "NARROW_BUCKET_EDGE_THRESHOLD",
     "NARROW_BUCKET_STD_INFLATION",
     "CONVECTIVE_STD_INFLATION", "CONVECTIVE_CITIES", "EXCLUDED_CITIES",
+    "TRADE_HIGH_MARKETS", "TRADE_LOW_MARKETS",
     "ENABLE_PROB_CALIBRATION", "PROB_CALIBRATION_INTERCEPT",
     "PROB_CALIBRATION_SLOPE", "MIN_BUCKET_PROB",
     "BASE_FORECAST_ERROR", "SIGMA_SPREAD_COEF", "SIGMA_SCALE_HIGH",
