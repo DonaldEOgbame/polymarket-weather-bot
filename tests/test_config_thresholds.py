@@ -170,3 +170,32 @@ class TestUnchangedGuardrails:
         assert cfg.PROB_CALIBRATION_INTERCEPT == 0.8000
         assert cfg.PROB_CALIBRATION_SLOPE == 0.7480
         assert cfg.MIN_BUCKET_PROB == 0.05
+
+
+class TestExcludedCities:
+    """Wrong-thermometer exclusions (owner decision 2026-08-13): stations whose
+    microclimate structurally diverges from the modeled air mass. Measured
+    station-vs-forecast bias 2026-08-05..11: KLAX -7.0F etc. Change the set
+    deliberately, with the refit evidence, not casually."""
+
+    def test_the_excluded_set_is_pinned(self):
+        import config
+        assert config.EXCLUDED_CITIES == {
+            "Los Angeles", "Tel Aviv", "San Francisco", "Istanbul", "Seattle"}
+
+    def test_every_excluded_city_is_a_real_station(self):
+        import config, weather
+        assert not (config.EXCLUDED_CITIES - set(weather.STATIONS))
+
+    def test_exclusion_is_a_binding_gate_not_a_scanner_filter(self):
+        """The gate must refuse entry AND stay out of NON_BINDING_GATES, while
+        the city keeps logging signals (which is why it is a gate at all)."""
+        import strategy
+        assert "excluded_city" not in strategy.NON_BINDING_GATES
+        import inspect
+        src = inspect.getsource(strategy._no_side_gates)
+        assert "excluded_city" in src
+
+    def test_fingerprint_tracks_the_set(self):
+        import config
+        assert "EXCLUDED_CITIES" in config._FINGERPRINT_KEYS

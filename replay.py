@@ -60,6 +60,7 @@ class ConfigOverride:
     max_model_confidence: float = None
     min_entry_price: float = None
     max_entry_price: float = None
+    excluded_cities: set = None
     min_depth_multiple: float = None
     max_entry_spread_fraction: float = None
     max_hours_to_resolution: float = None
@@ -200,7 +201,11 @@ def replay_row(row, ov=None):
 
     lo, hi = row["bucket_low"], row["bucket_high"]
     margin_f = pick(ov.forecast_margin_f, C.FORECAST_MARGIN_F)
+    city_name = row.get("city") or row["city_key"]
+    excluded = pick(ov.excluded_cities, C.EXCLUDED_CITIES)
     gates = [
+        ("excluded_city", 1.0 if city_name in excluded else 0.0, 0.0,
+         city_name not in excluded),
         ("edge_threshold", no_edge, thr, no_edge >= thr),
         ("model_agreement", agreement, pick(ov.min_model_agreement, C.MIN_MODEL_AGREEMENT),
          agreement >= pick(ov.min_model_agreement, C.MIN_MODEL_AGREEMENT)),

@@ -5,7 +5,7 @@ from db import execute_query
 import time as _time
 from config import (
     OPEN_METEO_URL, BASE_FORECAST_ERROR,
-    MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION, CONVECTIVE_CITIES,
+    MIN_MODEL_COUNT, CONVECTIVE_STD_INFLATION, CONVECTIVE_CITIES, EXCLUDED_CITIES,
     GFS_BIAS_CORRECTIONS, model_bias_correction,
     ENABLE_PROB_CALIBRATION, PROB_CALIBRATION_INTERCEPT, PROB_CALIBRATION_SLOPE,
     METAR_WARM_CORRECTION_F, MIN_BUCKET_PROB,
@@ -918,6 +918,7 @@ def validate_city_tables():
     validate_config_tables() for the raising entrypoint."""
     problems = []
     for label, names in (("CONVECTIVE_CITIES", CONVECTIVE_CITIES),
+                         ("EXCLUDED_CITIES", EXCLUDED_CITIES),
                          ("GFS_BIAS_CORRECTIONS", GFS_BIAS_CORRECTIONS),
                          ("CITY_SIGMA_SCALES",
                           {c for c, _ in CITY_SIGMA_SCALES})):

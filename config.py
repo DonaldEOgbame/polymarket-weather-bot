@@ -287,6 +287,28 @@ CONVECTIVE_STD_INFLATION = float(os.getenv("CONVECTIVE_STD_INFLATION", "1.3"))
 # now warns at startup if a phantom city is reintroduced here.
 CONVECTIVE_CITIES = set(os.getenv("CONVECTIVE_CITIES", "Miami,Houston,Dallas,Atlanta").split(","))
 
+# --- Wrong-thermometer exclusions (owner decision 2026-08-13) ---
+# Cities whose SETTLEMENT STATION is structurally divergent from the air mass
+# the models (and every public weather source) describe — marine-layer or
+# sea-breeze-capped airports where "the high escapes upward" dies at the
+# station while the city cooks. Measured station-vs-entry-forecast bias over
+# the 2026-08-05..11 settlement week: Los Angeles/KLAX -7.0F (beach station,
+# marine layer), Tel Aviv/LLBG -3.5F, San Francisco/KSFO -2.7F (fog belt),
+# Istanbul/LTFM -1.9F (35km out on the Black Sea coast), Seattle/KSEA -1.8F.
+# Blocked as a BINDING gate in strategy, NOT filtered in the scanner: their
+# signals must keep logging into replay_signals so the weekly per-city
+# calibration can score them and earn a city its way back in (delete it here
+# when the refit shows the bias handled). Convective TX cities are a different
+# disease (station fine, storms unpredictable) and stay tradeable under
+# CONVECTIVE_STD_INFLATION. Probation watchlist (structurally suspect, not
+# yet blocked): Seoul/Incheon-island, Milan/Malpensa, Shanghai/Pudong,
+# Chongqing, Buenos Aires/Ezeiza, Moscow (source-change history), Karachi.
+EXCLUDED_CITIES = set(
+    c.strip() for c in os.getenv(
+        "EXCLUDED_CITIES",
+        "Los Angeles,Tel Aviv,San Francisco,Istanbul,Seattle").split(",")
+    if c.strip())
+
 # --- Probability calibration (Platt scaling on the raw Gaussian bucket prob) ---
 # The raw normal-CDF bucket probability is systematically OVERCONFIDENT: measured on
 # 96,307 resolved signals (2026-07-04), buckets the model called ~15% actually hit
@@ -1570,7 +1592,7 @@ _FINGERPRINT_KEYS = (
     "FORECAST_MARGIN_F", "YES_MARGIN_WIDTH_FRACTION",
     "NARROW_BUCKET_WIDTH_F", "NARROW_BUCKET_EDGE_THRESHOLD",
     "NARROW_BUCKET_STD_INFLATION",
-    "CONVECTIVE_STD_INFLATION", "CONVECTIVE_CITIES",
+    "CONVECTIVE_STD_INFLATION", "CONVECTIVE_CITIES", "EXCLUDED_CITIES",
     "ENABLE_PROB_CALIBRATION", "PROB_CALIBRATION_INTERCEPT",
     "PROB_CALIBRATION_SLOPE", "MIN_BUCKET_PROB",
     "BASE_FORECAST_ERROR", "SIGMA_SPREAD_COEF", "SIGMA_SCALE_HIGH",

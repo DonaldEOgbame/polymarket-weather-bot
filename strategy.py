@@ -20,7 +20,7 @@ from config import (
     FORECAST_MARGIN_F, YES_MARGIN_WIDTH_FRACTION, MAX_ENTRY_PRICE,
     MIN_DEPTH_MULTIPLE, REQUIRE_DEPTH_TO_TRADE,
     MIN_MODEL_CONFIDENCE, MAX_MODEL_CONFIDENCE, MIN_ENTRY_PRICE, MAX_HOURS_TO_RESOLUTION,
-    REQUIRE_SAME_DAY,
+    REQUIRE_SAME_DAY, EXCLUDED_CITIES,
     ARMED_REENTRY_ENABLED, ARMED_SIGNAL_TTL_HOURS,
     setting,
 )
@@ -344,6 +344,16 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
     payoff = ((1.0 - fill) / fill) if fill and fill > 0 else float("inf")
 
     return [
+        # First and BINDING: wrong-thermometer exclusion. Reported first so a
+        # blocked city's skip reason names the real cause, not a downstream
+        # gate. The signal still logs (this is a gate, not a scanner filter)
+        # so replay + weekly calibration keep scoring the city.
+        {"gate": "excluded_city",
+         "observed": 1.0 if opp.city in EXCLUDED_CITIES else 0.0,
+         "threshold": 0.0,
+         "passed": opp.city not in EXCLUDED_CITIES,
+         "detail": f"{opp.city} excluded — settlement station structurally "
+                   f"diverges from the modeled air mass (see EXCLUDED_CITIES)"},
         {"gate": "edge_threshold", "observed": no_edge, "threshold": edge_threshold,
          "passed": no_edge >= edge_threshold,
          "detail": f"Insufficient NO edge ({no_edge:.3f} < {edge_threshold})"},
