@@ -307,10 +307,12 @@ CONVECTIVE_CITIES = set(os.getenv("CONVECTIVE_CITIES", "Miami,Houston,Dallas,Atl
 # Pudong, Chongqing, Buenos Aires/Ezeiza, Moscow (source-change history),
 # Karachi. Beijing's -2.6F has no structural siting story: treated as model
 # bias for recalibration, not a broken thermometer.
+# 2026-08-13, hours after shipping: owner reversed to recalibrate-FIRST — the
+# default set is EMPTY. The gate machinery stays; the tier analysis above is
+# the recalibration worklist, and any city the weekly refit cannot fix gets
+# re-added here (env or default) with that evidence attached.
 EXCLUDED_CITIES = set(
-    c.strip() for c in os.getenv(
-        "EXCLUDED_CITIES",
-        "Los Angeles,Tel Aviv,San Francisco,Istanbul,Seattle,Milan,Seoul").split(",")
+    c.strip() for c in os.getenv("EXCLUDED_CITIES", "").split(",")
     if c.strip())
 
 # --- Probability calibration (Platt scaling on the raw Gaussian bucket prob) ---

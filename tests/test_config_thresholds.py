@@ -180,9 +180,10 @@ class TestExcludedCities:
 
     def test_the_excluded_set_is_pinned(self):
         import config
-        assert config.EXCLUDED_CITIES == {
-            "Los Angeles", "Tel Aviv", "San Francisco", "Istanbul", "Seattle",
-            "Milan", "Seoul"}  # Milan+Seoul added 2026-08-13 (bias bar / island siting)
+        # 2026-08-13 (same day, hours apart): blocked 5 -> 7 -> owner reversed
+        # to recalibrate-first; default is EMPTY. The gate stays; re-add cities
+        # here only with refit evidence.
+        assert config.EXCLUDED_CITIES == set()
 
     def test_every_excluded_city_is_a_real_station(self):
         import config, weather
