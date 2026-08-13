@@ -300,13 +300,17 @@ CONVECTIVE_CITIES = set(os.getenv("CONVECTIVE_CITIES", "Miami,Houston,Dallas,Atl
 # calibration can score them and earn a city its way back in (delete it here
 # when the refit shows the bias handled). Convective TX cities are a different
 # disease (station fine, storms unpredictable) and stay tradeable under
-# CONVECTIVE_STD_INFLATION. Probation watchlist (structurally suspect, not
-# yet blocked): Seoul/Incheon-island, Milan/Malpensa, Shanghai/Pudong,
-# Chongqing, Buenos Aires/Ezeiza, Moscow (source-change history), Karachi.
+# CONVECTIVE_STD_INFLATION. Milan added 2026-08-13 (bias -2.4F, Malpensa 40km
+# out — same bar as Istanbul); Seoul added on SITING alone (RKSI = Incheon,
+# an island 50km offshore; one benign week does not clear that structure).
+# Probation watchlist (structurally suspect, not yet blocked): Shanghai/
+# Pudong, Chongqing, Buenos Aires/Ezeiza, Moscow (source-change history),
+# Karachi. Beijing's -2.6F has no structural siting story: treated as model
+# bias for recalibration, not a broken thermometer.
 EXCLUDED_CITIES = set(
     c.strip() for c in os.getenv(
         "EXCLUDED_CITIES",
-        "Los Angeles,Tel Aviv,San Francisco,Istanbul,Seattle").split(",")
+        "Los Angeles,Tel Aviv,San Francisco,Istanbul,Seattle,Milan,Seoul").split(",")
     if c.strip())
 
 # --- Probability calibration (Platt scaling on the raw Gaussian bucket prob) ---

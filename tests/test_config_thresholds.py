@@ -181,7 +181,8 @@ class TestExcludedCities:
     def test_the_excluded_set_is_pinned(self):
         import config
         assert config.EXCLUDED_CITIES == {
-            "Los Angeles", "Tel Aviv", "San Francisco", "Istanbul", "Seattle"}
+            "Los Angeles", "Tel Aviv", "San Francisco", "Istanbul", "Seattle",
+            "Milan", "Seoul"}  # Milan+Seoul added 2026-08-13 (bias bar / island siting)
 
     def test_every_excluded_city_is_a_real_station(self):
         import config, weather
