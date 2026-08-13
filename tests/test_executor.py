@@ -1144,6 +1144,43 @@ class TestDailyTradeCap:
         assert any("WHERE city=?" in c for c in calls)       # ...past the cap
 
 
+class TestUnrecordedFillGuards:
+    """Moscow 2026-08-13: /data filled up overnight, the CLOB fill succeeded,
+    the DB insert failed, and the next four scans each re-bought the same
+    market ($12 of a $3 stake). Two guards now exist; both must stay."""
+
+    class _Opp:
+        market_id = "0xm"
+        city = "Moscow"
+        date = "2026-08-13"
+        question = "q"
+        is_high = True
+
+    def _signal(self):
+        return {"opp": self._Opp(), "side": "NO", "size_usdc": 3.0, "price": 0.74,
+                "edge": 0.1, "model_prob": 0.2, "token_id": "t", "model_count": 4}
+
+    def test_halted_process_refuses_all_entries(self, monkeypatch):
+        import executor as ex
+        e = Executor.__new__(Executor)
+        e._entry_recording_broken = True
+        calls = []
+        monkeypatch.setattr(ex, "get_open_position",
+                            lambda mid: calls.append(mid) or None)
+        e.execute_trade(self._signal())
+        assert calls == []   # returned before even the first DB read
+
+    def test_wallet_precheck_sits_before_the_order_submit(self):
+        """The wallet is the ledger of last resort: the holdings check must
+        run before any live submit, and the record call must be guarded so a
+        failure halts future entries instead of enabling a re-buy loop."""
+        import inspect, executor as ex
+        src = inspect.getsource(ex.Executor.execute_trade)
+        assert src.index("get_wallet_token_sizes") < src.index("_submit_marketable_limit")
+        assert "_entry_recording_broken = True" in src
+        assert src.index("open_position_atomic") < src.index("_entry_recording_broken = True")
+
+
 class TestManualClose:
     """Dashboard 'Close' button — Executor.close_position_manual.
 

@@ -1198,6 +1198,13 @@ class Executor:
     def execute_trade(self, signal_data):
         opp = signal_data["opp"]
 
+        if getattr(self, "_entry_recording_broken", False):
+            logging.warning(
+                f"Entries halted (a fill went unrecorded earlier this process) — "
+                f"skipping {opp.city} {opp.date}. Restart after adopting the "
+                f"orphan position to re-arm.")
+            return
+
         if get_open_position(opp.market_id):
             logging.info(f"Already holding position in {opp.market_id} — skipping")
             return
@@ -1347,6 +1354,33 @@ class Executor:
         entry_fee = 0.0  # paper mode: fee is modeled inside transaction_cost, not the ledger
 
         if not paper_mode():
+            # THE WALLET IS THE LEDGER OF LAST RESORT (Moscow 2026-08-13): when
+            # /data filled overnight, four consecutive scans each bought this
+            # market — the CLOB fill succeeded, the DB record failed, and the
+            # next scan saw "no open position" and bought again. The DB cannot
+            # protect against its own write failures, so before ANY live buy,
+            # ask the chain: if the wallet already holds this token, a previous
+            # record was lost — adopt manually, never re-buy. Fails OPEN on an
+            # unreadable Data-API (its flakes are common; the loss-of-record
+            # event is rare) but BLOCKS on positive holdings.
+            try:
+                from scanner import get_wallet_token_sizes
+                held = (get_wallet_token_sizes(POLYMARKET_FUNDER) or {}).get(
+                    str(signal_data["token_id"]), 0.0) if POLYMARKET_FUNDER else 0.0
+            except Exception as e:
+                logging.error(f"wallet-holdings precheck failed for {opp.market_id}: {e}")
+                held = 0.0
+            if held >= 1.0:
+                msg = (f"{opp.city} {opp.date}: wallet already holds {held:.2f} of this "
+                       f"token but no position is recorded — a previous entry's DB "
+                       f"record was lost. NOT re-buying; adopt the position manually.")
+                logging.critical(f"UNRECORDED_POSITION | {msg}")
+                try:
+                    add_notification("execution", "error", msg)
+                except Exception:
+                    pass
+                return
+
             logging.info(
                 f"Executing LIVE trade: BUY ${size:.2f} of {opp.market_id} {side} "
                 f"(quote=${quoted_price:.4f}, limit=${price:.4f}, "
@@ -1374,13 +1408,34 @@ class Executor:
             )
 
         now_iso = datetime.now(timezone.utc).isoformat()
-        open_position_atomic(
-            market_id=opp.market_id, token_id=signal_data["token_id"], side=side,
-            price=price, size=size, now_iso=now_iso, question=opp.question,
-            is_high=opp.is_high, city=opp.city, target_date=opp.date,
-            model_prob=signal_data["model_prob"], edge=signal_data["edge"],
-            shares=shares, entry_fee=entry_fee, risk_direction=direction,
-        )
+        try:
+            open_position_atomic(
+                market_id=opp.market_id, token_id=signal_data["token_id"], side=side,
+                price=price, size=size, now_iso=now_iso, question=opp.question,
+                is_high=opp.is_high, city=opp.city, target_date=opp.date,
+                model_prob=signal_data["model_prob"], edge=signal_data["edge"],
+                shares=shares, entry_fee=entry_fee, risk_direction=direction,
+            )
+        except Exception as e:
+            # A live fill exists that the ledger could not record (this is how
+            # the disk-full night produced 4x Moscow). Entering again would
+            # compound it, and there is no safe automatic recovery while writes
+            # are failing — halt NEW entries for this process lifetime and
+            # scream. Exits/monitoring continue; a restart (which implies a
+            # human looked) re-arms entries.
+            self._entry_recording_broken = True
+            logging.critical(
+                f"ENTRY RECORDING FAILED after a live fill | {opp.city} {opp.date} "
+                f"| ${size:.2f} @ {price:.4f} filled but not recorded: {e} — "
+                f"halting all new entries until restart; adopt the position manually.")
+            try:
+                add_notification(
+                    "execution", "error",
+                    f"{opp.city} {opp.date}: fill ${size:.2f} @ {price:.4f} NOT "
+                    f"RECORDED ({e}). New entries halted until restart.")
+            except Exception:
+                pass
+            return
         send_trade_entry(opp.question, price, signal_data["model_prob"], signal_data["edge"], size)
         # Consume any armed re-entry waiver AFTER the position books, not at
         # signal time: a FAK that fills nothing must leave the arm alive so the
