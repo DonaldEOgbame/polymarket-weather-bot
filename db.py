@@ -84,6 +84,16 @@ def _backfill_model_accuracy_is_high(conn):
 def init_db():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     with sqlite3.connect(DB_PATH) as conn:
+        # WAL (2026-08-13): under the take-everything rule set a scan writes
+        # thousands of signal/replay rows, and in rollback-journal mode that
+        # single writer starved every dashboard read AND the manual close
+        # button with "database is locked" bursts. WAL lets readers proceed
+        # during write bursts; writers still serialize via busy timeouts.
+        # synchronous stays at its default — this is a money ledger, commits
+        # must survive power loss, not just process death. backup.py uses the
+        # conn.backup() API, which is WAL-safe. The pragma is persistent on
+        # the DB file; setting it here covers fresh volumes.
+        conn.execute("PRAGMA journal_mode=WAL")
         conn.execute('''
             CREATE TABLE IF NOT EXISTS trades (
                 id INTEGER PRIMARY KEY AUTOINCREMENT,
