@@ -676,9 +676,6 @@ ARMED_REENTRY_ENABLED = os.getenv("ARMED_REENTRY_ENABLED", "true").lower() == "t
 # 16 to match MAX_HOURS_TO_RESOLUTION (2026-08-12): validate_env_ranges refuses
 # a TTL longer than the trading window, and an arm outliving the window could
 # only ever fire outside it.
-# Moves with MAX_HOURS_TO_RESOLUTION (validate_env_ranges refuses boot when
-# TTL > window): 16 -> 48 with the 2026-08-14 widening.
-ARMED_SIGNAL_TTL_HOURS = float(os.getenv("ARMED_SIGNAL_TTL_HOURS", "48"))
 
 # One trade per city per target day (user rule 2026-07-28). The live log shows repeat
 # same-city/same-day entries stacking correlated risk on one weather outcome: two Hong
@@ -919,6 +916,16 @@ MIN_VOLUME = float(os.getenv("MIN_VOLUME", "500"))
 # still at 0.75 two days out is genuinely uncertain, while one that only
 # reaches 0.75 in its final hours is usually drifting against the favourite.
 MAX_HOURS_TO_RESOLUTION = float(_tunable("MAX_HOURS_TO_RESOLUTION", "48.0"))
+
+# DERIVED from the effective entry window, not pinned independently. An arm can
+# only form inside the window, so a TTL longer than the window is a waiver that
+# outlives the market — validate_env_ranges refuses boot on that. Pinning both
+# numbers separately bricked the 2026-08-14 deploy: the code shipped TTL=48
+# while a stale settings row still held the window at 16, and the bot thread
+# died on every boot. Deriving it means the two can never disagree, whichever
+# layer (default, env, or dashboard row) is setting the window.
+ARMED_SIGNAL_TTL_HOURS = float(
+    os.getenv("ARMED_SIGNAL_TTL_HOURS") or MAX_HOURS_TO_RESOLUTION)
 # false since 2026-08-14: the 48h window is by definition not same-day, so
 # leaving this on would refuse every market the widened window exists to
 # catch. Time is now governed solely by MAX_HOURS_TO_RESOLUTION.
