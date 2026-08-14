@@ -378,7 +378,7 @@ def _print_startup_summary():
         "=" * 52,
         f"  Bankroll     : ${portfolio['total_equity']:.2f}  (cash ${portfolio['available_cash']:.2f}  locked ${portfolio['locked_cash']:.2f})",
         f"  Open pos     : {open_pos} / {setting('MAX_CONCURRENT_POSITIONS')}  |  Daily loss limit: ${daily_loss_limit():.2f} ({setting('DAILY_LOSS_STAKES'):g} stakes)",
-        f"  Entry rules  : LOWS ONLY (2026-08-13)  |  same-day ≤ {MAX_HOURS_TO_RESOLUTION:.0f}h to local day end  |  direction agrees  |  price {MIN_ENTRY_PRICE:.2f}–{MAX_ENTRY_PRICE:.2f}  |  trapped-min guard  (margin/edge/highs logged, non-binding)",
+        f"  Entry rules  : LOWS ONLY  |  ≤ {MAX_HOURS_TO_RESOLUTION:.0f}h to local day end (2026-08-14 widening)  |  direction agrees  |  margin ≥ {FORECAST_MARGIN_F:g}°F  |  price {MIN_ENTRY_PRICE:.2f}–{MAX_ENTRY_PRICE:.2f}  |  trapped-min guard  (edge/highs logged, non-binding)",
         f"  Book safety  : depth ≥ {MIN_DEPTH_MULTIPLE:g}× stake  |  spread frac ≤ {MAX_ENTRY_SPREAD_FRACTION:.0%}  |  stake ${effective_stake():.2f} flat, slots capped by cash",
         f"  Shadow gates : agreement ≥ {SHADOW_MIN_AGREEMENT:.0%}  |  spread < {SHADOW_MAX_SPREAD_STD}°F sd  |  {shadow_label}",
         f"  Market filter: vol ≥ ${MIN_VOLUME:,.0f}  |  ≤ {MAX_HOURS_TO_RESOLUTION:.0f}h to resolution",

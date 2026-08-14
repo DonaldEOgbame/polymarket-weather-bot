@@ -54,5 +54,5 @@ def test_expired_submarket_dropped_even_if_event_still_open(monkeypatch):
 
     assert today_market in weather_markets
     assert expired_market not in weather_markets
-    assert tomorrow_market not in weather_markets   # beyond the 40h horizon
-    assert len(weather_markets) == 1
+    assert tomorrow_market in weather_markets   # inside the 72h horizon
+    assert len(weather_markets) == 2   # today + tomorrow; only the expired one drops

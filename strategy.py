@@ -316,7 +316,11 @@ NON_BINDING_GATES = frozenset({
     "model_spread_sd",
     "model_confidence",
     "max_model_confidence",
-    # forecast_margin demoted 2026-08-13 evening (owner: "use this instead",
+    # NOTE: forecast_margin was demoted 2026-08-13 evening and RE-BOUND
+    # 2026-08-14 with the 48h widening (removed from this set below) — at 48h
+    # the margin gate earns its place again: last 2 weeks 87.9% (n=66, EV
+    # $0.52) with margin binding vs 79.9% (n=189, EV $0.21) direction-only.
+    # Original 2026-08-13 note kept for the record: (owner: "use this instead",
     # picking the direction-gate row of the five-window backtest): on lows the
     # margin gate's rejects still win 81.1% vs 75.5% break-even (+$66.7/yr at
     # $3) — profitable flow it was discarding. Direction-only lows: 83.8% on
@@ -324,7 +328,6 @@ NON_BINDING_GATES = frozenset({
     # is ride quality (median drawdown -15% vs -1%, ~93 deep transits/yr) —
     # the physics-gated exits and trapped-min guard stay on to manage exactly
     # that. Margin keeps logging for the counterfactual.
-    "forecast_margin",
 })
 
 

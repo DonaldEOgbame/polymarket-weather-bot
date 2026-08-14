@@ -114,7 +114,7 @@ class TestUnchangedGuardrails:
         """16h to the local civil day end (owner decision 2026-08-12): only
         markets resolving the same day, entered on the target day itself.
         Was 24.0."""
-        assert cfg.MAX_HOURS_TO_RESOLUTION == 16.0
+        assert cfg.MAX_HOURS_TO_RESOLUTION == 48.0  # 2026-08-14: widened, 16h was starved
 
     def test_armed_ttl_never_outlives_the_trading_window(self, cfg):
         """validate_env_ranges refuses TTL > MAX_HOURS_TO_RESOLUTION; the two
@@ -130,11 +130,10 @@ class TestUnchangedGuardrails:
         import strategy
         assert strategy.NON_BINDING_GATES == {
             "edge_threshold", "model_agreement", "model_spread_sd",
-            "model_confidence", "max_model_confidence",
-            # 2026-08-13 evening: forecast_margin demoted — owner picked the
-            # direction-gate row (lows 83.8%/n=425/+$138.51 vs full stack
-            # 89.8%/n=128/+$71.93; margin's rejects were profitable flow).
-            "forecast_margin"}
+            "model_confidence", "max_model_confidence"}
+        # forecast_margin RE-BOUND 2026-08-14 with the 48h widening: at 48h the
+        # full stack (margin binding) beats direction-only on every recency
+        # window — last 2 weeks 87.9% vs 79.9%, EV $0.52 vs $0.21.
 
     def test_narrow_bucket_std_inflation_still_on(self, cfg):
         """Second corrector of the same defect. Removing it too would be the

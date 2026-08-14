@@ -676,7 +676,9 @@ ARMED_REENTRY_ENABLED = os.getenv("ARMED_REENTRY_ENABLED", "true").lower() == "t
 # 16 to match MAX_HOURS_TO_RESOLUTION (2026-08-12): validate_env_ranges refuses
 # a TTL longer than the trading window, and an arm outliving the window could
 # only ever fire outside it.
-ARMED_SIGNAL_TTL_HOURS = float(os.getenv("ARMED_SIGNAL_TTL_HOURS", "16"))
+# Moves with MAX_HOURS_TO_RESOLUTION (validate_env_ranges refuses boot when
+# TTL > window): 16 -> 48 with the 2026-08-14 widening.
+ARMED_SIGNAL_TTL_HOURS = float(os.getenv("ARMED_SIGNAL_TTL_HOURS", "48"))
 
 # One trade per city per target day (user rule 2026-07-28). The live log shows repeat
 # same-city/same-day entries stacking correlated risk on one weather outcome: two Hong
@@ -901,8 +903,26 @@ MIN_VOLUME = float(os.getenv("MIN_VOLUME", "500"))
 # target day itself. Hours are measured to the station's LOCAL civil day end
 # (scanner.get_target_day_end_utc, the 5e0bce4 fix) — <=16h implies the local
 # calendar day has already started, so this bound alone enforces same-day.
-MAX_HOURS_TO_RESOLUTION = float(_tunable("MAX_HOURS_TO_RESOLUTION", "16.0"))
-REQUIRE_SAME_DAY = str(_tunable("REQUIRE_SAME_DAY", "true")).strip().lower() == "true"
+# 48.0 (owner decision 2026-08-14, after a full day with ZERO executable
+# entries): at 16h the dawn minimum has already printed, the crowd has
+# repriced to certainty (3,367 of 3,667 low observations sat >=$0.95) and
+# nobody rests orders — 95% of skips were the depth gate on empty books, and
+# exactly ONE market touched 0.70-0.80 all day. Widening to 48h catches these
+# markets while the outcome is still uncertain, which is also when makers
+# quote. Backtest (9,702 low markets, band held at 0.70-0.80, full stack):
+#   16h  128 trades/yr  89.8%  EV $0.56   <- starved: ~1 candidate/day
+#   24h  385 trades/yr  85.5%  EV $0.38
+#   48h  842 trades/yr  91.1%  EV $0.59   <- 18.8 candidates/day recently
+# Recent-window check (48h full stack): last week 87.1% (n=31), last 2 weeks
+# 87.9% (n=66) against a ~75% break-even — the edge survives the current,
+# more liquid market. Non-monotonic 16->24->48 is a selection effect: a market
+# still at 0.75 two days out is genuinely uncertain, while one that only
+# reaches 0.75 in its final hours is usually drifting against the favourite.
+MAX_HOURS_TO_RESOLUTION = float(_tunable("MAX_HOURS_TO_RESOLUTION", "48.0"))
+# false since 2026-08-14: the 48h window is by definition not same-day, so
+# leaving this on would refuse every market the widened window exists to
+# catch. Time is now governed solely by MAX_HOURS_TO_RESOLUTION.
+REQUIRE_SAME_DAY = str(_tunable("REQUIRE_SAME_DAY", "false")).strip().lower() == "true"
 
 # --- Market Discovery ---
 # Markets per API page (Gamma API max is 100)
