@@ -18,7 +18,7 @@ from config import (
     DEBUG_MARKET_SCAN, DEBUG_MARKET_SCAN_VERBOSE, DEBUG_WEATHER_DISCOVERY,
     MARKET_DISCOVERY_LIMIT, MARKET_DISCOVERY_MAX_PAGES,
     MARKET_DISCOVERY_STOP_AFTER_WEATHER, MAX_CLOB_CANDIDATES,
-    MAX_BUCKETS_PER_CITY_DATE,
+    MAX_BUCKETS_PER_CITY_DATE, TRADE_HIGH_MARKETS, TRADE_LOW_MARKETS,
 )
 from utils import (get_session, parse_utc_datetime, safe_get, get_cached_price,
                    set_cached_price, get_cached_depth, get_cached_top_size)
@@ -51,6 +51,28 @@ def _c_to_f(c: float) -> float:
 # (91.0, 91.8)) is instantly detectable from the DB, instead of requiring a
 # multi-hour forensic timestamp-correlation audit to even notice it happened.
 PARSER_VERSION = 3  # v3: strict vs inclusive threshold phrasing split (±1 whole degree)
+
+
+def parse_market_direction(question: str) -> tuple[bool, bool]:
+    """Return (is_low, is_high) for a market question using whole-word matching."""
+    q_lower = question.lower()
+    low_keywords = ("low", "min", "lowest", "minimum", "cold", "coolest")
+    high_keywords = ("high", "max", "highest", "maximum", "warm", "hottest")
+
+    def _word_pos(w):
+        m = re.search(r'\b' + re.escape(w) + r'\b', q_lower)
+        return m.start() if m else None
+
+    low_hits = [p for p in (_word_pos(w) for w in low_keywords) if p is not None]
+    high_hits = [p for p in (_word_pos(w) for w in high_keywords) if p is not None]
+    is_low, is_high = bool(low_hits), bool(high_hits)
+    if is_high and is_low:
+        is_high = min(high_hits) <= min(low_hits)
+        is_low = not is_high
+    elif not is_high and not is_low:
+        is_high = True
+        is_low = False
+    return is_low, is_high
 
 
 def parse_bucket(question: str):
@@ -805,8 +827,10 @@ def prefetch_order_books(opportunities, max_workers: int = 20) -> None:
     """
     token_ids = set()
     for opp in opportunities:
-        token_ids.add(opp.token_id_yes)
         token_ids.add(opp.token_id_no)
+        # Only query YES order book if high markets / YES trades are enabled
+        if TRADE_HIGH_MARKETS:
+            token_ids.add(opp.token_id_yes)
     if not token_ids:
         return
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
@@ -1143,8 +1167,21 @@ def scan_markets():
     prefiltered = []
     prefilter_skipped = 0
     volume_skipped = 0
+    direction_skipped = 0
     for m in weather_markets:
         q = m.get("question", "")
+        # Early direction filter: avoid CLOB queries and scoring for disabled market directions
+        if not TRADE_HIGH_MARKETS and TRADE_LOW_MARKETS:
+            is_low_m, is_high_m = parse_market_direction(q)
+            if is_high_m or not is_low_m:
+                direction_skipped += 1
+                continue
+        elif TRADE_HIGH_MARKETS and not TRADE_LOW_MARKETS:
+            is_low_m, is_high_m = parse_market_direction(q)
+            if is_low_m or not is_high_m:
+                direction_skipped += 1
+                continue
+
         city_key, _ = get_station_coords(q)
         if not city_key:
             prefilter_skipped += 1
@@ -1158,9 +1195,10 @@ def scan_markets():
             volume_skipped += 1
             continue
         prefiltered.append(m)
-    if prefilter_skipped or volume_skipped:
+    if prefilter_skipped or volume_skipped or direction_skipped:
         logging.info(
-            f"Pre-filter: {prefilter_skipped} dropped (no station/bucket), "
+            f"Pre-filter: {direction_skipped} dropped (direction disabled), "
+            f"{prefilter_skipped} dropped (no station/bucket), "
             f"{volume_skipped} dropped (volume < {MIN_VOLUME:.0f}), "
             f"{len(prefiltered)} remain for CLOB evaluation"
         )
@@ -1452,24 +1490,7 @@ def scan_markets():
                 do_skip("No orderbook liquidity", "price_missing")
                 continue
 
-            q_lower = question.lower()
-            # Whole-word matching only: bare substring matching flagged "40°F or
-            # below" (and even "Glasgow") as daily-LOW markets via the "low" inside
-            # "below"/"glasgow".
-            low_keywords  = ("low", "min", "lowest", "minimum", "cold", "coolest")
-            high_keywords = ("high", "max", "highest", "maximum", "warm", "hottest")
-            def _word_pos(w):
-                m = re.search(r'\b' + re.escape(w) + r'\b', q_lower)
-                return m.start() if m else None
-            low_hits  = [p for p in (_word_pos(w) for w in low_keywords) if p is not None]
-            high_hits = [p for p in (_word_pos(w) for w in high_keywords) if p is not None]
-            is_low, is_high = bool(low_hits), bool(high_hits)
-            if is_high and is_low:
-                # Both present (e.g. "high of 70 low of 55") — pick by which comes first
-                is_high = min(high_hits) <= min(low_hits)
-            elif not is_high and not is_low:
-                # Ambiguous — default to high (daily max is the most common market type)
-                is_high = True
+            is_low, is_high = parse_market_direction(question)
 
             opp = MarketOpportunity(
                 market_id=market_id,

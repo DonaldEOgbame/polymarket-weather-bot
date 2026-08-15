@@ -520,7 +520,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     # A wide spread means the cost of actually crossing the book is likely to eat
     # most or all of the modeled edge, so it gates entry outright rather than just
     # being netted out of the edge calculation.
-    yes_spread_frac = get_live_spread_fraction(opp.token_id_yes)
+    # Only fetch the YES spread if High markets are enabled.
+    yes_spread_frac = get_live_spread_fraction(opp.token_id_yes) if TRADE_HIGH_MARKETS else 0.0
     no_spread_frac = get_live_spread_fraction(opp.token_id_no)
 
     # What the intended stake would ACTUALLY fill at, by walking the real book.
@@ -548,7 +549,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     # move — and silently assumes the size fits in the top level. When it does
     # not, the order pays every level it eats: modelled 0.085 against an actual
     # 0.34 on the Austin book, a 4x understatement.
-    yes_edge = (prob - opp.yes_price) - transaction_cost(opp.yes_price, yes_spread_frac)
+    yes_edge = (prob - opp.yes_price) - transaction_cost(opp.yes_price, yes_spread_frac) if (TRADE_HIGH_MARKETS and opp.yes_price > 0) else -1.0
     no_slip_frac = no_spread_frac
     if walked_vwap is not None and opp.no_price > 0:
         # Realised slippage as a fraction of the quote, so transaction_cost's
