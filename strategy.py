@@ -831,8 +831,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                     signal = None
                     skip_reason = f"Calculated size ${final_size:.2f} below minimum ${MIN_POSITION_SIZE}"
 
-            # Enforce maximum total exposure cap across the portfolio
-            if signal and locked_cash + final_size > total_equity * exposure_fraction:
+            # Enforce maximum total exposure cap across the portfolio (in flat stake mode, concurrency is bounded by MAX_CONCURRENT_POSITIONS)
+            if signal and fixed_stake <= 0 and locked_cash + final_size > total_equity * exposure_fraction:
                 signal = None
                 skip_reason = f"Total exposure cap reached. Locked: ${locked_cash:.2f}, Size: ${final_size:.2f}, Max Allowed: ${total_equity * exposure_fraction:.2f}"
 
