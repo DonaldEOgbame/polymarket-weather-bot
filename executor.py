@@ -1416,7 +1416,7 @@ class Executor:
             )
             if USE_MARKETABLE_LIMIT:
                 fill = self._submit_marketable_limit(
-                    signal_data["token_id"], "BUY", size, limit_price=price,
+                    signal_data["token_id"], "BUY", size, limit_price=MAX_ENTRY_PRICE,
                     fallback_price=price)
             else:
                 fill = self._submit_taker(signal_data["token_id"], "BUY", size,
