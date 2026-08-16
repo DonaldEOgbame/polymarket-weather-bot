@@ -78,11 +78,11 @@ def forecast_margin_ok(side, ensemble_mean, bucket_low, bucket_high, margin_f):
     narrow buckets instead of silently becoming impossible twice over."""
     if margin_f <= 0 or bucket_low is None or bucket_high is None:
         return True
-    lo = bucket_low - 0.5   # same ±0.5 padding get_bucket_probability uses
-    hi = bucket_high + 0.5
     if side == "NO":
-        return ensemble_mean <= lo - margin_f or ensemble_mean >= hi + margin_f
+        return ensemble_mean <= bucket_low - margin_f or ensemble_mean >= bucket_high + margin_f
     # YES: mean must be comfortably inside the bucket, clear of both edges
+    lo = bucket_low - 0.5
+    hi = bucket_high + 0.5
     half_width = (hi - lo) / 2.0
     effective_margin = min(margin_f, half_width * YES_MARGIN_WIDTH_FRACTION)
     return lo + effective_margin <= ensemble_mean <= hi - effective_margin
