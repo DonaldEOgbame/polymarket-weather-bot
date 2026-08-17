@@ -22,7 +22,7 @@ primary_region = 'arn'
   TRADE_LOW_MARKETS = 'true'
   TRADE_HIGH_MARKETS = 'false'
   MAX_HOURS_TO_RESOLUTION = '48.0'
-  FORECAST_MARGIN_F = '2.0'
+  FORECAST_MARGIN_F = '2.5'
 
 [processes]
   app = 'python app.py'

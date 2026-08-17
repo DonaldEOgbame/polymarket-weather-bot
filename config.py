@@ -207,7 +207,7 @@ METAR_WARM_CORRECTION_F = float(os.getenv("METAR_WARM_CORRECTION_F", "0.0"))
 # losers all sat within ~2.1°F of a boundary. Requiring real daylight between the
 # forecast and the boundary is what separates a defensible bet from a gamble.
 # Set to 0 to disable. Applies only to bounded (exact/range) buckets.
-FORECAST_MARGIN_F = float(os.getenv("FORECAST_MARGIN_F", "2.0"))
+FORECAST_MARGIN_F = float(os.getenv("FORECAST_MARGIN_F", "2.5"))
 
 # YES-side margin cap, as a fraction of the padded bucket's half-width. Every real
 # bucket here (0.8-2.8°F padded-wide) is narrower than 2*FORECAST_MARGIN_F, so an
