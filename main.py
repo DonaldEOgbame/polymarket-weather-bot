@@ -14,7 +14,7 @@ from scanner import scan_markets, verify_parser_fixtures, prefetch_order_books
 from strategy import evaluate_opportunity
 from executor import Executor
 from alerts import send_daily_summary, send_error_alert, send_circuit_breaker_alert
-from config import SCAN_INTERVAL_MINUTES, MONITOR_INTERVAL_MINUTES, daily_loss_limit
+from config import SCAN_INTERVAL_MINUTES, MONITOR_INTERVAL_MINUTES, daily_loss_limit, setting
 from weather import (log_model_accuracy, get_station_coords, prefetch_signal_engines,
                      validate_config_tables)
 from metar import final_extreme_f
@@ -201,6 +201,11 @@ def run_scan_cycle():
         return
     if trading_paused:
         logging.info("Scan skipped: era cutover in progress.")
+        _beat()
+        return
+    if setting("PAUSE_SCANNING"):
+        logging.info("Scan skipped: bot scanning is paused.")
+        _beat()
         return
 
     try:
@@ -370,11 +375,12 @@ def _print_startup_summary():
                             (current_mode(),))[0]["c"]
 
     mode = "PAPER" if paper_mode() else "LIVE"
+    scan_state = "PAUSED (no scanning)" if setting("PAUSE_SCANNING") else "ACTIVE"
     shadow_label = f"exploration ON (max ${SHADOW_MAX_SIZE_USDC:.2f})" if ENABLE_SHADOW_EXPLORATION else "log only"
     lines = [
         "",
         "=" * 52,
-        f"  Polymarket Weather Bot  [{mode} MODE]",
+        f"  Polymarket Weather Bot  [{mode} MODE]  [{scan_state}]",
         "=" * 52,
         f"  Bankroll     : ${portfolio['total_equity']:.2f}  (cash ${portfolio['available_cash']:.2f}  locked ${portfolio['locked_cash']:.2f})",
         f"  Open pos     : {open_pos} / {setting('MAX_CONCURRENT_POSITIONS')}  |  Daily loss limit: ${daily_loss_limit():.2f} ({setting('DAILY_LOSS_STAKES'):g} stakes)",

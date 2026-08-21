@@ -64,6 +64,7 @@ MODEL_META = {
 # fitted from resolved-trade data and carry their provenance in config.py
 # comments, so editing them from a web form would divorce value from evidence.
 SETTING_SPECS = {
+    'PAUSE_SCANNING':             ('bool',  None,    None,  'Pause scanning'),
     'FIXED_POSITION_SIZE':        ('float', 1.0,     100.0, 'Stake per trade'),
     'MAX_CONCURRENT_POSITIONS':   ('int',   1,       50,    'Max concurrent positions'),
     # The daily loss limit is DYNAMIC: expressed as a budget of full-stake
@@ -77,6 +78,8 @@ SETTING_SPECS = {
     'TAKE_PROFIT_PRICE':          ('float', 0.50,    0.999, 'Take profit price'),
     'MAX_HOURS_TO_RESOLUTION':    ('float', 1.0,     168.0, 'Max hours to resolution'),
     'REQUIRE_SAME_DAY':           ('bool',  None,    None,  'Require same-day trade'),
+    'MIN_ENTRY_PRICE':            ('float', 0.10,    0.95,  'Min entry price'),
+    'MAX_ENTRY_PRICE':            ('float', 0.50,    0.99,  'Max entry price'),
 }
 
 _TRUE_STRINGS = {'true', '1', 'yes', 'on'}
@@ -330,6 +333,12 @@ def api_settings_post():
             f'The exposure cap allows ${exposure_cap:.2f} in total, less than one '
             f'${size:.2f} position — no trade could ever open.')
 
+    min_entry = eff('MIN_ENTRY_PRICE')
+    max_entry = eff('MAX_ENTRY_PRICE')
+    if min_entry >= max_entry:
+        field_errors['MIN_ENTRY_PRICE'] = (
+            f'Min entry price (${min_entry:.2f}) must be strictly less than max entry price (${max_entry:.2f}).')
+
     if field_errors:
         return jsonify(error='validation failed', field_errors=field_errors), 400
 
@@ -468,6 +477,24 @@ def api_trading_mode():
                    message=f'Now trading in {mode} mode. This applies to the very next '
                            f'decision the bot makes.' + opened)
 
+
+@app.post('/api/pause')
+@require_auth
+def api_pause():
+    """Pause or resume scanning live without restarting."""
+    from db import save_settings, add_notification
+    d = request.get_json(silent=True) or {}
+    if 'paused' not in d:
+        return jsonify(error='send {"paused": true|false}'), 400
+    paused = bool(d['paused'])
+    save_settings({'PAUSE_SCANNING': paused})
+    _config.apply_runtime_overrides({'PAUSE_SCANNING': paused})
+    action = 'paused' if paused else 'resumed'
+    add_notification('pause', f'Bot scanning {action}.', severity='warning' if paused else 'info')
+    logging.info(f'Scanning {action} via API/dashboard.')
+    return jsonify(ok=True, is_paused=paused, message=f'Bot scanning is now {action}.')
+
+
 @app.post('/api/deposit')
 @require_auth
 def api_deposit():
@@ -591,6 +618,7 @@ def api_data():
         # Cash taken out. P&L = equity + withdrawn - deposited; without this a
         # withdrawal would read as a trading loss of the same size.
         'total_withdrawn': _total_withdrawn(),
+        'is_paused': _config.setting('PAUSE_SCANNING'),
     }
 
     # ---- open positions (with live mid prices from CLOB) ----
@@ -958,6 +986,7 @@ def api_data():
         'shadow_passed': 0,
         'skip_buckets': skip_buckets,
         'recent_skips': recent_skips,
+        'is_paused': _config.setting('PAUSE_SCANNING'),
     }
 
     # ---- cities (from weather.STATIONS) ----

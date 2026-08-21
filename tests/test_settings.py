@@ -60,6 +60,8 @@ class TestOverridePrecedence:
         assert config.ENABLE_STOP_LOSS is False
         assert config.STOP_LOSS_PCT == 0.50
         assert config.TAKE_PROFIT_PRICE == 0.98
+        assert config.PAUSE_SCANNING is False
+        assert config.is_scanning_paused() is False
 
     def test_stored_override_applies(self, tmp_path, monkeypatch):
         db, _, db_file = _fresh_db(tmp_path, monkeypatch)
@@ -342,6 +344,62 @@ class TestSettingsAPI:
         assert config.daily_loss_limit() == -12.0             # 3 stakes x $4
         assert d["daily_loss_limit"] == -12.0
         assert db.get_settings()["FIXED_POSITION_SIZE"] == "4.0"  # and persisted
+
+    def test_pause_scanning_toggle_via_settings_api(self, client):
+        c, app_mod, db = client
+        import config
+        assert config.setting("PAUSE_SCANNING") is False
+        assert config.is_scanning_paused() is False
+
+        # Pause via /api/settings
+        r = c.post("/api/settings", json={"settings": {"PAUSE_SCANNING": True}})
+        assert r.status_code == 200
+        assert config.setting("PAUSE_SCANNING") is True
+        assert config.is_scanning_paused() is True
+        assert db.get_settings()["PAUSE_SCANNING"] == "true"
+
+        # Resume via /api/settings
+        r2 = c.post("/api/settings", json={"settings": {"PAUSE_SCANNING": False}})
+        assert r2.status_code == 200
+        assert config.setting("PAUSE_SCANNING") is False
+        assert config.is_scanning_paused() is False
+        assert db.get_settings()["PAUSE_SCANNING"] == "false"
+
+    def test_pause_scanning_toggle_via_pause_api(self, client):
+        c, app_mod, db = client
+        import config
+
+        # Pause via /api/pause
+        r = c.post("/api/pause", json={"paused": True})
+        assert r.status_code == 200
+        assert r.get_json()["is_paused"] is True
+        assert config.setting("PAUSE_SCANNING") is True
+        assert config.is_scanning_paused() is True
+        assert db.get_settings()["PAUSE_SCANNING"] == "true"
+
+        # Unpause via /api/pause
+        r2 = c.post("/api/pause", json={"paused": False})
+        assert r2.status_code == 200
+        assert r2.get_json()["is_paused"] is False
+        assert config.setting("PAUSE_SCANNING") is False
+        assert config.is_scanning_paused() is False
+
+    def test_run_scan_cycle_skips_when_paused(self, client, monkeypatch):
+        c, app_mod, db = client
+        import config
+        import main as main_mod
+
+        config.apply_runtime_overrides({"PAUSE_SCANNING": True})
+
+        scanned = False
+        def fake_scan():
+            nonlocal scanned
+            scanned = True
+            return []
+
+        monkeypatch.setattr(main_mod, "scan_markets", fake_scan)
+        main_mod.run_scan_cycle()
+        assert scanned is False, "run_scan_cycle must not scan when PAUSE_SCANNING is True"
 
 
 class TestDepositAPI:
@@ -766,3 +824,23 @@ class TestStakeIsFunctional:
         assert fixed_stake > 0                            # flat-stake mode is on
         final_size = fixed_stake                          # strategy.py's flat branch
         assert final_size == 6.0
+
+    def test_min_and_max_entry_price_can_be_managed(self, client):
+        c, app_mod, _, config, _ = client
+        r = c.post("/api/settings", json={"settings": {
+            "MIN_ENTRY_PRICE": 0.65,
+            "MAX_ENTRY_PRICE": 0.80,
+        }})
+        assert r.status_code == 200
+        assert config.setting("MIN_ENTRY_PRICE") == 0.65
+        assert config.setting("MAX_ENTRY_PRICE") == 0.80
+
+    def test_min_entry_price_must_be_less_than_max(self, client):
+        c, _, _, _, _ = client
+        r = c.post("/api/settings", json={"settings": {
+            "MIN_ENTRY_PRICE": 0.85,
+            "MAX_ENTRY_PRICE": 0.70,
+        }})
+        assert r.status_code == 400
+        assert "MIN_ENTRY_PRICE" in r.get_json()["field_errors"]
+

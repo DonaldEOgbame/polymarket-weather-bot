@@ -282,19 +282,20 @@ def _depth_gate(usable_depth_usd, stake):
     Unknown depth REFUSES when REQUIRE_DEPTH_TO_TRADE: an entry that cannot
     see the book it is about to cross has no idea what it will pay."""
     required = MIN_DEPTH_MULTIPLE * stake
+    max_entry_p = setting("MAX_ENTRY_PRICE")
     if usable_depth_usd is None:
         return {
             "gate": "book_depth", "observed": None, "threshold": required,
             "passed": not REQUIRE_DEPTH_TO_TRADE,
             "detail": (f"order-book depth unreadable — cannot verify that "
-                       f"${stake:.2f} can fill at or below {MAX_ENTRY_PRICE:.2f} "
+                       f"${stake:.2f} can fill at or below {max_entry_p:.2f} "
                        f"without walking the book"),
         }
     return {
         "gate": "book_depth", "observed": usable_depth_usd, "threshold": required,
         "passed": usable_depth_usd >= required,
         "detail": (f"only ${usable_depth_usd:.2f} resting at or below "
-                   f"{MAX_ENTRY_PRICE:.2f}, need ${required:.2f} "
+                   f"{max_entry_p:.2f}, need ${required:.2f} "
                    f"({MIN_DEPTH_MULTIPLE:g}x the ${stake:.2f} stake) — a taker "
                    f"order this size would walk the book"),
     }
@@ -422,14 +423,14 @@ def _no_side_gates(opp, engine_res, no_edge, edge_threshold, agreement, spread,
          "passed": no_spread_frac is not None and no_spread_frac <= MAX_ENTRY_SPREAD_FRACTION,
          "detail": f"NO edge {no_edge:.3f} but market spread too wide "
                    f"({(no_spread_frac or 0):.1%} > {MAX_ENTRY_SPREAD_FRACTION:.0%})"},
-        {"gate": "min_entry_price", "observed": fill, "threshold": MIN_ENTRY_PRICE,
-         "passed": fill >= MIN_ENTRY_PRICE,
+        {"gate": "min_entry_price", "observed": fill, "threshold": setting("MIN_ENTRY_PRICE"),
+         "passed": fill >= setting("MIN_ENTRY_PRICE"),
          "detail": f"NO edge {no_edge:.3f} but entry fill price too low "
-                   f"({fill:.3f} < {MIN_ENTRY_PRICE:.2f})"},
-        {"gate": "max_entry_price", "observed": fill, "threshold": MAX_ENTRY_PRICE,
-         "passed": fill <= MAX_ENTRY_PRICE,
+                   f"({fill:.3f} < {setting('MIN_ENTRY_PRICE'):.2f})"},
+        {"gate": "max_entry_price", "observed": fill, "threshold": setting("MAX_ENTRY_PRICE"),
+         "passed": fill <= setting("MAX_ENTRY_PRICE"),
          "detail": f"NO edge {no_edge:.3f} but entry fill price too high "
-                   f"({fill:.3f} > {MAX_ENTRY_PRICE:.2f}): risks $1.00 to win "
+                   f"({fill:.3f} > {setting('MAX_ENTRY_PRICE'):.2f}): risks $1.00 to win "
                    f"${payoff:.2f}"},
         {"gate": "forecast_margin", "observed": mean, "threshold": FORECAST_MARGIN_F,
          "passed": forecast_margin_ok("NO", mean, lo, hi, FORECAST_MARGIN_F),
@@ -536,7 +537,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     # depth you can use when your cap is 0.80, it is what a taker walks into
     # after exhausting everything cheaper.
     intended_stake = setting("FIXED_POSITION_SIZE") or MIN_POSITION_SIZE
-    fill_est = estimate_fill(opp.token_id_no, intended_stake, MAX_ENTRY_PRICE)
+    fill_est = estimate_fill(opp.token_id_no, intended_stake, setting("MAX_ENTRY_PRICE"))
     usable_depth = fill_est["usable_depth_usd"] if fill_est else None
     walked_vwap = fill_est["vwap"] if fill_est else None
 
@@ -692,7 +693,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                                else "")
                 skip_reason = (
                     f"{gate_fails[0]['detail']} — armed {ARMED_SIGNAL_TTL_HOURS:.0f}h: "
-                    f"enters if fill reaches {MIN_ENTRY_PRICE:.2f} with edge >= "
+                    f"enters if fill reaches {setting('MIN_ENTRY_PRICE'):.2f} with edge >= "
                     f"{EDGE_THRESHOLD}{waiver_note}")
             except Exception as e:
                 logging.error(f"arming failed for {opp.market_id}: {e}")
@@ -716,10 +717,11 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
 
             # The payoff-asymmetry cap applies to exploration trades too — this path
             # builds a signal directly and would otherwise bypass the strict gate chain.
-            if s_price >= MAX_ENTRY_PRICE:
+            max_entry_p = setting("MAX_ENTRY_PRICE")
+            if s_price >= max_entry_p:
                 logging.info(
                     f"SHADOW_BLOCK | {opp.city} {opp.date} [{s_side}] | "
-                    f"entry price {s_price:.3f} >= MAX_ENTRY_PRICE {MAX_ENTRY_PRICE:.2f}"
+                    f"entry price {s_price:.3f} >= MAX_ENTRY_PRICE {max_entry_p:.2f}"
                 )
                 continue
 

@@ -155,6 +155,13 @@
   .mode-toggleable:hover { background: rgba(245,177,60,0.14); }
   .mode-live.mode-toggleable:hover { background: rgba(108,191,133,0.14); }
 
+  .mode-paused {
+    border-color: rgba(240, 147, 79, 0.4);
+    background: rgba(240, 147, 79, 0.12);
+    color: var(--warn);
+  }
+  .mode-paused .mode-dot { background: var(--warn); }
+
   .last-scan {
     display: flex; align-items: center; gap: 7px;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
@@ -168,6 +175,10 @@
     width: 6px; height: 6px; border-radius: 50%;
     background: var(--positive);
     animation: pulse 2s ease-in-out infinite;
+  }
+  .scan-pulse.pulse-paused {
+    background: var(--warn);
+    animation: none;
   }
 
   /* Square icon buttons — bell and sign-out share one shape. */
@@ -968,37 +979,53 @@
   .switch {
     flex: 0 0 auto;
     position: relative;
-    width: 64px; height: 34px;
+    width: 96px; height: 32px;
     border-radius: 99px;
     border: 1px solid var(--line-3);
-    background: rgba(0,0,0,0.4);
+    background: rgba(255,255,255,0.06);
     cursor: pointer;
     padding: 0;
-    transition: background .22s ease, border-color .22s ease;
+    user-select: none;
+    transition: background .22s ease, border-color .22s ease, box-shadow .22s ease;
+  }
+  .switch:hover {
+    border-color: var(--line-2);
+    background: rgba(255,255,255,0.09);
   }
   .switch .switch-label {
     position: absolute; inset: 0;
     display: flex; align-items: center; justify-content: flex-end;
-    padding: 0 10px;
+    padding-right: 14px;
+    padding-left: 0;
     font-family: 'JetBrains Mono', ui-monospace, monospace;
-    font-size: 9px; letter-spacing: 0.12em;
+    font-size: 9px;
+    font-weight: 600;
+    letter-spacing: 0.08em;
     color: var(--muted);
     transition: color .2s ease;
   }
   .switch .switch-knob {
-    position: absolute; top: 3px; left: 3px;
-    width: 26px; height: 26px;
+    position: absolute; top: 4px; left: 4px;
+    width: 22px; height: 22px;
     border-radius: 50%;
-    background: #3a3833;
-    box-shadow: 0 2px 6px rgba(0,0,0,0.5);
-    transition: transform .26s cubic-bezier(.4,1.5,.5,1), background .22s ease;
+    background: #6a6760;
+    box-shadow: 0 2px 5px rgba(0,0,0,0.4);
+    transition: transform .24s cubic-bezier(.4,1.4,.5,1), background .22s ease;
   }
-  .switch.on { background: rgba(245,177,60,0.18); border-color: rgba(245,177,60,0.5); }
-  .switch.on .switch-label { justify-content: flex-start; color: var(--signal); }
+  .switch.on {
+    background: rgba(245,177,60,0.16);
+    border-color: rgba(245,177,60,0.45);
+  }
+  .switch.on .switch-label {
+    justify-content: flex-start;
+    padding-left: 14px;
+    padding-right: 0;
+    color: var(--signal);
+  }
   .switch.on .switch-knob {
-    transform: translateX(30px);
+    transform: translateX(64px);
     background: linear-gradient(180deg, var(--signal-hi), var(--signal-mid));
-    box-shadow: 0 2px 10px rgba(245,177,60,0.45);
+    box-shadow: 0 2px 8px rgba(245,177,60,0.45);
   }
 
   .means-card {

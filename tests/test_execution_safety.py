@@ -187,7 +187,7 @@ class TestTheLimitPriceBinds:
         Before the fix this line capped at 0.99 — the DISABLED sentinel — so the
         configured 0.80 could not constrain what was paid."""
         src = open(os.path.join(os.path.dirname(__file__), "..", "executor.py")).read()
-        assert "MAX_ENTRY_PRICE)" in src.split("def execute_trade")[1].split("price = min(")[1]
+        assert "MAX_ENTRY_PRICE" in src.split("def execute_trade")[1].split("price = min(")[1]
         assert "min(signal_data[\"price\"] + 0.01, 0.99)" not in src
 
     @pytest.mark.parametrize("quote", [0.10, 0.50, 0.64, 0.79, 0.795, 0.85, 0.99])

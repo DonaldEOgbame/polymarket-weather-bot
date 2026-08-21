@@ -1007,16 +1007,17 @@ class Executor:
             f"edge_at_fill={('%+.4f' % post_fill_edge) if post_fill_edge is not None else 'n/a'}"
         )
 
-        if filled_price > MAX_ENTRY_PRICE + 1e-9:
+        max_entry_cap = setting("MAX_ENTRY_PRICE")
+        if filled_price > max_entry_cap + 1e-9:
             # Should be structurally impossible now. If it fires, some path is
             # still sending an order the cap does not constrain.
             logging.error(
                 f"CAP BREACH {opp.market_id}: filled at {filled_price:.4f}, above "
-                f"MAX_ENTRY_PRICE {MAX_ENTRY_PRICE:.2f}. Another code path is "
+                f"MAX_ENTRY_PRICE {max_entry_cap:.2f}. Another code path is "
                 f"bypassing the entry cap — investigate before trading further.")
             add_notification(
                 "execution",
-                f"Fill at {filled_price:.4f} breached the {MAX_ENTRY_PRICE:.2f} "
+                f"Fill at {filled_price:.4f} breached the {max_entry_cap:.2f} "
                 f"entry cap on {opp.city} — a path is bypassing the limit price.",
                 "error")
 
@@ -1332,9 +1333,8 @@ class Executor:
             # nine BUY_NO decisions priced off a stale 0.65 walk, and (per the
             # exchange's FAK semantics) nine "no orders found to match"
             # rejections as the sub-limit ask kept vanishing before submit.
-            # Walk the book AS IT IS NOW; the floor and drift checks below
-            # keep a moved market honest instead of chased.
-            fresh = estimate_fill(signal_data["token_id"], size, MAX_ENTRY_PRICE,
+            max_entry_limit = setting("MAX_ENTRY_PRICE")
+            fresh = estimate_fill(signal_data["token_id"], size, max_entry_limit,
                                   force=True)
             fresh_fill = fresh.get("vwap") if fresh else None
             basis, skip = submit_time_basis(quoted_price, walked, fresh_fill)
@@ -1348,8 +1348,9 @@ class Executor:
         # Ceil to the tick, not round(): a VWAP basis lands between ticks and
         # banker's rounding (0.705 -> 0.70) hands the allowance straight back.
         # A limit is a cap, so rounding it UP never overpays the book.
+        max_entry_limit = setting("MAX_ENTRY_PRICE")
         price = min(math.ceil(round((limit_basis + 0.01) * 100, 6)) / 100,
-                    MAX_ENTRY_PRICE)
+                    max_entry_limit)
         shares = round(size / price, 2)
         entry_fee = 0.0  # paper mode: fee is modeled inside transaction_cost, not the ledger
 
@@ -1416,7 +1417,7 @@ class Executor:
             )
             if USE_MARKETABLE_LIMIT:
                 fill = self._submit_marketable_limit(
-                    signal_data["token_id"], "BUY", size, limit_price=MAX_ENTRY_PRICE,
+                    signal_data["token_id"], "BUY", size, limit_price=setting("MAX_ENTRY_PRICE"),
                     fallback_price=price)
             else:
                 fill = self._submit_taker(signal_data["token_id"], "BUY", size,

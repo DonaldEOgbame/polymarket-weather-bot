@@ -32,6 +32,7 @@ MANAGED_SETTINGS = (
     # app.SETTING_SPECS, which is what the bulk Settings save validates against,
     # so this can never ride along in an ordinary save.
     "PAPER_MODE",
+    "PAUSE_SCANNING",
     "FIXED_POSITION_SIZE",
     "MAX_CONCURRENT_POSITIONS",
     "DAILY_LOSS_STAKES",
@@ -41,6 +42,8 @@ MANAGED_SETTINGS = (
     "TAKE_PROFIT_PRICE",
     "MAX_HOURS_TO_RESOLUTION",
     "REQUIRE_SAME_DAY",
+    "MIN_ENTRY_PRICE",
+    "MAX_ENTRY_PRICE",
 )
 
 
@@ -93,6 +96,7 @@ def _tunable(key, default):
 # silently drop a live bot back to paper. Defaults to paper whenever it has
 # never been set — the safe direction for the one flag that spends real money.
 PAPER_MODE = str(_tunable("PAPER_MODE", "true")).strip().lower() == "true"
+PAUSE_SCANNING = str(_tunable("PAUSE_SCANNING", "false")).strip().lower() == "true"
 
 # --- Bankroll ---
 STARTING_BANKROLL = float(os.getenv("STARTING_BANKROLL", "40.0"))
@@ -277,7 +281,7 @@ NARROW_BUCKET_EDGE_THRESHOLD = float(os.getenv("NARROW_BUCKET_EDGE_THRESHOLD", "
 
 # Std inflation multiplier applied to narrow buckets (≤ NARROW_BUCKET_WIDTH_F).
 # Makes the probability estimate more conservative on thin windows.
-NARROW_BUCKET_STD_INFLATION = float(os.getenv("NARROW_BUCKET_STD_INFLATION", "1.4"))
+NARROW_BUCKET_STD_INFLATION = float(os.getenv("NARROW_BUCKET_STD_INFLATION", "1.1"))
 
 # Cities with high convective variability where afternoon storms cause large
 # unpredictable temperature swings. Std is inflated by this multiplier.
@@ -657,8 +661,8 @@ MIN_POSITION_SIZE = float(os.getenv("MIN_POSITION_SIZE", "1.00"))
 # MIN/MAX_MODEL_CONFIDENCE survive as logging bounds only (p_side cap).
 MIN_MODEL_CONFIDENCE = float(os.getenv("MIN_MODEL_CONFIDENCE", "0.60"))
 MAX_MODEL_CONFIDENCE = float(os.getenv("MAX_MODEL_CONFIDENCE", "0.85"))
-MIN_ENTRY_PRICE = float(os.getenv("MIN_ENTRY_PRICE", "0.70"))
-MAX_ENTRY_PRICE = float(os.getenv("MAX_ENTRY_PRICE", "0.80"))
+MIN_ENTRY_PRICE = float(_tunable("MIN_ENTRY_PRICE", "0.70"))
+MAX_ENTRY_PRICE = float(_tunable("MAX_ENTRY_PRICE", "0.77"))
 
 # --- Armed re-entry (Owner decision 2026-08-08) ---
 # A market that passes EVERY entry gate except the MIN_ENTRY_PRICE floor is
@@ -1361,6 +1365,7 @@ _RUNTIME = {
     # The dashboard changes it only through /api/trading-mode, which gates
     # paper -> live behind the readiness preflight.
     "PAPER_MODE": PAPER_MODE,
+    "PAUSE_SCANNING": PAUSE_SCANNING,
     "FIXED_POSITION_SIZE": FIXED_POSITION_SIZE,
     "MAX_CONCURRENT_POSITIONS": MAX_CONCURRENT_POSITIONS,
     "DAILY_LOSS_STAKES": DAILY_LOSS_STAKES,
@@ -1370,6 +1375,8 @@ _RUNTIME = {
     "TAKE_PROFIT_PRICE": TAKE_PROFIT_PRICE,
     "MAX_HOURS_TO_RESOLUTION": MAX_HOURS_TO_RESOLUTION,
     "REQUIRE_SAME_DAY": REQUIRE_SAME_DAY,
+    "MIN_ENTRY_PRICE": MIN_ENTRY_PRICE,
+    "MAX_ENTRY_PRICE": MAX_ENTRY_PRICE,
 }
 
 
@@ -1380,6 +1387,12 @@ def setting(key):
     one — that is the intended semantics of a live-tunable knob."""
     with _RUNTIME_LOCK:
         return _RUNTIME[key]
+
+
+def is_scanning_paused():
+    """Whether market scanning and new trade evaluations are paused."""
+    with _RUNTIME_LOCK:
+        return bool(_RUNTIME["PAUSE_SCANNING"])
 
 
 def paper_mode():

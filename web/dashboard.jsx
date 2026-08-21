@@ -300,6 +300,13 @@ function TopBar({ portfolio, scanLog, activeTab, setActiveTab }) {
 
       <div className="spacer" />
 
+      {portfolio.is_paused && (
+        <span className="mode-pill mode-paused" title="Market scanning is paused — no new trades will be opened">
+          <span className="mode-dot" />
+          PAUSED
+        </span>
+      )}
+
       <button
         className={`mode-pill mode-toggleable ${live ? 'mode-live' : ''}`}
         title={`Trading in ${portfolio.mode} mode — click to change`}
@@ -313,9 +320,9 @@ function TopBar({ portfolio, scanLog, activeTab, setActiveTab }) {
       )}
 
       <div className="last-scan">
-        <span>SCANNED</span>
-        <b>{fmtAgo(scanLog.last_scan_at)} ago</b>
-        <span className="scan-pulse" />
+        <span>{portfolio.is_paused ? 'SCANNER' : 'SCANNED'}</span>
+        <b>{portfolio.is_paused ? 'PAUSED' : `${fmtAgo(scanLog.last_scan_at)} ago`}</b>
+        <span className={`scan-pulse ${portfolio.is_paused ? 'pulse-paused' : ''}`} />
       </div>
 
       <NotificationBell />
@@ -1258,11 +1265,45 @@ function SettingsPanel() {
             </div>
             <Stepper
               label="Stake on every trade" prefix="$" step={1} dp={2}
-              min={Math.max(ctx.min_position_size || 1, server.meta.FIXED_POSITION_SIZE.min)}
-              max={server.meta.FIXED_POSITION_SIZE.max}
+              min={Math.max(ctx.min_position_size || 1, (server.meta.FIXED_POSITION_SIZE && server.meta.FIXED_POSITION_SIZE.min) || 1)}
+              max={(server.meta.FIXED_POSITION_SIZE && server.meta.FIXED_POSITION_SIZE.max) || 100}
               value={draft.FIXED_POSITION_SIZE}
               onChange={v => set('FIXED_POSITION_SIZE', v)}
               error={fieldErrors.FIXED_POSITION_SIZE}
+            />
+          </div>
+
+          <div className="set-div" />
+
+          <div className="set-row pad-t pad-b">
+            <div className="grow">
+              <div className="field-label">Min entry price</div>
+              <div className="field-help">Don't enter below this price</div>
+              {fieldErrors.MIN_ENTRY_PRICE && <div className="field-error">{fieldErrors.MIN_ENTRY_PRICE}</div>}
+            </div>
+            <Stepper
+              label="Min entry price" prefix="$" step={0.01} dp={2}
+              min={(server.meta.MIN_ENTRY_PRICE && server.meta.MIN_ENTRY_PRICE.min) || 0.10}
+              max={(server.meta.MIN_ENTRY_PRICE && server.meta.MIN_ENTRY_PRICE.max) || 0.95}
+              value={draft.MIN_ENTRY_PRICE}
+              onChange={v => set('MIN_ENTRY_PRICE', v)}
+              error={fieldErrors.MIN_ENTRY_PRICE}
+            />
+          </div>
+
+          <div className="set-row pad-b">
+            <div className="grow">
+              <div className="field-label">Max entry price</div>
+              <div className="field-help">Cap on fill price (policy ceiling)</div>
+              {fieldErrors.MAX_ENTRY_PRICE && <div className="field-error">{fieldErrors.MAX_ENTRY_PRICE}</div>}
+            </div>
+            <Stepper
+              label="Max entry price" prefix="$" step={0.01} dp={2}
+              min={(server.meta.MAX_ENTRY_PRICE && server.meta.MAX_ENTRY_PRICE.min) || 0.50}
+              max={(server.meta.MAX_ENTRY_PRICE && server.meta.MAX_ENTRY_PRICE.max) || 0.99}
+              value={draft.MAX_ENTRY_PRICE}
+              onChange={v => set('MAX_ENTRY_PRICE', v)}
+              error={fieldErrors.MAX_ENTRY_PRICE}
             />
           </div>
 
@@ -1305,6 +1346,28 @@ function SettingsPanel() {
           </div>
 
           <div className="set-row pad-b">
+            <div className="grow">
+              <div className="field-label">Pause scanning / new trades</div>
+              <div className="field-help">{draft.PAUSE_SCANNING ? 'Bot will NOT scan or open new positions' : 'Bot is active and scanning every cycle'}</div>
+              {fieldErrors.PAUSE_SCANNING && (
+                <div className="field-error">{fieldErrors.PAUSE_SCANNING}</div>
+              )}
+            </div>
+            <button
+              type="button"
+              className={`switch ${draft.PAUSE_SCANNING ? 'on' : ''}`}
+              onClick={() => set('PAUSE_SCANNING', !draft.PAUSE_SCANNING)}
+              aria-pressed={!!draft.PAUSE_SCANNING}
+              aria-label="Pause scanning / new trades"
+            >
+              <span className="switch-label">{draft.PAUSE_SCANNING ? 'PAUSED' : 'ACTIVE'}</span>
+              <span className="switch-knob" />
+            </button>
+          </div>
+
+          <div className="set-div" />
+
+          <div className="set-row pad-t pad-b">
             <div className="grow">
               <div className="field-label">Trades open at once</div>
               <div className="field-help">No new entries past this many</div>

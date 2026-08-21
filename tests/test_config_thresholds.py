@@ -95,7 +95,7 @@ class TestUnchangedGuardrails:
         """0.80 (owner decision 2026-08-12, same-day minimal rule set): the
         band 0.70-0.80 IS the strategy — market-implied 70-80% in our
         favour. Was 0.85 (2026-08-06)."""
-        assert cfg.MAX_ENTRY_PRICE == 0.80
+        assert cfg.MAX_ENTRY_PRICE == 0.77
 
     def test_min_model_confidence_entry_filter(self, cfg):
         assert cfg.MIN_MODEL_CONFIDENCE == 0.60
@@ -138,7 +138,7 @@ class TestUnchangedGuardrails:
     def test_narrow_bucket_std_inflation_still_on(self, cfg):
         """Second corrector of the same defect. Removing it too would be the
         third correction, and the Platt constants were fitted through it."""
-        assert cfg.NARROW_BUCKET_STD_INFLATION == 1.4
+        assert cfg.NARROW_BUCKET_STD_INFLATION == 1.1
 
     def test_paper_mode_default_unchanged(self, cfg):
         """More trade flow is not a deploy criterion."""

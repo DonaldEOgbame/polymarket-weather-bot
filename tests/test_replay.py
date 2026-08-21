@@ -219,7 +219,7 @@ class TestReplayLogContents:
         assert set(by) == expected
         assert len(gates) == len(expected)
         assert by["max_entry_price"]["observed"] == 0.70
-        assert by["max_entry_price"]["threshold"] == pytest.approx(0.80)
+        assert by["max_entry_price"]["threshold"] == pytest.approx(0.77)
 
     def test_skips_are_logged_too(self, wired, monkeypatch):
         """A log that only records trades cannot answer counterfactuals, which

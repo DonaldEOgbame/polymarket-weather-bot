@@ -12,17 +12,22 @@ primary_region = 'arn'
 [env]
   DB_PATH = '/data/bot.db'
   PAPER_MODE = 'true'
+  PAUSE_SCANNING = 'false'
   PORT = '8080'
-  STARTING_BANKROLL = '100.0'
+  STARTING_BANKROLL = '10.0'
   MIN_DEPTH_MULTIPLE = '3.0'
-  MIN_ENTRY_PRICE = '0.65'
-  MAX_ENTRY_PRICE = '0.82'
+  MIN_ENTRY_PRICE = '0.70'
+  MAX_ENTRY_PRICE = '0.77'
   SCAN_INTERVAL_MINUTES = '2'
-  MAX_CONCURRENT_POSITIONS = '6'
+  MAX_CONCURRENT_POSITIONS = '4'
   TRADE_LOW_MARKETS = 'true'
-  TRADE_HIGH_MARKETS = 'false'
+  TRADE_HIGH_MARKETS = 'true'
   MAX_HOURS_TO_RESOLUTION = '48.0'
-  FORECAST_MARGIN_F = '2.5'
+  REQUIRE_SAME_DAY = 'true'
+  FORECAST_MARGIN_F = '4.0'
+  # Portfolio B: 10 Safe + High Volume cities (99.08% WR, ~3.7 trades/day)
+  # KEEP: Dallas, Toronto, Buenos Aires, Atlanta, London, Seattle, Chicago, Wellington, Miami, Beijing
+  EXCLUDED_CITIES = 'Amsterdam,Ankara,Austin,Berlin,Busan,Cape Town,Chengdu,Chongqing,Denver,Guangzhou,Helsinki,Hong Kong,Houston,Istanbul,Jakarta,Jeddah,Kuala Lumpur,Lagos,Los Angeles,Lucknow,Madrid,Manila,Mexico City,Milan,Moscow,Munich,NYC,New York,Panama,Paris,Qingdao,San Francisco,Sao Paulo,Seoul,Shanghai,Shenzhen,Singapore,Taipei,Tel Aviv,Tokyo,Warsaw,Wuhan'
 
 [processes]
   app = 'python app.py'

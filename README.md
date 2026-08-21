@@ -1,6 +1,6 @@
 # stormedge
 
-Automated weather market trading bot for [Polymarket](https://polymarket.com), with a live web dashboard. Scans every active weather market, computes edge using a multi-model meteorological ensemble, and sizes positions via fractional Kelly. Runs in paper mode by default.
+Automated weather market trading bot for [Polymarket](https://polymarket.com), with a live web dashboard. Scans active daily temperature markets, computes edge using a multi-model meteorological ensemble with METAR conditioning, and executes low-temperature `NO` positions sized via flat staking (or fractional Kelly). Runs in paper mode by default.
 
 ---
 
@@ -31,13 +31,18 @@ Automated weather market trading bot for [Polymarket](https://polymarket.com), w
 
 ## How it works
 
-1. **Discover** — Fetches all active weather events from Polymarket's Gamma API (tag `weather`, resolving within 72h)
-2. **Score** — Ranks candidates by liquidity + price uncertainty; caps at 150 markets per scan to avoid API throttling
-3. **Forecast** — Pulls temperature forecasts from [Open-Meteo](https://open-meteo.com) for up to 4 models per city (ECMWF IFS, GFS 0.25°, ICON Global, JMA GSM / GEM Global for Asia-Pacific)
-4. **Edge** — Fits a normal distribution over the ensemble, computes bucket probabilities, diffs against market-implied odds
-5. **Gate** — Requires ≥ 75% of ensemble WEIGHT in agreement and weighted spread sd < 1.05°F before placing a trade
-6. **Size** — Fractional Kelly (capped at 8%), hard max $2.00 per position, max 30% total exposure
-7. **Monitor** — Checks open positions every 5 minutes; exits on stop-loss (15%) or edge decay
+1. **Discover** — Scans Polymarket's Gamma API for daily temperature events (tag `weather`, resolving within $\le 48\text{h}$ horizon, minimum \$500 volume).
+2. **Forecast & Ensemble** — Pulls numerical weather forecasts from [Open-Meteo](https://open-meteo.com) across 51 global cities (ECMWF IFS, GFS 0.25°, ICON Global/EU/D2, JMA GSM, GEM Global). Applies per-model/per-direction bias corrections, caps forecasting family weights at 35%, and conditions distributions on live METAR airport observations.
+3. **Probability & Calibration** — Computes bucket probabilities using a variance-matched Student-$t$ distribution ($\nu=4$), inflates uncertainty on narrow buckets ($\le 2^\circ\text{F}$), applies Platt logistic scaling to eliminate low-probability overconfidence, and enforces a 5% probability floor.
+4. **Gate (StormEdge Rule Set)** — Evaluates entry criteria:
+   - **Lows-Only & `NO`-Side**: Trades Daily Low markets on the `NO` side only (Highs and `YES` bets disabled based on empirical edge and fee economics).
+   - **Direction Agreement**: Raw ensemble mean must agree with betting that temperature misses the bucket.
+   - **Forecast Margin**: Ensemble mean must sit $\ge 2.5^\circ\text{F}$ clear of the bucket boundary.
+   - **Entry Price Sweet Spot**: Fills must sit in $[0.70, 0.77]$ (70%–77% implied probability).
+   - **Liquidity & Depth**: Resting ask depth at or below 0.80 must be $\ge 10\times$ the stake, with order book spread $\le 15\%$.
+   - *Non-binding telemetry*: Edge, model agreement, and spread standard deviation are recorded for counterfactual analysis without blocking valid flow.
+5. **Size & Execute** — Default flat staking (\$3.00 per trade) with concurrency and portfolio constraints (max 4 concurrent positions, 1 trade per city/date, max 15 trades/day, synoptic correlation limits). Submits marketable limit orders walked through the live order book.
+6. **Monitor & Settle** — Checks open positions every 5 minutes. Operates on a hold-to-resolution default; exits early only on Take-Profit ($\ge \$0.98$), physics-gated loss confirmation (METAR observations prove outcome is mathematically dead), or post-date bid salvage.
 
 ---
 
@@ -45,35 +50,39 @@ Automated weather market trading bot for [Polymarket](https://polymarket.com), w
 
 ```
 stormedge/
-├── app.py              # Flask dashboard server + bot thread launcher (single entry point)
-├── main.py             # Standalone bot runner (no dashboard)
-├── config.py           # All env-var configuration with defaults
-├── scanner.py          # Market discovery, filtering, opportunity building
-├── strategy.py         # Edge calculation, Kelly sizing, signal logging
-├── executor.py         # Trade execution (paper + live), position monitoring
-├── weather.py          # Open-Meteo API, ensemble weighting, bucket probability
-├── db.py               # SQLite schema, query helpers
-├── alerts.py           # Trade entry/exit notifications
-├── utils.py            # HTTP session, datetime parsing
+├── app.py                   # Flask dashboard server + bot background thread
+├── main.py                  # Standalone bot runner & scheduler (no web UI)
+├── config.py                # Central configuration, env loader & runtime settings
+├── scanner.py               # Market discovery, question/bucket parsing, book depth
+├── strategy.py              # StormEdge entry gates, Kelly/flat sizing, signal logging
+├── executor.py              # Order execution (paper/live CLOB), position lifecycle & exits
+├── weather.py               # Open-Meteo ensemble, Student-t PDF/CDF, Platt calibration
+├── intraday.py              # Intraday METAR conditioning & physical diurnal modeling
+├── metar.py                 # Airport weather station feed & settlement verification
+├── families.py              # Forecasting center family weighting & correlation caps
+├── risk.py                  # Synoptic regional & directional portfolio correlation limits
+├── db.py                    # SQLite schema, atomic trade transitions, replay logging
+├── alerts.py                # Telegram / webhook trade notifications & circuit breaker alerts
+├── utils.py                 # HTTP session caching, UTC datetime helpers
+├── backtest.py              # Historical Polymarket & NWP ensemble backtest engine
+├── calibrate.py             # Model accuracy & probability reliability calibration
+├── calibrate_city_sigma.py  # Per-city direction sigma fitting tool
+├── backup.py                # Database snapshotting and remote off-box backups
 │
 ├── web/
-│   ├── login.html      # Login page
-│   ├── dashboard.html  # Dashboard CSS shell
-│   ├── dashboard.jsx   # React SPA (compiled by Babel in-browser)
-│   └── globe.js        # Interactive orthographic globe (canvas)
+│   ├── login.html           # Dashboard authentication
+│   ├── dashboard.html       # Dashboard HTML container
+│   ├── dashboard.jsx        # React SPA frontend (compiled via Babel in-browser)
+│   └── globe.js             # Interactive 3D canvas globe
 │
-├── tests/
-│   ├── test_scanner.py
-│   ├── test_strategy.py
-│   └── test_weather.py
-│
+├── tests/                   # Pytest unit & integration test suite (700+ tests)
 ├── data/
-│   └── bot.db          # SQLite database (auto-created)
+│   └── bot.db               # SQLite database (auto-created)
 │
-├── .env.example        # All supported config keys with defaults
-├── requirements.txt
-├── Dockerfile
-└── fly.toml            # Fly.io deployment config
+├── .env.example             # Supported configuration variables with defaults
+├── requirements.txt         # Python dependencies
+├── Dockerfile               # Production container image
+└── fly.toml                 # Fly.io deployment config
 ```
 
 ---
@@ -83,7 +92,7 @@ stormedge/
 **Requirements:** Python 3.10+
 
 ```bash
-git clone https://github.com/your-username/polymarket-weather-bot
+git clone https://github.com/DonaldEOgbame/polymarket-weather-bot.git
 cd polymarket-weather-bot
 
 python -m venv .venv && source .venv/bin/activate
@@ -96,40 +105,49 @@ python app.py
 # Dashboard → http://localhost:7777
 ```
 
-Default login: `donaldemmaogbame@gmail.com` / `stormedge` (set via `DASHBOARD_EMAIL` / `DASHBOARD_PASSWORD` in `.env`)
+Default login: `donaldemmaogbame@gmail.com` / `stormedge` (configurable via `DASHBOARD_EMAIL` / `DASHBOARD_PASSWORD` in `.env`).
 
 ---
 
 ## Configuration
 
-All settings are environment variables. Copy `.env.example` to `.env` and adjust.
+Settings are loaded from environment variables and `.env`. Key money/risk knobs can also be modified live via the dashboard Settings tab.
 
 | Variable | Default | Description |
 |---|---|---|
-| `PAPER_MODE` | `true` | Simulate trades without placing real orders |
-| `STARTING_BANKROLL` | `20.0` | Initial bankroll in USDC |
-| `DASHBOARD_PASSWORD` | `stormedge` | Dashboard login password |
-| `DASHBOARD_EMAIL` | `donaldemmaogbame@gmail.com` | Dashboard login email |
-| `EDGE_THRESHOLD` | `0.08` | Minimum edge (8%) required to enter a trade |
-| `MIN_MODEL_AGREEMENT` | `0.75` | Minimum fraction of ensemble **weight** within 2°F of the raw consensus |
-| `MAX_MODEL_SPREAD_STD` | `1.05` | Maximum weighted spread **standard deviation** in °F before skipping (was `MAX_MODEL_SPREAD`=2.7 in max-min units) |
-| `KELLY_CAP` | `0.08` | Maximum Kelly fraction (8%) |
-| `HARD_MAX_POSITION_SIZE` | `2.0` | Hard dollar cap per position |
-| `MAX_CONCURRENT_POSITIONS` | `3` | Maximum open positions at once |
-| `STOP_LOSS_PCT` | `0.15` | Exit if position drops 15% (checked after 30-min hold) |
-| `EXIT_EDGE_FLOOR` | `0.05` | Exit if edge decays below 5% |
-| `SCAN_INTERVAL_MINUTES` | `10` | How often to scan for new markets |
-| `MONITOR_INTERVAL_MINUTES` | `5` | How often to check open positions |
-| `MIN_VOLUME` | `500` | Minimum market liquidity in USDC |
-| `MAX_HOURS_TO_RESOLUTION` | `72` | Only trade markets resolving within this window |
+| `PAPER_MODE` | `true` | Simulate trades without executing live CLOB orders |
+| `STARTING_BANKROLL` | `40.0` | Initial paper bankroll in USDC |
+| `FIXED_POSITION_SIZE` | `3.0` | Fixed stake in USDC per trade (set to `0` for Kelly mode) |
+| `DAILY_LOSS_STAKES` | `4` | Dynamic daily circuit breaker budget in full stakes ($-12.00$ at \$3 stake) |
+| `MAX_CONCURRENT_POSITIONS` | `4` | Maximum concurrent open positions |
+| `MAX_TOTAL_EXPOSURE_FRACTION`| `0.70` | Max fraction of bankroll locked across all positions |
+| `MAX_TRADES_PER_DAY` | `15` | Hard cap on new trade entries per UTC day |
+| `TRADE_LOW_MARKETS` | `true` | Enable trading Daily Low temperature markets |
+| `TRADE_HIGH_MARKETS` | `false` | Enable trading Daily High temperature markets |
+| `FORECAST_MARGIN_F` | `2.5` | Minimum forecast clearance from nearest bucket edge (°F) |
+| `MIN_ENTRY_PRICE` | `0.70` | Minimum fill price floor to enter a trade |
+| `MAX_ENTRY_PRICE` | `0.77` | Maximum fill price ceiling to enter a trade |
+| `MAX_HOURS_TO_RESOLUTION` | `48.0` | Maximum lead time window in hours to resolution |
+| `REQUIRE_SAME_DAY` | `false` | Restrict strictly to same calendar day (governed by 48h horizon) |
+| `MIN_DEPTH_MULTIPLE` | `10.0` | Required resting ask depth at/below max entry price as multiple of stake |
+| `MAX_ENTRY_SPREAD_FRACTION` | `0.15` | Maximum allowable bid/ask spread fraction |
+| `ENABLE_STOP_LOSS` | `false` | Enable price-based stop loss (disabled; defaults to hold-to-resolution) |
+| `STOP_LOSS_PCT` | `0.50` | Stop loss drawdown percentage (if stop loss enabled) |
+| `TAKE_PROFIT_PRICE` | `0.98` | Exit price target to capture near-settled profits |
+| `ENABLE_PHYSICS_EXIT_GATE` | `true` | Allow loss cuts only when METAR proves the bet is mathematically dead |
+| `ENABLE_POST_DATE_SALVAGE` | `true` | Salvage bids on confirmed dead positions after target date |
+| `SCAN_INTERVAL_MINUTES` | `10` | Interval between market discovery scans |
+| `MONITOR_INTERVAL_MINUTES` | `5` | Interval between open position monitoring cycles |
 
 Live trading additionally requires:
 
-```
+```bash
 POLYMARKET_PK=0x...
 CLOB_API_KEY=...
 CLOB_SECRET=...
 CLOB_PASS_PHRASE=...
+POLYMARKET_SIG_TYPE=0  # 0 for EOA, 1/2/3 for proxy/funder deposit wallets
+POLYMARKET_FUNDER=     # Required if POLYMARKET_SIG_TYPE != 0
 ```
 
 ---
@@ -138,9 +156,11 @@ CLOB_PASS_PHRASE=...
 
 | Command | What it does |
 |---|---|
-| `python app.py` | Bot + dashboard together on port 7777 |
-| `python main.py` | Bot only, no dashboard |
-| `pytest` | Run test suite |
+| `python app.py` | Bot + Flask dashboard together on port 7777 |
+| `python main.py` | Standalone bot runner, no web UI |
+| `pytest` | Run comprehensive test suite |
+| `python backtest.py` | Run 2-year historical strategy backtest |
+| `python calibrate.py` | Check forecast Brier scores & reliability curves |
 
 ---
 
@@ -153,22 +173,7 @@ fly secrets set PAPER_MODE=false POLYMARKET_PK=0x... CLOB_API_KEY=... CLOB_SECRE
 fly deploy
 ```
 
-The `fly.toml` mounts a persistent volume at `/data` for the SQLite database. Region defaults to `lhr` (London) — change in `fly.toml` to suit your latency needs.
-
----
-
-## Dashboard
-
-The dashboard is a single-page React app (no build step — Babel runs in-browser) served by Flask. It polls `/api/data` every 30 seconds.
-
-**Panels:**
-- **Globe** — Interactive 3D globe showing monitored cities; drag to rotate
-- **Portfolio** — Bankroll, daily P&L, open position count, mode
-- **Open positions** — Live entries with edge, size, hold time
-- **Equity curve** — Bankroll over time
-- **Performance** — Win rate, avg edge, avg hold time, Sharpe (last 30d)
-- **Recent trades** — Last 10 closed trades with P&L
-- **Model confidence** — Ensemble weights ranked by signal contribution
+The `fly.toml` configuration mounts a persistent volume at `/data` for the SQLite database.
 
 ---
 

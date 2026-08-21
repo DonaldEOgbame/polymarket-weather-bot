@@ -123,7 +123,7 @@ def _deep_book(price):
 
 
 def _evaluate(monkeypatch, db, no_price, prob=0.22, market_id="0xdallas",
-              ensemble_mean=103.1):
+              ensemble_mean=105.0):
     """Run evaluate_opportunity on a narrow (1°F) bucket with a deep book at
     `no_price` and the bucket probability pinned to `prob`."""
     import config as C
