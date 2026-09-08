@@ -1,3 +1,4 @@
+from datetime import datetime, timezone, timedelta
 """Tests for the dashboard-editable settings, the config override path, and deposits.
 
 The load-bearing property is that settings can never make the bot worse off by
@@ -694,8 +695,8 @@ class TestModeIsolation:
                     "INSERT INTO trades (market_id, side, size_usdc, fill_price, pnl, "
                     "status, entry_time, exit_time, city, target_date, mode) VALUES "
                     "(?,?,?,?,?,'CLOSED',?,?,?,?,?)",
-                    (f"0x{mode}", "NO", size, 0.5, pnl, "2026-07-30T01:00:00",
-                     "2026-07-30T02:00:00", "Lagos", "2026-07-30", mode))
+                    (f"0x{mode}", "NO", size, 0.5, pnl, (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(),
+                     (datetime.now(timezone.utc) - timedelta(days=5)).isoformat(), "Lagos", "2026-07-30", mode))
             conn.execute("INSERT INTO bankroll (timestamp, event, amount, balance, mode) "
                          "VALUES ('2026-07-30T03:00:00','DEPOSIT',100.0,140.0,'live')")
             conn.commit()

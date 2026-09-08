@@ -668,6 +668,27 @@ def init_db():
         ''')
 
 
+        # Physical certainty sniper telemetry and missed trade audit
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS sniper_audit (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                station_icao TEXT NOT NULL,
+                city TEXT NOT NULL,
+                target_date TEXT NOT NULL,
+                bucket_label TEXT NOT NULL,
+                side TEXT NOT NULL,
+                observed_temp_f REAL NOT NULL,
+                best_ask REAL,
+                best_bid REAL,
+                ask_depth_usd REAL,
+                stake_usd REAL,
+                outcome TEXT NOT NULL,
+                detail TEXT,
+                latency_ms REAL
+            )
+        ''')
+
         # Indexes — safe to re-run; IF NOT EXISTS is idempotent
         conn.execute("CREATE INDEX IF NOT EXISTS idx_bankroll_id ON bankroll(id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_notifications_id ON notifications(id DESC)")
@@ -680,6 +701,8 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_scan_log_ts ON scan_log(id DESC)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_markets_market_id ON markets(market_id)")
         conn.execute("CREATE INDEX IF NOT EXISTS idx_armed_market_status ON armed_signals(market_id, status)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sniper_audit_ts ON sniper_audit(timestamp DESC)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sniper_audit_outcome ON sniper_audit(outcome)")
 
         conn.commit()
 
@@ -1553,4 +1576,52 @@ def backfill_replay_outcomes(limit=5000):
                    THEN 'YES' ELSE 'NO' END
          WHERE settled_value IS NOT NULL AND settled_outcome IS NULL
         """
+    )
+
+
+def log_sniper_audit(
+    station_icao: str,
+    city: str,
+    target_date: str,
+    bucket_label: str,
+    side: str,
+    observed_temp_f: float,
+    best_ask: float | None,
+    best_bid: float | None,
+    ask_depth_usd: float | None,
+    stake_usd: float | None,
+    outcome: str,
+    detail: str | None = None,
+    latency_ms: float | None = None,
+    timestamp: str | None = None,
+) -> int:
+    """Record a physical breach event and order book audit snapshot."""
+    if timestamp is None:
+        timestamp = datetime.now(timezone.utc).isoformat()
+    return execute_query(
+        """
+        INSERT INTO sniper_audit (
+            timestamp, station_icao, city, target_date, bucket_label, side,
+            observed_temp_f, best_ask, best_bid, ask_depth_usd, stake_usd,
+            outcome, detail, latency_ms
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        """,
+        (
+            timestamp, station_icao, city, target_date, bucket_label, side,
+            observed_temp_f, best_ask, best_bid, ask_depth_usd, stake_usd,
+            outcome, detail, latency_ms
+        ),
+    )
+
+
+def get_sniper_audit_records(limit: int = 100, outcome: str | None = None):
+    """Retrieve sniper audit records for post-mortem analysis."""
+    if outcome:
+        return fetch_query(
+            "SELECT * FROM sniper_audit WHERE outcome=? ORDER BY id DESC LIMIT ?",
+            (outcome, limit)
+        )
+    return fetch_query(
+        "SELECT * FROM sniper_audit ORDER BY id DESC LIMIT ?",
+        (limit,)
     )

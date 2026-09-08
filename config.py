@@ -305,6 +305,11 @@ CONVECTIVE_CITIES = set(os.getenv("CONVECTIVE_CITIES", "Miami,Houston,Dallas,Atl
 TRADE_HIGH_MARKETS = os.getenv("TRADE_HIGH_MARKETS", "false").lower() == "true"
 TRADE_LOW_MARKETS = os.getenv("TRADE_LOW_MARKETS", "true").lower() == "true"
 
+# --- YES Market Entries & Synthetic Book Arbitrage (2026-09-08) ---
+ENABLE_YES_ENTRIES = os.getenv("ENABLE_YES_ENTRIES", "true").lower() == "true"
+ENABLE_DUAL_BOOK_SYNTHETIC_ARBITRAGE = os.getenv("ENABLE_DUAL_BOOK_SYNTHETIC_ARBITRAGE", "true").lower() == "true"
+SNIPER_ONLY_MODE = os.getenv("SNIPER_ONLY_MODE", "false").lower() == "true"
+
 # --- Wrong-thermometer exclusions (owner decision 2026-08-13) ---
 # Cities whose SETTLEMENT STATION is structurally divergent from the air mass
 # the models (and every public weather source) describe — marine-layer or

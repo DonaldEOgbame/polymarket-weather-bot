@@ -498,20 +498,23 @@ class Executor:
         except Exception as e:
             logging.error(f"Startup external-close sync failed (non-fatal): {e}", exc_info=True)
 
-    def check_resolved_positions(self):
+    def check_resolved_positions(self, positions=None):
         """Poll Polymarket for resolution status of every open position. Settle any
         that have resolved. Called every monitor cycle so winning trades close at $1.00
         and losers at $0.00 without waiting for edge decay."""
-        positions = fetch_query("SELECT * FROM positions WHERE mode=?", (current_mode(),))
+        if positions is None:
+            positions = self.get_open_positions()
         settled_count = 0
+        self._last_settled_ids = set()
         for pos in positions:
             if self._try_settle_position(pos, source="monitor"):
                 settled_count += 1
+                self._last_settled_ids.add(pos["id"])
         if settled_count:
             logging.info(f"Resolution check: {settled_count} position(s) settled this cycle")
         return settled_count
 
-    def sync_external_closes(self, source="monitor"):
+    def sync_external_closes(self, source="monitor", positions=None):
         """Detect positions closed manually on Polymarket (outside the bot) and
         book them at the price actually received.
 
@@ -533,17 +536,25 @@ class Executor:
 
         Returns the number of positions closed or reduced."""
         if paper_mode() or not POLYMARKET_FUNDER:
+            self._last_ext_closed_ids = set()
             return 0
-        positions = fetch_query("SELECT * FROM positions WHERE mode=?", (current_mode(),))
+        if positions is None:
+            positions = self.get_open_positions()
         if not positions:
+            self._last_ext_closed_ids = set()
             return 0
         wallet = get_wallet_token_sizes(POLYMARKET_FUNDER)
         if wallet is None:
+            self._last_ext_closed_ids = set()
             return 0  # endpoint unreadable — unknown, not "empty"
 
         synced = 0
+        self._last_ext_closed_ids = set()
         now = datetime.now(timezone.utc)
+        settled_ids = getattr(self, "_last_settled_ids", set())
         for pos in positions:
+            if pos["id"] in settled_ids:
+                continue
             try:
                 synced += self._sync_one_external_close(pos, wallet, now, source)
             except Exception as e:
@@ -906,6 +917,9 @@ class Executor:
                 f"closed trades ({len(rows)} candidates)"
             )
         return written
+
+    def get_open_positions(self):
+        return fetch_query("SELECT * FROM positions WHERE mode=?", (current_mode(),))
 
     def get_open_positions_count(self):
         res = fetch_query("SELECT COUNT(*) as count FROM positions WHERE mode=?", (current_mode(),))
@@ -1487,9 +1501,15 @@ class Executor:
                 prices[p["market_id"]] = ask or bid
         return prices
 
-    def check_exits(self):
-        positions = fetch_query("SELECT * FROM positions WHERE mode=?", (current_mode(),))
+    def check_exits(self, positions=None):
+        if positions is None:
+            positions = self.get_open_positions()
+        closed_already = getattr(self, "_last_settled_ids", set()) | getattr(self, "_last_ext_closed_ids", set())
+        exited_count = 0
+        self._last_exited_ids = set()
         for pos in positions:
+            if pos["id"] in closed_already:
+                continue
             # Skip rather than block: if the dashboard is mid manual-close on this
             # position, the monitor has nothing useful to add and shouldn't stall
             # the whole cycle waiting on a CLOB round-trip.
@@ -1509,10 +1529,14 @@ class Executor:
                 obs = PositionObservation(pos, datetime.now(timezone.utc), executor=self)
                 try:
                     self._check_exit_for_position(pos, obs)
+                    if not get_position_by_id(pos["id"]):
+                        exited_count += 1
+                        self._last_exited_ids.add(pos["id"])
                 finally:
                     obs.persist()
             finally:
                 lock.release()
+        return exited_count
 
     def close_position_manual(self, pos_id, note=None):
         """Close one position on demand from the dashboard.

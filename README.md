@@ -64,10 +64,17 @@ stormedge/
 ├── db.py                    # SQLite schema, atomic trade transitions, replay logging
 ├── alerts.py                # Telegram / webhook trade notifications & circuit breaker alerts
 ├── utils.py                 # HTTP session caching, UTC datetime helpers
-├── backtest.py              # Historical Polymarket & NWP ensemble backtest engine
-├── calibrate.py             # Model accuracy & probability reliability calibration
-├── calibrate_city_sigma.py  # Per-city direction sigma fitting tool
+├── check_live_readiness.py  # Preflight verification of credentials, allowances & settings
 ├── backup.py                # Database snapshotting and remote off-box backups
+│
+├── quant/                   # Sub-second physical certainty sniper & microstructure core
+│   ├── fast_sniper.py       # Zero-allocation nanosecond opcode evaluator (223.5ns)
+│   ├── book.py              # L2 orderbook with synthetic cross-book liquidity parity
+│   ├── sniper.py            # Physical certainty settlement sniper (YES & NO sides)
+│   ├── engine.py            # QuantSniperEngine runtime pipeline
+│   ├── qrisk.py             # Pre-trade circuit breaker & capital allocation risk
+│   ├── backtest.py          # Pure CLOB replay historical backtester
+│   └── benchmark.py         # Sub-microsecond latency & execution benchmark suite
 │
 ├── web/
 │   ├── login.html           # Dashboard authentication
@@ -158,9 +165,9 @@ POLYMARKET_FUNDER=     # Required if POLYMARKET_SIG_TYPE != 0
 |---|---|
 | `python app.py` | Bot + Flask dashboard together on port 7777 |
 | `python main.py` | Standalone bot runner, no web UI |
-| `pytest` | Run comprehensive test suite |
-| `python backtest.py` | Run 2-year historical strategy backtest |
-| `python calibrate.py` | Check forecast Brier scores & reliability curves |
+| `pytest` | Run comprehensive test suite (720+ tests) |
+| `python quant/backtest.py` | Run pure physical certainty historical replay backtest |
+| `python quant/benchmark.py` | Run nanosecond/microsecond speed benchmark suite |
 
 ---
 

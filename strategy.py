@@ -21,6 +21,7 @@ from config import (
     MIN_DEPTH_MULTIPLE, REQUIRE_DEPTH_TO_TRADE,
     MIN_MODEL_CONFIDENCE, MAX_MODEL_CONFIDENCE, MIN_ENTRY_PRICE, MAX_HOURS_TO_RESOLUTION,
     REQUIRE_SAME_DAY, EXCLUDED_CITIES, TRADE_HIGH_MARKETS, TRADE_LOW_MARKETS,
+    ENABLE_YES_ENTRIES, SNIPER_ONLY_MODE,
     ARMED_REENTRY_ENABLED, ARMED_SIGNAL_TTL_HOURS,
     setting,
 )
@@ -461,11 +462,51 @@ def calculate_kelly(edge, price):
     return min(max(0.0, f), KELLY_CAP)
 
 def evaluate_opportunity(opp, portfolio_state, engine_res=None):
-    """Evaluate a market opportunity and decide whether to trade.
+    """Evaluate a market opportunity and decide whether to trade."""
+    if SNIPER_ONLY_MODE:
+        from intraday import settlement_state, LOCKED_WIN
+        from metar import resolved_extreme_f
+        try:
+            obs = resolved_extreme_f(opp.city, opp.date, opp.is_high)
+        except Exception:
+            obs = None
+        if obs is None:
+            return None
 
-    Pass engine_res from prefetch_signal_engines() to skip the weather API call.
-    If not provided, fetches live (slow — avoid in bulk eval loops).
-    """
+        # 1. Check NO side physical lock
+        res_no = settlement_state(opp.city, opp.date, opp.is_high, opp.bucket_low, opp.bucket_high, "NO", observed=obs)
+        if res_no and res_no.get("state") == LOCKED_WIN:
+            if 0.50 <= opp.no_price <= 0.96:
+                return {
+                    "signal": "BUY_NO",
+                    "side": "NO",
+                    "target_token": opp.token_id_no,
+                    "target_price": opp.no_price,
+                    "edge": 1.0 - opp.no_price,
+                    "opp": opp,
+                    "kelly": 0.15,
+                    "stake": min(getattr(opp, "usable_depth_usd", 50.0) or 50.0, portfolio_state.get("available_cash", 100.0) * 0.15, 10.0),
+                    "reason": f"Physical Certainty Sniper LOCKED_WIN: {res_no.get('reason')}"
+                }
+
+        # 2. Check YES side physical lock (open-ended tails or post-peak)
+        if ENABLE_YES_ENTRIES:
+            res_yes = settlement_state(opp.city, opp.date, opp.is_high, opp.bucket_low, opp.bucket_high, "YES", observed=obs)
+            if res_yes and res_yes.get("state") == LOCKED_WIN:
+                if 0.50 <= opp.yes_price <= 0.96:
+                    return {
+                        "signal": "BUY_YES",
+                        "side": "YES",
+                        "target_token": opp.token_id_yes,
+                        "target_price": opp.yes_price,
+                        "edge": 1.0 - opp.yes_price,
+                        "opp": opp,
+                        "kelly": 0.15,
+                        "stake": min(getattr(opp, "usable_depth_usd", 50.0) or 50.0, portfolio_state.get("available_cash", 100.0) * 0.15, 10.0),
+                        "reason": f"Physical Certainty Sniper LOCKED_WIN: {res_yes.get('reason')}"
+                    }
+        return None
+
     if engine_res is None:
         engine_res = get_signal_engine(
             opp.city, opp.date, opp.is_high,
@@ -521,8 +562,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     # A wide spread means the cost of actually crossing the book is likely to eat
     # most or all of the modeled edge, so it gates entry outright rather than just
     # being netted out of the edge calculation.
-    # Only fetch the YES spread if High markets are enabled.
-    yes_spread_frac = get_live_spread_fraction(opp.token_id_yes) if TRADE_HIGH_MARKETS else 0.0
+    # Only fetch the YES spread if High markets or YES entries are enabled.
+    yes_spread_frac = get_live_spread_fraction(opp.token_id_yes) if (TRADE_HIGH_MARKETS or ENABLE_YES_ENTRIES) else 0.0
     no_spread_frac = get_live_spread_fraction(opp.token_id_no)
 
     # What the intended stake would ACTUALLY fill at, by walking the real book.
@@ -550,7 +591,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     # move — and silently assumes the size fits in the top level. When it does
     # not, the order pays every level it eats: modelled 0.085 against an actual
     # 0.34 on the Austin book, a 4x understatement.
-    yes_edge = (prob - opp.yes_price) - transaction_cost(opp.yes_price, yes_spread_frac) if (TRADE_HIGH_MARKETS and opp.yes_price > 0) else -1.0
+    yes_edge = (prob - opp.yes_price) - transaction_cost(opp.yes_price, yes_spread_frac) if ((TRADE_HIGH_MARKETS or ENABLE_YES_ENTRIES) and opp.yes_price > 0) else -1.0
     no_slip_frac = no_spread_frac
     if walked_vwap is not None and opp.no_price > 0:
         # Realised slippage as a fraction of the quote, so transaction_cost's
@@ -610,18 +651,22 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     edge_used = 0.0
     skip_reason = None
 
-    # YES side disabled by request: every real winning trade to date has been NO
-    # (NO is structurally favored on bounded weather buckets), and the two YES
-    # signals the bot has generated live were both judged bad bets after the fact
-    # (Helsinki 2026-07-10, reversed; Shanghai margin-fail cases). Never open YES.
-    if yes_edge >= effective_edge_threshold:
+    # YES side evaluation (enabled when ENABLE_YES_ENTRIES is True)
+    if ENABLE_YES_ENTRIES and yes_edge >= effective_edge_threshold and (no_edge is None or yes_edge >= no_edge):
+        if opp.yes_price <= MAX_ENTRY_PRICE and opp.yes_price >= MIN_ENTRY_PRICE and prob >= MIN_MODEL_CONFIDENCE:
+            if yes_spread_frac <= MAX_ENTRY_SPREAD_FRACTION:
+                signal = "BUY_YES"
+                side = "YES"
+                kelly = calculate_kelly(yes_edge, opp.yes_price)
+                target_price = opp.yes_price
+                target_token = opp.token_id_yes
+                edge_used = yes_edge
+            else:
+                skip_reason = f"YES spread too wide: {yes_spread_frac:.1%} > {MAX_ENTRY_SPREAD_FRACTION:.1%}"
+    elif not ENABLE_YES_ENTRIES and yes_edge >= effective_edge_threshold:
         skip_reason = f"YES edge {yes_edge:.3f} but YES entries are disabled"
     
-    # Every NO-side gate, evaluated independently and in decision order. The
-    # decision below consumes this list rather than re-testing the conditions,
-    # so what gets LOGGED and what actually gated the trade cannot diverge —
-    # which is what made "which gate cut this trade?" unanswerable from the old
-    # free-text skip_reason during the 2026-07-31 reconciliation.
+    # Every NO-side gate, evaluated independently and in decision order.
     no_gates = _no_side_gates(opp, engine_res, no_edge, effective_edge_threshold,
                               agreement, spread, no_spread_frac,
                               usable_depth_usd=usable_depth, stake=intended_stake,
@@ -634,7 +679,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         failed = next((g for g in no_gates if not g["passed"]
                        and g["gate"] not in NON_BINDING_GATES), None)
         if failed is not None:
-            skip_reason = failed["detail"]
+            if skip_reason is None:
+                skip_reason = failed["detail"]
         else:
             signal = "BUY_NO"
             side = "NO"

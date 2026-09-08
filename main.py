@@ -14,7 +14,7 @@ from scanner import scan_markets, verify_parser_fixtures, prefetch_order_books
 from strategy import evaluate_opportunity
 from executor import Executor
 from alerts import send_daily_summary, send_error_alert, send_circuit_breaker_alert
-from config import SCAN_INTERVAL_MINUTES, MONITOR_INTERVAL_MINUTES, daily_loss_limit, setting
+from config import SCAN_INTERVAL_MINUTES, MONITOR_INTERVAL_MINUTES, daily_loss_limit, setting, SNIPER_ONLY_MODE
 from weather import (log_model_accuracy, get_station_coords, prefetch_signal_engines,
                      validate_config_tables)
 from metar import final_extreme_f
@@ -217,11 +217,14 @@ def run_scan_cycle():
         portfolio_state = get_portfolio_state()
         opportunities = scan_markets()
 
-        weather_cache = prefetch_signal_engines(opportunities)
+        if SNIPER_ONLY_MODE:
+            today_utc = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+            opportunities = [o for o in opportunities if o.date <= today_utc]
+            weather_cache = {}
+        else:
+            weather_cache = prefetch_signal_engines(opportunities)
 
-        # Warm the live order-book cache in parallel — see prefetch_order_books'
-        # docstring for why this is safe to parallelize while the eval loop below
-        # (which reads/mutates portfolio_state) must stay sequential.
+        # Warm the live order-book cache in parallel
         prefetch_order_books(opportunities)
 
         traded = 0
@@ -233,10 +236,17 @@ def run_scan_cycle():
             signal_data = evaluate_opportunity(opp, portfolio_state, engine_res=engine_res)
             if signal_data and signal_data["signal"]:
                 executor.execute_trade(signal_data)
-                portfolio_state = get_portfolio_state()
+                # In-memory working portfolio: update cash balances directly without blocking SQLite reads
+                stake = float(signal_data.get("stake_usd", 0.0) or 0.0)
+                portfolio_state["available_cash"] = max(0.0, portfolio_state["available_cash"] - stake)
+                portfolio_state["locked_cash"] += stake
                 traded += 1
             else:
                 skipped += 1
+
+        if traded > 0:
+            # Sync final state from DB once after all fills complete
+            portfolio_state = get_portfolio_state()
 
         logging.info(
             f"Scan done — {len(opportunities)} candidates | {traded} traded | {skipped} skipped | "
@@ -247,24 +257,26 @@ def run_scan_cycle():
         send_error_alert(e)
     finally:
         _beat()
-        gc.collect()
 
 def run_monitor_cycle():
     try:
-        open_count = executor.get_open_positions_count()
+        open_positions = executor.get_open_positions()
+        open_count = len(open_positions)
+        if open_count == 0:
+            executor.sync_wallet_cash()
+            return
+
         # 1. Settle any positions whose markets have resolved on Polymarket
-        executor.check_resolved_positions()
+        settled = executor.check_resolved_positions(positions=open_positions)
         # 2. Book positions sold manually on Polymarket at their real sale price
-        #    (before exit checks, so the bot never tries to sell shares it no
-        #    longer holds)
-        executor.sync_external_closes()
-        # 2b. Book deposits/withdrawals made on Polymarket outside the bot —
-        #     the wallet is the truth for cash, exactly as it is for shares.
+        #    (before exit checks, so the bot never tries to sell shares it no longer holds)
+        ext_closed = executor.sync_external_closes(positions=open_positions)
+        # 2b. Book deposits/withdrawals made on Polymarket outside the bot
         executor.sync_wallet_cash()
         # 3. Check exit triggers (stop-loss, edge decay) on whatever remains open
-        executor.check_exits()
-        still_open = executor.get_open_positions_count()
-        closed = open_count - still_open
+        exited = executor.check_exits(positions=open_positions)
+        
+        closed = settled + ext_closed + (exited or 0)
         if closed > 0 or open_count > 0:
             logging.info(f"Monitor — {open_count} open position(s), {closed} exit(s) triggered")
     except Exception as e:
@@ -272,7 +284,6 @@ def run_monitor_cycle():
         send_error_alert(e)
     finally:
         _beat()
-        gc.collect()
 
 def _daily_purge():
     try:
@@ -436,6 +447,15 @@ def run_bot(in_thread=False):
     executor = Executor()
     _print_startup_summary()
 
+    event_sniper = None
+    if SNIPER_ONLY_MODE:
+        try:
+            from quant.event_sniper import EventDrivenSniper
+            event_sniper = EventDrivenSniper(executor, poll_interval_sec=10.0)
+            event_sniper.start()
+        except Exception as e:
+            logging.error(f"Failed to start EventDrivenSniper: {e}", exc_info=True)
+
     run_scan_cycle()
     run_monitor_cycle()
     check_resolutions()
@@ -460,6 +480,8 @@ def run_bot(in_thread=False):
         schedule.run_pending()
         time.sleep(1)
         if not running:
+            if event_sniper:
+                event_sniper.stop()
             # Don't wait for open positions to close: under hold-to-settlement
             # they stay open for days, so the old "wait until flat" condition
             # meant every deploy hung here until the supervisor SIGKILLed the
