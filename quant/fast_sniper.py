@@ -10,7 +10,6 @@ Optimized for institutional tick-to-wire execution:
 
 from typing import Dict, List, Optional, Tuple
 from dataclasses import dataclass
-import numpy as np
 
 # Fast integer opcodes for branchless / direct evaluation
 OP_GT = 1       # obs > threshold_1 (NO on High barrier)
