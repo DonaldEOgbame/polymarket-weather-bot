@@ -473,8 +473,8 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         if obs is None:
             return None
 
-        # 1. Check NO side physical lock
-        res_no = settlement_state(opp.city, opp.date, opp.is_high, opp.bucket_low, opp.bucket_high, "NO", observed=obs)
+        # 1. Check NO side physical lock (strict monotonic barrier breach only!)
+        res_no = settlement_state(opp.city, opp.date, opp.is_high, opp.bucket_low, opp.bucket_high, "NO", observed=obs, strict_monotonic=True)
         if res_no and res_no.get("state") == LOCKED_WIN:
             if 0.50 <= opp.no_price <= 0.96:
                 stake = min(getattr(opp, "usable_depth_usd", 50.0) or 50.0, portfolio_state.get("available_cash", 100.0) * 0.15, 10.0)
@@ -497,9 +497,9 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                     "reason": f"Physical Certainty Sniper LOCKED_WIN: {res_no.get('reason')}"
                 }
 
-        # 2. Check YES side physical lock (open-ended tails or post-peak)
+        # 2. Check YES side physical lock (open-ended tails or finalized days only!)
         if ENABLE_YES_ENTRIES:
-            res_yes = settlement_state(opp.city, opp.date, opp.is_high, opp.bucket_low, opp.bucket_high, "YES", observed=obs)
+            res_yes = settlement_state(opp.city, opp.date, opp.is_high, opp.bucket_low, opp.bucket_high, "YES", observed=obs, strict_monotonic=True)
             if res_yes and res_yes.get("state") == LOCKED_WIN:
                 if 0.50 <= opp.yes_price <= 0.96:
                     stake = min(getattr(opp, "usable_depth_usd", 50.0) or 50.0, portfolio_state.get("available_cash", 100.0) * 0.15, 10.0)

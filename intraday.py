@@ -217,7 +217,8 @@ _UNSET = object()   # so an injected observed=None means "none available", not "
 
 
 def settlement_state(city_key, target_date, is_high, bucket_low, bucket_high,
-                     side, observed=_UNSET, hour=None, day_over=None):
+                     side, observed=_UNSET, hour=None, day_over=None,
+                     strict_monotonic: bool = False):
     """Where today's observations have already put this position, as arithmetic.
 
     A daily maximum can only RISE for the rest of the local day; a daily minimum
@@ -227,19 +228,15 @@ def settlement_state(city_key, target_date, is_high, bucket_low, bucket_high,
       * observed extreme already CLEAR of the bucket on the side the ratchet
         cannot walk back  ->  a NO settles at $1.  LOCKED_WIN
       * observed extreme short of the bucket with the day's rise spent  ->  it
-        will never reach the bucket.                                LOCKED_WIN
+        will never reach the bucket.                                LOCKED_WIN (exit-only heuristic)
       * observed extreme INSIDE the bucket with the rise spent  ->  a NO settles
         at $0.                                                     LOCKED_LOSS
       * anything else                                              UNDECIDED
 
-    UNDECIDED deliberately covers the most dangerous moment in the life of one of
-    these positions: the observed extreme sitting inside the bucket with heating
-    still to come. There the book is pricing the TRANSIT, not the outcome, and it
-    dislocates violently. Qingdao 2026-08-11 was stopped out in exactly that
-    state — mid 0.295 at 13:18 local with the running max at 30.3°C, one bucket
-    step below the 30.8°C it peaked at 42 minutes later, and it settled at $1.00.
-    See [gate scoreboard] and the STOP_LOSS_PCT note in config.py, which recorded
-    the identical Chongqing 2026-07-25 near-miss a fortnight before it recurred.
+    When `strict_monotonic=True` (used for SNIPER ENTRY):
+      Diurnal curve estimates ('rise spent') are STRICTLY REJECTED. Only mathematically
+      guaranteed barrier breaches (T_obs > bucket_high for Highs, T_obs < bucket_low for Lows)
+      or finalized days (day_over=True) can ever yield LOCKED_WIN.
 
     Returns UNKNOWN when the observation, station or local hour is unavailable.
     Callers must treat UNKNOWN as "do not sell at a loss", never as permission.
@@ -259,6 +256,48 @@ def settlement_state(city_key, target_date, is_high, bucket_low, bucket_high,
     if observed is None:
         return {"state": UNKNOWN, "observed": None, "reason": "no observation available"}
 
+    # Pad the bucket by the same half-degree the exit path's METAR check uses, so
+    # the two never disagree about whether a reading is "in" the bucket.
+    lo = (bucket_low - BUCKET_EDGE_PAD_F) if bucket_low is not None else float("-inf")
+    hi = (bucket_high + BUCKET_EDGE_PAD_F) if bucket_high is not None else float("inf")
+
+    if strict_monotonic:
+        if day_over:
+            # Day is completely over in this station's timezone; recorded extreme is final.
+            if lo <= observed <= hi:
+                no_wins = False  # inside bucket -> YES won
+            else:
+                no_wins = True   # outside bucket -> NO won
+            detail = f"Finalized day: observed {observed:.1f}°F vs bucket [{lo:.1f}, {hi:.1f}]"
+        else:
+            # Intraday active market: ONLY pure monotonic barrier breaches are physical certainty.
+            if is_high:
+                if bucket_high is not None and observed > hi:
+                    no_wins = True
+                    detail = f"Monotonic barrier breach: observed {observed:.1f}°F > ceiling {hi:.1f}°F (daily max can only rise)"
+                elif bucket_high is None and bucket_low is not None and observed >= lo:
+                    no_wins = False  # Open-ended high tail: YES won
+                    detail = f"Monotonic tail lock: observed {observed:.1f}°F >= floor {lo:.1f}°F (daily max can only rise)"
+                else:
+                    no_wins = None
+                    detail = f"Active day: observed {observed:.1f}°F has not breached bucket [{lo:.1f}, {hi:.1f}]"
+            else:
+                if bucket_low is not None and observed < lo:
+                    no_wins = True
+                    detail = f"Monotonic barrier breach: observed {observed:.1f}°F < floor {lo:.1f}°F (daily min can only fall)"
+                elif bucket_low is None and bucket_high is not None and observed <= hi:
+                    no_wins = False  # Open-ended low tail: YES won
+                    detail = f"Monotonic tail lock: observed {observed:.1f}°F <= ceiling {hi:.1f}°F (daily min can only fall)"
+                else:
+                    no_wins = None
+                    detail = f"Active day: observed {observed:.1f}°F has not breached bucket [{lo:.1f}, {hi:.1f}]"
+
+        if no_wins is None:
+            return {"state": UNDECIDED, "observed": observed, "reason": detail}
+        ours_wins = no_wins if str(side).upper() == "NO" else not no_wins
+        return {"state": LOCKED_WIN if ours_wins else LOCKED_LOSS,
+                "observed": observed, "reason": detail}
+
     # Once the day is over the extreme IS final, so there is no rise left by
     # definition. Mid-day, consult the fitted diurnal curve.
     if day_over:
@@ -268,11 +307,6 @@ def settlement_state(city_key, target_date, is_high, bucket_low, bucket_high,
         # An unusable curve is not evidence the day is done — stay UNDECIDED.
         rise_left = 1.0 if frac is None else frac[0]
     spent = rise_left <= EXIT_PEAK_PASSED_FRACTION
-
-    # Pad the bucket by the same half-degree the exit path's METAR check uses, so
-    # the two never disagree about whether a reading is "in" the bucket.
-    lo = (bucket_low - BUCKET_EDGE_PAD_F) if bucket_low is not None else float("-inf")
-    hi = (bucket_high + BUCKET_EDGE_PAD_F) if bucket_high is not None else float("inf")
 
     # `no_wins` = does the final extreme land OUTSIDE the bucket? Resolved from
     # the ratchet direction, then flipped at the end for a YES position.
@@ -303,3 +337,4 @@ def settlement_state(city_key, target_date, is_high, bucket_low, bucket_high,
     ours_wins = no_wins if str(side).upper() == "NO" else not no_wins
     return {"state": LOCKED_WIN if ours_wins else LOCKED_LOSS,
             "observed": observed, "reason": detail}
+

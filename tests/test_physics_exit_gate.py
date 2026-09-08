@@ -249,3 +249,78 @@ class TestTheDeployedDefaults:
         assert C.EXIT_MAX_SLIPPAGE_FRAC < realized, (
             f"cap {C.EXIT_MAX_SLIPPAGE_FRAC:.2%} would have permitted the "
             f"{realized:.2%} slippage Qingdao actually paid")
+
+
+class TestStrictMonotonicSniperRatchet:
+    """Rigorous tests for strict monotonic sniper entry rules.
+    
+    Verifies that entry signals NEVER rely on diurnal curve heuristics ('rise spent')
+    and ONLY trigger when physical monotonicity guarantees the settlement.
+    """
+
+    def test_ankara_regression_sub_bucket_is_undecided_in_strict_mode(self):
+        """Regression test for Ankara 2026-09-08:
+        At 14:39 local time, temp was 22°C (71.6°F) vs 23°C bucket (73.0-73.8°F).
+        The diurnal model estimated 98.8% rise spent, but Ankara rose to 23°C at 15:20.
+        In strict monotonic mode, this MUST be UNDECIDED (cannot enter NO).
+        """
+        res = I.settlement_state(
+            "Ankara", "2026-09-08", is_high=True,
+            bucket_low=73.0, bucket_high=73.8, side="NO",
+            observed=71.6, hour=14.65, day_over=False,
+            strict_monotonic=True
+        )
+        assert res["state"] == I.UNDECIDED
+        assert "not breached" in res["reason"]
+
+    def test_ankara_monotonic_breach_above_bucket_is_locked_win(self):
+        """If temp actually breaches above 23°C bucket (e.g. 24°C = 75.2°F),
+        max can NEVER fall back to 23°C. NO is 100% mathematically locked.
+        """
+        res = I.settlement_state(
+            "Ankara", "2026-09-08", is_high=True,
+            bucket_low=73.0, bucket_high=73.8, side="NO",
+            observed=75.2, hour=14.65, day_over=False,
+            strict_monotonic=True
+        )
+        assert res["state"] == I.LOCKED_WIN
+        assert "Monotonic barrier breach" in res["reason"]
+
+    def test_low_temp_above_bucket_is_undecided_in_strict_mode(self):
+        """For daily low, temp being above bucket floor is NOT a locked win during active day,
+        even if the model thinks warming has started, because evening cold fronts can drop temp.
+        """
+        res = I.settlement_state(
+            "Chicago", "2026-09-08", is_high=False,
+            bucket_low=50.0, bucket_high=52.0, side="NO",
+            observed=55.0, hour=10.0, day_over=False,
+            strict_monotonic=True
+        )
+        assert res["state"] == I.UNDECIDED
+
+    def test_low_temp_below_bucket_is_locked_win(self):
+        """For daily low, if temp drops to 48°F (below 50°F floor), min can NEVER rise.
+        NO is 100% mathematically locked.
+        """
+        res = I.settlement_state(
+            "Chicago", "2026-09-08", is_high=False,
+            bucket_low=50.0, bucket_high=52.0, side="NO",
+            observed=48.0, hour=10.0, day_over=False,
+            strict_monotonic=True
+        )
+        assert res["state"] == I.LOCKED_WIN
+        assert "Monotonic barrier breach" in res["reason"]
+
+    def test_open_ended_high_tail_lock(self):
+        """Open-ended high tail: >= 90°F. If obs reaches 91°F, max can never drop.
+        YES is 100% mathematically locked.
+        """
+        res = I.settlement_state(
+            "Dallas", "2026-09-08", is_high=True,
+            bucket_low=90.0, bucket_high=None, side="YES",
+            observed=91.0, hour=13.0, day_over=False,
+            strict_monotonic=True
+        )
+        assert res["state"] == I.LOCKED_WIN
+        assert "Monotonic tail lock" in res["reason"]
+

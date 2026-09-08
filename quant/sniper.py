@@ -58,7 +58,7 @@ class MetarSettlementSniper:
         """Evaluate a specific side (YES or NO) for physical lock certainty."""
         side_norm = side.upper()
 
-        # Check physical settlement state
+        # Check physical settlement state (strict monotonic barrier breaches only)
         state_res = settlement_state(
             city_key=city_key,
             target_date=target_date,
@@ -66,7 +66,8 @@ class MetarSettlementSniper:
             bucket_low=bucket_low,
             bucket_high=bucket_high,
             side=side_norm,
-            observed=obs
+            observed=obs,
+            strict_monotonic=True
         )
         state_val = state_res.get("state") if isinstance(state_res, dict) else state_res
 
