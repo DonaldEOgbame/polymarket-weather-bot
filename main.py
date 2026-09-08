@@ -234,13 +234,34 @@ def run_scan_cycle():
                 break
             engine_res = weather_cache.get((opp.city, opp.date, opp.is_high))
             signal_data = evaluate_opportunity(opp, portfolio_state, engine_res=engine_res)
-            if signal_data and signal_data["signal"]:
-                executor.execute_trade(signal_data)
+            if signal_data and signal_data.get("signal"):
+                res = executor.execute_trade(signal_data)
                 # In-memory working portfolio: update cash balances directly without blocking SQLite reads
-                stake = float(signal_data.get("stake_usd", 0.0) or 0.0)
+                stake = float(signal_data.get("size_usdc", 0.0) or signal_data.get("stake_usd", 0.0) or 0.0)
                 portfolio_state["available_cash"] = max(0.0, portfolio_state["available_cash"] - stake)
                 portfolio_state["locked_cash"] += stake
                 traded += 1
+
+                try:
+                    from db import log_sniper_audit
+                    bucket_label = f"{opp.bucket_low}-{opp.bucket_high}"
+                    log_sniper_audit(
+                        station_icao=getattr(opp, "station_icao", "") or "",
+                        city=opp.city,
+                        target_date=opp.date,
+                        bucket_label=bucket_label,
+                        side=signal_data["side"],
+                        observed_temp_f=float(getattr(opp, "observed_temp", 0.0) or 0.0),
+                        best_ask=signal_data["price"],
+                        best_bid=None,
+                        ask_depth_usd=getattr(opp, "usable_depth_usd", None),
+                        stake_usd=stake,
+                        outcome="FILLED" if res is not False else "EXECUTION_REJECTED",
+                        detail=signal_data.get("reason", "Scan cycle physical certainty snipe"),
+                        latency_ms=0.0
+                    )
+                except Exception as e:
+                    logging.error(f"Failed to log scan sniper audit: {e}")
             else:
                 skipped += 1
 

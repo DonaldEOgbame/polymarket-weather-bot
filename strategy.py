@@ -477,15 +477,23 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         res_no = settlement_state(opp.city, opp.date, opp.is_high, opp.bucket_low, opp.bucket_high, "NO", observed=obs)
         if res_no and res_no.get("state") == LOCKED_WIN:
             if 0.50 <= opp.no_price <= 0.96:
+                stake = min(getattr(opp, "usable_depth_usd", 50.0) or 50.0, portfolio_state.get("available_cash", 100.0) * 0.15, 10.0)
                 return {
                     "signal": "BUY_NO",
+                    "action": "BUY",
                     "side": "NO",
+                    "token_id": opp.token_id_no,
                     "target_token": opp.token_id_no,
+                    "price": opp.no_price,
                     "target_price": opp.no_price,
+                    "size_usdc": stake,
+                    "stake": stake,
+                    "stake_usd": stake,
+                    "walked_vwap": opp.no_price,
                     "edge": 1.0 - opp.no_price,
+                    "model_prob": 1.0,
                     "opp": opp,
                     "kelly": 0.15,
-                    "stake": min(getattr(opp, "usable_depth_usd", 50.0) or 50.0, portfolio_state.get("available_cash", 100.0) * 0.15, 10.0),
                     "reason": f"Physical Certainty Sniper LOCKED_WIN: {res_no.get('reason')}"
                 }
 
@@ -494,15 +502,23 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             res_yes = settlement_state(opp.city, opp.date, opp.is_high, opp.bucket_low, opp.bucket_high, "YES", observed=obs)
             if res_yes and res_yes.get("state") == LOCKED_WIN:
                 if 0.50 <= opp.yes_price <= 0.96:
+                    stake = min(getattr(opp, "usable_depth_usd", 50.0) or 50.0, portfolio_state.get("available_cash", 100.0) * 0.15, 10.0)
                     return {
                         "signal": "BUY_YES",
+                        "action": "BUY",
                         "side": "YES",
+                        "token_id": opp.token_id_yes,
                         "target_token": opp.token_id_yes,
+                        "price": opp.yes_price,
                         "target_price": opp.yes_price,
+                        "size_usdc": stake,
+                        "stake": stake,
+                        "stake_usd": stake,
+                        "walked_vwap": opp.yes_price,
                         "edge": 1.0 - opp.yes_price,
+                        "model_prob": 1.0,
                         "opp": opp,
                         "kelly": 0.15,
-                        "stake": min(getattr(opp, "usable_depth_usd", 50.0) or 50.0, portfolio_state.get("available_cash", 100.0) * 0.15, 10.0),
                         "reason": f"Physical Certainty Sniper LOCKED_WIN: {res_yes.get('reason')}"
                     }
         return None
