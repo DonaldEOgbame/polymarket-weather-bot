@@ -98,29 +98,29 @@ class EventDrivenSniper:
                 }
                 self._active_markets_by_station.setdefault(icao, []).append(m_dict)
 
-                if m.is_high and m.bucket_high is not None:
-                    no_token = m_dict["tokens"].get("NO")
-                    if no_token:
-                        order = PrebuiltSnipeOrder(
-                            token_id=no_token,
-                            price=self.max_snipe_price,
-                            size=10.0,
-                            raw_payload_bytes=b"",
-                            target_date=m.date,
-                            city=city,
-                            side="NO"
-                        )
-                        self.core.register_no_trigger(
-                            icao=icao,
-                            bucket_id=m.market_id,
-                            is_high=True,
-                            bucket_low=m.bucket_low,
-                            bucket_high=m.bucket_high,
-                            prebuilt_order=order,
-                            pad=0.0
-                        )
-                        self._registered_orders[m.market_id] = order
-                        self._market_by_token[no_token] = m_dict
+                no_token = getattr(m, "token_id_no", None) or getattr(m, "tokens", {}).get("NO")
+                can_register = (m.is_high and m.bucket_high is not None) or (not m.is_high and m.bucket_low is not None)
+                if no_token and can_register:
+                    order = PrebuiltSnipeOrder(
+                        token_id=no_token,
+                        price=self.max_snipe_price,
+                        size=10.0,
+                        raw_payload_bytes=b"",
+                        target_date=m.date,
+                        city=city,
+                        side="NO"
+                    )
+                    self.core.register_no_trigger(
+                        icao=icao,
+                        bucket_id=m.market_id,
+                        is_high=m.is_high,
+                        bucket_low=m.bucket_low,
+                        bucket_high=m.bucket_high,
+                        prebuilt_order=order,
+                        pad=0.0
+                    )
+                    self._registered_orders[m.market_id] = order
+                    self._market_by_token[no_token] = m_dict
 
             station_count = len(self._active_markets_by_station)
             market_count = sum(len(ms) for ms in self._active_markets_by_station.values())
