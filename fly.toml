@@ -32,9 +32,9 @@ primary_region = 'arn'
   MAX_HOURS_TO_RESOLUTION = '48.0'
   REQUIRE_SAME_DAY = 'false'
   FORECAST_MARGIN_F = '4.0'
-  # Portfolio B: 10 Safe + High Volume cities (99.08% WR, ~3.7 trades/day)
-  # KEEP: Dallas, Toronto, Buenos Aires, Atlanta, London, Seattle, Chicago, Wellington, Miami, Beijing
-  EXCLUDED_CITIES = 'Amsterdam,Ankara,Austin,Berlin,Busan,Cape Town,Chengdu,Chongqing,Denver,Guangzhou,Helsinki,Hong Kong,Houston,Istanbul,Jakarta,Jeddah,Kuala Lumpur,Lagos,Los Angeles,Lucknow,Madrid,Manila,Mexico City,Milan,Moscow,Munich,NYC,New York,Panama,Paris,Qingdao,San Francisco,Sao Paulo,Seoul,Shanghai,Shenzhen,Singapore,Taipei,Tel Aviv,Tokyo,Warsaw,Wuhan'
+  ENABLE_YES_ENTRIES = 'true'
+  # Physical certainty & post-close stale liquidity arbitrage targets all supported stations
+  EXCLUDED_CITIES = ''
 
 [processes]
   app = 'python app.py'

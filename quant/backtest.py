@@ -5,6 +5,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import urllib.request
 import csv
 import io
+import json
 import sqlite3
 import numpy as np
 from zoneinfo import ZoneInfo
@@ -29,6 +30,28 @@ CITY_TO_ICAO = {
     "London": "EGLC",
     "Beijing": "ZBAA",
 }
+
+
+def _require_historical_l2(conn):
+    """Reject the old replay-signals approximation before it can make trades.
+
+    replay_signals contains strategy snapshots, not timestamped CLOB levels. It
+    cannot establish that depth was still resting after the METAR breach, so it
+    is not a valid source for a pure sniper backtest.
+    """
+    row = conn.execute(
+        "SELECT 1 FROM sqlite_master WHERE type='table' AND name='orderbook_snapshots'"
+    ).fetchone()
+    if row is None:
+        raise RuntimeError(
+            "Pure sniper backtest requires an orderbook_snapshots table with "
+            "timestamped post-breach CLOB snapshots; replay_signals is not L2 history."
+        )
+    columns = {r[1] for r in conn.execute("PRAGMA table_info(orderbook_snapshots)")}
+    required = {"market_id", "timestamp", "asks_json"}
+    if not required.issubset(columns):
+        missing = ", ".join(sorted(required - columns))
+        raise RuntimeError(f"orderbook_snapshots is missing required columns: {missing}")
 
 
 @dataclass(slots=True)
@@ -71,7 +94,9 @@ def fetch_historical_metar_series(icao: str, tz_name: str, date_str: str) -> Lis
                     continue
                 tf = r.get("tmpf")
                 if tf not in ("M", "", None):
-                    dt_local = datetime.fromisoformat(v).replace(tzinfo=stn_tz)
+                    dt_local = datetime.fromisoformat(v)
+                    if dt_local.tzinfo is None:
+                        dt_local = dt_local.replace(tzinfo=stn_tz)
                     dt_utc = dt_local.astimezone(ZoneInfo("UTC"))
                     obs.append((dt_utc, float(tf)))
             obs.sort(key=lambda x: x[0])
@@ -99,9 +124,14 @@ def run_pure_sniper_backtest(
     conn = sqlite3.connect(db_path)
     conn.row_factory = sqlite3.Row
     c = conn.cursor()
+    try:
+        _require_historical_l2(conn)
+    except Exception:
+        conn.close()
+        raise
 
     markets = c.execute("""
-    SELECT DISTINCT city, station_icao, target_date, is_high, bucket_low, bucket_high, bucket_type, settled_value, settled_outcome
+    SELECT DISTINCT market_id, city, station_icao, target_date, is_high, bucket_low, bucket_high, bucket_type, settled_value, settled_outcome
     FROM replay_signals
     WHERE settled_outcome IS NOT NULL AND settled_value IS NOT NULL;
     """).fetchall()
@@ -112,7 +142,10 @@ def run_pure_sniper_backtest(
     for icao, city, td in distinct_events:
         if not icao:
             continue
-        tz = STATION_TIMEZONES.get(icao, "America/New_York")
+        tz = STATION_TIMEZONES.get(icao)
+        if tz is None:
+            conn.close()
+            raise RuntimeError(f"No timezone mapping for METAR station {icao} ({city})")
         metar_cache[(city, td)] = fetch_historical_metar_series(icao, tz, td)
 
     trades: List[SniperTrade] = []
@@ -167,6 +200,19 @@ def run_pure_sniper_backtest(
                     side_target = "YES"
                     break
 
+        # If no intraday monotonic breach, check post-close finalized day
+        if t_breach is None and obs_list:
+            try:
+                yr, mon, dy = map(int, td.split("-"))
+                t_day_end = datetime(yr, mon, dy, 23, 59, 59, tzinfo=ZoneInfo(tz)).astimezone(timezone.utc)
+                temps = [temp for _, temp in obs_list]
+                extreme = max(temps) if is_high else min(temps)
+                in_bucket = (b_lo is None or extreme >= b_lo) and (b_hi is None or extreme <= b_hi)
+                t_breach = t_day_end
+                side_target = "YES" if in_bucket else "NO"
+            except Exception:
+                pass
+
         if t_breach is None or side_target is None:
             continue
 
@@ -174,37 +220,48 @@ def run_pure_sniper_backtest(
         t_earliest_exec = t_breach + timedelta(seconds=dissemination_lag_sec)
 
         # Step 3: Query CLOB order book ticks STRICTLY AFTER t_earliest_exec
+        # These are actual CLOB snapshots, not strategy observations. The
+        # recorder stores asks_json as either {"YES": [...], "NO": [...]} or
+        # a plain list for single-token snapshots.
         ticks = c.execute("""
-        SELECT id, timestamp, no_price, yes_price, usable_depth_usd, spread_fraction
-        FROM replay_signals
-        WHERE city=? AND target_date=? AND is_high=?
-          AND bucket_low IS ? AND bucket_high IS ?
-          AND timestamp >= ?
+        SELECT id, timestamp, asks_json, spread_fraction
+        FROM orderbook_snapshots
+        WHERE market_id=? AND timestamp >= ?
         ORDER BY timestamp ASC;
-        """, (city, td, int(is_high), b_lo, b_hi, t_earliest_exec.isoformat())).fetchall()
+        """, (m["market_id"], t_earliest_exec.isoformat())).fetchall()
 
         for tick in ticks:
-            ts_str = tick["timestamp"].replace("+00:00", "")
-            t_tick = datetime.fromisoformat(ts_str).replace(tzinfo=timezone.utc)
+            t_tick = datetime.fromisoformat(tick["timestamp"].replace("Z", "+00:00"))
+            if t_tick.tzinfo is None:
+                t_tick = t_tick.replace(tzinfo=timezone.utc)
+            try:
+                asks_payload = json.loads(tick["asks_json"] or "[]")
+                asks = asks_payload.get(side_target, []) if isinstance(asks_payload, dict) else asks_payload
+                levels = sorted(
+                    (float(x["price"]), float(x["size"])) for x in asks
+                    if float(x["price"]) > 0 and float(x["size"]) > 0
+                    and float(x["price"]) <= max_snipe_price
+                )
+            except (TypeError, ValueError, KeyError, json.JSONDecodeError):
+                continue
 
-            no_p = float(tick["no_price"] or 0.0)
-            yes_p = float(tick["yes_price"] or 0.0)
-            depth = float(tick["usable_depth_usd"] or 0.0)
-            spread_f = float(tick["spread_fraction"] or 0.02)
-
-            fill_price = None
-            if side_target == "NO" and 0.01 <= no_p <= max_snipe_price:
-                fill_price = no_p
-            elif side_target == "YES" and 0.01 <= yes_p <= max_snipe_price:
-                fill_price = yes_p
-
-            if fill_price is not None and depth > 0:
+            depth = sum(price * size for price, size in levels)
+            stake = min(depth, stake_cap_usd, current_equity * 0.15)
+            fill_price = levels[0][0] if levels else None
+            if fill_price is not None and stake > 0:
+                remaining = stake
+                shares = 0.0
+                spent = 0.0
+                for price, size in levels:
+                    used = min(remaining, price * size)
+                    spent += used
+                    shares += used / price
+                    remaining -= used
+                    if remaining <= 1e-9:
+                        break
+                fill_price = spent / shares
                 seen_buckets.add(bucket_key)
-                stake = min(depth, stake_cap_usd, current_equity * 0.15)
-                if stake <= 0:
-                    continue
-
-                shares = stake / fill_price
+                spread_f = float(tick["spread_fraction"] or 0.02)
                 fee = transaction_cost(fill_price, spread_f) * shares
                 is_win = (s_out == side_target)
 

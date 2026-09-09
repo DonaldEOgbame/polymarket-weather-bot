@@ -1529,13 +1529,11 @@ def validate_env_ranges():
             f"MIN_ENTRY_PRICE={MIN_ENTRY_PRICE} is outside [0.1, 0.95]."
         )
 
-    if not 0.5 < MAX_ENTRY_PRICE <= 0.95:
+    if not 0.5 < MAX_ENTRY_PRICE <= 0.99:
         problems.append(
-            f"MAX_ENTRY_PRICE={MAX_ENTRY_PRICE} is outside (0.5, 0.95]. 1.00 is "
+            f"MAX_ENTRY_PRICE={MAX_ENTRY_PRICE} is outside (0.5, 0.99]. 1.00 is "
             f"the DISABLED sentinel used between 2026-07-28 and 2026-07-31, and "
-            f"it disarms the gate entirely — the 0.80-0.90 fill band is the only "
-            f"losing band in the whole book (-$3.55 over 10 trades). Set it "
-            f"deliberately or leave it at its default."
+            f"it disarms the gate entirely. Set it deliberately or leave it at its default."
         )
 
     if MIN_ENTRY_PRICE >= MAX_ENTRY_PRICE:

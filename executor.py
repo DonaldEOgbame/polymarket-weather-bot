@@ -1323,10 +1323,9 @@ class Executor:
 
         side = signal_data["side"]
         size = signal_data["size_usdc"]
-        # Paper assumes a fill at the limit computed below (walked book + 1¢).
-        # Live crosses the real ask and records whatever ACTUALLY fills
-        # (price + size), so the ledger and the measured cost reflect real
-        # execution, not an assumption.
+        # Live records whatever the exchange actually fills. Paper mode must
+        # use the same executable book semantics; it must not manufacture a
+        # fill at a lower configured cap when the real ask is higher.
         quoted_price = signal_data["price"]
         # The limit the order is actually sent with, from the WALKED ask VWAP
         # the gates approved, not the mid. The quote is the book mid, and on a
@@ -1351,7 +1350,10 @@ class Executor:
             fresh = estimate_fill(signal_data["token_id"], size, max_entry_limit,
                                   force=True)
             fresh_fill = fresh.get("vwap") if fresh else None
-            basis, skip = submit_time_basis(quoted_price, walked, fresh_fill)
+            basis, skip = submit_time_basis(
+                quoted_price, walked, fresh_fill,
+                floor=setting("MIN_ENTRY_PRICE"),
+            )
             if basis is None:
                 logging.info(f"SUBMIT_REPRICE | {opp.city} {opp.date} | {skip} "
                              f"— not sending this cycle (any arm stays alive)")
@@ -1408,11 +1410,18 @@ class Executor:
             # event is rare) but BLOCKS on positive holdings.
             try:
                 from scanner import get_wallet_token_sizes
-                held = (get_wallet_token_sizes(POLYMARKET_FUNDER) or {}).get(
-                    str(signal_data["token_id"]), 0.0) if POLYMARKET_FUNDER else 0.0
+                wallet_sizes = (get_wallet_token_sizes(POLYMARKET_FUNDER)
+                                if POLYMARKET_FUNDER else None)
             except Exception as e:
                 logging.error(f"wallet-holdings precheck failed for {opp.market_id}: {e}")
-                held = 0.0
+                wallet_sizes = None
+            if wallet_sizes is None:
+                logging.error(
+                    f"Refusing live entry for {opp.market_id}: wallet holdings "
+                    "could not be verified"
+                )
+                return
+            held = wallet_sizes.get(str(signal_data["token_id"]), 0.0)
             if held >= 1.0:
                 msg = (f"{opp.city} {opp.date}: wallet already holds {held:.2f} of this "
                        f"token but no position is recorded — a previous entry's DB "
@@ -1431,11 +1440,18 @@ class Executor:
             )
             if USE_MARKETABLE_LIMIT:
                 fill = self._submit_marketable_limit(
-                    signal_data["token_id"], "BUY", size, limit_price=setting("MAX_ENTRY_PRICE"),
+                    signal_data["token_id"], "BUY", size, limit_price=max_entry_limit,
                     fallback_price=price)
             else:
-                fill = self._submit_taker(signal_data["token_id"], "BUY", size,
-                                          fallback_price=price)  # amount = USDC
+                # An uncapped market BUY can walk through the entire ask book
+                # and violate MAX_ENTRY_PRICE between the pre-submit check and
+                # the fill. Refuse the trade rather than permitting a config
+                # switch to disable the hard loss boundary.
+                logging.error(
+                    f"Refusing live entry for {opp.market_id}: "
+                    "USE_MARKETABLE_LIMIT=false would bypass MAX_ENTRY_PRICE"
+                )
+                return
             if not fill:
                 return  # nothing filled → no phantom position
             price = round(fill["price"], 4)
@@ -1445,9 +1461,35 @@ class Executor:
             self._verify_fill(opp, signal_data, quoted_price,
                               fill.get("limit_price"), price, shares, size)
         else:
+            # Re-read the book at the simulated submit time. The scan-time
+            # quote can be stale, and a limit is a hard ceiling, not a price
+            # the simulator is entitled to receive. Partial fills are kept,
+            # matching the live FAK behavior; an empty/capped book is a miss.
+            paper_fill = estimate_fill(
+                signal_data["token_id"], size, max_entry_limit, force=True
+            )
+            if not paper_fill or paper_fill.get("vwap") is None:
+                logging.info(
+                    f"PAPER order did not fill for {opp.market_id}: no ask "
+                    f"at or below ${max_entry_limit:.4f}"
+                )
+                return
+            filled_usd = float(paper_fill.get("filled_usd") or 0.0)
+            paper_price = float(paper_fill["vwap"])
+            if filled_usd <= 0.0 or paper_price > max_entry_limit + 1e-9:
+                logging.info(
+                    f"PAPER order did not fill for {opp.market_id}: "
+                    f"capped liquidity unavailable (vwap={paper_price:.4f}, "
+                    f"cap={max_entry_limit:.4f}, filled=${filled_usd:.2f})"
+                )
+                return
+            price = round(paper_price, 4)
+            shares = filled_usd / paper_price
+            size = round(filled_usd, 2)
             logging.info(
                 f"Executing PAPER trade: BUY {shares} shares of {opp.market_id} {side} @ ${price:.3f} "
-                f"(size=${size:.2f}, edge={signal_data['edge']:.3f}, prob={signal_data['model_prob']:.3f})"
+                f"(size=${size:.2f}, edge={signal_data['edge']:.3f}, prob={signal_data['model_prob']:.3f}, "
+                f"book_vwap={paper_price:.4f})"
             )
 
         now_iso = datetime.now(timezone.utc).isoformat()
@@ -1488,6 +1530,7 @@ class Executor:
             resolve_arm(opp.market_id, "entered", f"position opened @ {price:.3f}")
         except Exception as e:
             logging.error(f"failed to consume arm for {opp.market_id}: {e}")
+        return True
 
     def get_live_prices(self):
         """Return {market_id: current_mid_price} for all open positions."""

@@ -466,6 +466,49 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     if SNIPER_ONLY_MODE:
         from intraday import settlement_state, LOCKED_WIN
         from metar import resolved_extreme_f
+        sniper_cap = min(0.96, float(setting("MAX_ENTRY_PRICE")))
+        min_entry_p = float(setting("MIN_ENTRY_PRICE"))
+
+        def _sniper_fill(side, token_id, quoted_price, reason):
+            """Return an executable physical-lock signal, or no signal.
+
+            A MarketOpportunity only carries Gamma prices; it does not carry
+            selected-token depth. Re-read the actual book here so the sniper
+            cannot size from the old 50-dollar fallback or book a fill at a
+            stale midpoint.
+            """
+            if not token_id:
+                return None
+            requested = min(
+                portfolio_state.get("available_cash", 100.0) * 0.15,
+                10.0,
+            )
+            fill = estimate_fill(token_id, requested, sniper_cap, force=True)
+            if not fill or fill.get("vwap") is None:
+                return None
+            filled_usd = float(fill.get("filled_usd") or 0.0)
+            price = float(fill["vwap"])
+            if filled_usd <= 0.0 or price > sniper_cap + 1e-9 or price < min_entry_p:
+                return None
+            return {
+                "signal": f"BUY_{side}",
+                "action": "BUY",
+                "side": side,
+                "token_id": token_id,
+                "target_token": token_id,
+                "price": price,
+                "target_price": price,
+                "size_usdc": filled_usd,
+                "stake": filled_usd,
+                "stake_usd": filled_usd,
+                "walked_vwap": price,
+                "edge": 1.0 - price,
+                "model_prob": 1.0,
+                "opp": opp,
+                "kelly": 0.15,
+                "reason": reason,
+            }
+
         try:
             obs = resolved_extreme_f(opp.city, opp.date, opp.is_high)
         except Exception:
@@ -476,51 +519,23 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
         # 1. Check NO side physical lock (strict monotonic barrier breach only!)
         res_no = settlement_state(opp.city, opp.date, opp.is_high, opp.bucket_low, opp.bucket_high, "NO", observed=obs, strict_monotonic=True)
         if res_no and res_no.get("state") == LOCKED_WIN:
-            if 0.50 <= opp.no_price <= 0.96:
-                stake = min(getattr(opp, "usable_depth_usd", 50.0) or 50.0, portfolio_state.get("available_cash", 100.0) * 0.15, 10.0)
-                return {
-                    "signal": "BUY_NO",
-                    "action": "BUY",
-                    "side": "NO",
-                    "token_id": opp.token_id_no,
-                    "target_token": opp.token_id_no,
-                    "price": opp.no_price,
-                    "target_price": opp.no_price,
-                    "size_usdc": stake,
-                    "stake": stake,
-                    "stake_usd": stake,
-                    "walked_vwap": opp.no_price,
-                    "edge": 1.0 - opp.no_price,
-                    "model_prob": 1.0,
-                    "opp": opp,
-                    "kelly": 0.15,
-                    "reason": f"Physical Certainty Sniper LOCKED_WIN: {res_no.get('reason')}"
-                }
+            signal = _sniper_fill(
+                "NO", opp.token_id_no, opp.no_price,
+                f"Physical Certainty Sniper LOCKED_WIN: {res_no.get('reason')}"
+            )
+            if signal:
+                return signal
 
         # 2. Check YES side physical lock (open-ended tails or finalized days only!)
         if ENABLE_YES_ENTRIES:
             res_yes = settlement_state(opp.city, opp.date, opp.is_high, opp.bucket_low, opp.bucket_high, "YES", observed=obs, strict_monotonic=True)
             if res_yes and res_yes.get("state") == LOCKED_WIN:
-                if 0.50 <= opp.yes_price <= 0.96:
-                    stake = min(getattr(opp, "usable_depth_usd", 50.0) or 50.0, portfolio_state.get("available_cash", 100.0) * 0.15, 10.0)
-                    return {
-                        "signal": "BUY_YES",
-                        "action": "BUY",
-                        "side": "YES",
-                        "token_id": opp.token_id_yes,
-                        "target_token": opp.token_id_yes,
-                        "price": opp.yes_price,
-                        "target_price": opp.yes_price,
-                        "size_usdc": stake,
-                        "stake": stake,
-                        "stake_usd": stake,
-                        "walked_vwap": opp.yes_price,
-                        "edge": 1.0 - opp.yes_price,
-                        "model_prob": 1.0,
-                        "opp": opp,
-                        "kelly": 0.15,
-                        "reason": f"Physical Certainty Sniper LOCKED_WIN: {res_yes.get('reason')}"
-                    }
+                signal = _sniper_fill(
+                    "YES", opp.token_id_yes, opp.yes_price,
+                    f"Physical Certainty Sniper LOCKED_WIN: {res_yes.get('reason')}"
+                )
+                if signal:
+                    return signal
         return None
 
     if engine_res is None:
@@ -669,7 +684,9 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
 
     # YES side evaluation (enabled when ENABLE_YES_ENTRIES is True)
     if ENABLE_YES_ENTRIES and yes_edge >= effective_edge_threshold and (no_edge is None or yes_edge >= no_edge):
-        if opp.yes_price <= MAX_ENTRY_PRICE and opp.yes_price >= MIN_ENTRY_PRICE and prob >= MIN_MODEL_CONFIDENCE:
+        if (opp.yes_price <= setting("MAX_ENTRY_PRICE")
+                and opp.yes_price >= setting("MIN_ENTRY_PRICE")
+                and prob >= MIN_MODEL_CONFIDENCE):
             if yes_spread_frac <= MAX_ENTRY_SPREAD_FRACTION:
                 signal = "BUY_YES"
                 side = "YES"

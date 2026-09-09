@@ -236,11 +236,13 @@ def run_scan_cycle():
             signal_data = evaluate_opportunity(opp, portfolio_state, engine_res=engine_res)
             if signal_data and signal_data.get("signal"):
                 res = executor.execute_trade(signal_data)
-                # In-memory working portfolio: update cash balances directly without blocking SQLite reads
                 stake = float(signal_data.get("size_usdc", 0.0) or signal_data.get("stake_usd", 0.0) or 0.0)
-                portfolio_state["available_cash"] = max(0.0, portfolio_state["available_cash"] - stake)
-                portfolio_state["locked_cash"] += stake
-                traded += 1
+                # Rejections and empty FAKs must not consume working cash or
+                # count as trades in the rest of this scan.
+                if res is True:
+                    portfolio_state["available_cash"] = max(0.0, portfolio_state["available_cash"] - stake)
+                    portfolio_state["locked_cash"] += stake
+                    traded += 1
 
                 try:
                     from db import log_sniper_audit
@@ -256,7 +258,7 @@ def run_scan_cycle():
                         best_bid=None,
                         ask_depth_usd=getattr(opp, "usable_depth_usd", None),
                         stake_usd=stake,
-                        outcome="FILLED" if res is not False else "EXECUTION_REJECTED",
+                        outcome="FILLED" if res is True else "EXECUTION_REJECTED",
                         detail=signal_data.get("reason", "Scan cycle physical certainty snipe"),
                         latency_ms=0.0
                     )
@@ -469,13 +471,10 @@ def run_bot(in_thread=False):
     _print_startup_summary()
 
     event_sniper = None
-    if SNIPER_ONLY_MODE:
-        try:
-            from quant.event_sniper import EventDrivenSniper
-            event_sniper = EventDrivenSniper(executor, poll_interval_sec=10.0)
-            event_sniper.start()
-        except Exception as e:
-            logging.error(f"Failed to start EventDrivenSniper: {e}", exc_info=True)
+    # Intraday weather sniping against daytime NOAA METAR broadcasts is retired:
+    # Daytime markets are dominated by HFT bots that reprice in roughly 40–50 ms.
+    # The bot focuses on post-close stale-liquidity arbitrage: targeting already-known
+    # weather outcomes that remain tradable on Polymarket while resolution lags reality.
 
     run_scan_cycle()
     run_monitor_cycle()

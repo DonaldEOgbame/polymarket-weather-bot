@@ -23,7 +23,7 @@ from datetime import datetime, timezone
 
 from quant.fast_sniper import NanosecondSniperCore, PrebuiltSnipeOrder
 from quant.book import DualOrderBookL2
-from scanner import scan_markets, get_book, _best_ask_bid_from_book, _book_depth_usd
+from scanner import scan_markets, get_book, _best_ask_bid_from_book, _usable_ask_depth_usd
 from lattice import quantise_c
 from db import get_portfolio_state, log_sniper_audit
 from alerts import send_trade_entry
@@ -195,11 +195,11 @@ class EventDrivenSniper:
                     outcome="BOOK_UNAVAILABLE", detail="CLOB order book fetch returned empty",
                     latency_ms=latency_ms
                 )
-                self._sniped_buckets.add(order.token_id)
                 return
 
             best_ask, best_bid = _best_ask_bid_from_book(book_data)
-            ask_depth, _ = _book_depth_usd(book_data)
+            # Only liquidity at or below the execution ceiling is usable.
+            ask_depth = _usable_ask_depth_usd(book_data, order.price)
 
             if best_ask is None or best_ask <= 0:
                 log_sniper_audit(
@@ -209,7 +209,6 @@ class EventDrivenSniper:
                     outcome="NO_ASKS", detail="Book has zero ask levels",
                     latency_ms=latency_ms
                 )
-                self._sniped_buckets.add(order.token_id)
                 return
 
             if best_ask > order.price:
@@ -221,7 +220,6 @@ class EventDrivenSniper:
                     detail=f"Market repriced to {best_ask:.3f} > max ceiling {order.price:.2f}",
                     latency_ms=latency_ms
                 )
-                self._sniped_buckets.add(order.token_id)
                 return
 
             if ask_depth <= 0:
@@ -232,7 +230,6 @@ class EventDrivenSniper:
                     outcome="ZERO_DEPTH", detail="No resting size available at or below ceiling",
                     latency_ms=latency_ms
                 )
-                self._sniped_buckets.add(order.token_id)
                 return
 
             portfolio = get_portfolio_state()
@@ -247,7 +244,6 @@ class EventDrivenSniper:
                     detail=f"Stake ${stake:.2f} below $1.00 minimum (available cash: ${available:.2f})",
                     latency_ms=latency_ms
                 )
-                self._sniped_buckets.add(order.token_id)
                 return
 
             opp = m_info.get("opp")
@@ -283,9 +279,13 @@ class EventDrivenSniper:
             )
 
             res = self.executor.execute_trade(signal_data)
-            self._sniped_buckets.add(order.token_id)
+            # The executor returns True (or mock {"status": "FILLED"}) only after a real fill is recorded.
+            # None/False means rejection or an empty FAK and must remain retryable.
+            filled = (res is True) or (isinstance(res, dict) and res.get("status") == "FILLED")
+            if filled:
+                self._sniped_buckets.add(order.token_id)
 
-            if res is not False and getattr(self.executor, "_entry_recording_broken", False) is False:
+            if filled and getattr(self.executor, "_entry_recording_broken", False) is False:
                 log_sniper_audit(
                     station_icao=station_icao, city=city, target_date=target_date,
                     bucket_label=bucket_label, side=order.side, observed_temp_f=observed_temp_f,

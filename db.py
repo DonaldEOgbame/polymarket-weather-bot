@@ -470,6 +470,23 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_replay_market "
                      "ON replay_signals(market_id, timestamp)")
 
+        # Raw, timestamped CLOB snapshots for causal execution backtests.
+        # replay_signals is intentionally not used for this: it contains
+        # strategy snapshots and aggregate depth, not the levels that were
+        # actually available after an external event became public.
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS orderbook_snapshots (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                market_id TEXT NOT NULL,
+                timestamp TEXT NOT NULL,
+                asks_json TEXT NOT NULL,
+                bids_json TEXT,
+                spread_fraction REAL
+            )
+        ''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_orderbook_snapshots_market_ts "
+                     "ON orderbook_snapshots(market_id, timestamp)")
+
         # Structured gate outcomes, one row per gate per signal. NOT a
         # free-text reason string: the prose `signals.signal_type` field is
         # what made the survivor-count reconciliation ambiguous, because
@@ -972,6 +989,12 @@ def close_position_atomic(pos_id, market_id, side, pnl_dollars, size_usdc, exit_
     with _write_lock:
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
+            position = cur.execute(
+                "SELECT entry_time FROM positions WHERE id=?", (pos_id,)
+            ).fetchone()
+            if position is None:
+                return False  # already closed by another thread
+            position_entry_time = position[0]
             cur.execute("DELETE FROM positions WHERE id=?", (pos_id,))
             if cur.rowcount == 0:
                 return False  # already closed by another thread
@@ -982,9 +1005,9 @@ def close_position_atomic(pos_id, market_id, side, pnl_dollars, size_usdc, exit_
             # partial-exit pnl already booked on the row (see reduce_position_atomic).
             trow = cur.execute(
                 "SELECT id FROM trades WHERE market_id=? AND status='OPEN' AND side=? "
-                "AND mode = ? "
+                "AND mode = ? AND entry_time = ? "
                 "ORDER BY id DESC LIMIT 1",
-                (market_id, side, _mode)
+                (market_id, side, _mode, position_entry_time)
             ).fetchone()
             trade_id = trow[0] if trow else None
             if trade_id is not None:
@@ -1029,6 +1052,12 @@ def reduce_position_atomic(pos_id, market_id, side, sold_shares, entry_cost_free
     with _write_lock:
         with sqlite3.connect(DB_PATH) as conn:
             cur = conn.cursor()
+            position = cur.execute(
+                "SELECT entry_time FROM positions WHERE id=?", (pos_id,)
+            ).fetchone()
+            if position is None:
+                return False
+            position_entry_time = position[0]
             cur.execute(
                 "UPDATE positions SET shares=COALESCE(shares, size_usdc/entry_price)-?, "
                 "size_usdc=size_usdc-? WHERE id=?",
@@ -1039,9 +1068,9 @@ def reduce_position_atomic(pos_id, market_id, side, sold_shares, entry_cost_free
             cur.execute(
                 "UPDATE trades SET pnl=COALESCE(pnl, 0)+? WHERE id="
                 "(SELECT id FROM trades WHERE market_id=? AND status='OPEN' AND side=? "
-                "AND mode = ? "
+                "AND mode = ? AND entry_time = ? "
                 " ORDER BY id DESC LIMIT 1)",
-                (pnl_delta, market_id, side, _mode)
+                (pnl_delta, market_id, side, _mode, position_entry_time)
             )
             if cur.rowcount == 0:
                 logging.error(
