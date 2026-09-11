@@ -8,13 +8,23 @@ from db import (
     init_db, fetch_query, get_portfolio_state, get_daily_pnl, execute_query,
     purge_old_signals, purge_old_scan_log, purge_old_notifications, vacuum_db,
     purge_old_position_trail, purge_old_replay, purge_old_armed_signals,
-    current_mode, backfill_replay_outcomes,
+    current_mode, backfill_replay_outcomes, backfill_sniper_signal_outcomes,
 )
 from scanner import scan_markets, verify_parser_fixtures, prefetch_order_books
 from strategy import evaluate_opportunity
-from executor import Executor
+from executor import (
+    Executor,
+    REJECT_ENTRY_HALTED, REJECT_DUPLICATE_POSITION, REJECT_DAILY_CAP,
+    REJECT_ONE_PER_CITY_DATE, REJECT_REENTRY_COOLDOWN, REJECT_MAX_CONCURRENT,
+    REJECT_CORRELATION_CAP, REJECT_SUBMIT_REPRICE, REJECT_TRAPPED_OBSERVATION,
+    REJECT_WALLET_UNVERIFIABLE, REJECT_UNRECORDED_POSITION,
+    REJECT_MARKET_ORDER_DISABLED, FAIL_NO_FILL, FAIL_RECORD_ERROR,
+)
 from alerts import send_daily_summary, send_error_alert, send_circuit_breaker_alert
-from config import SCAN_INTERVAL_MINUTES, MONITOR_INTERVAL_MINUTES, daily_loss_limit, setting, SNIPER_ONLY_MODE
+from config import (
+    SCAN_INTERVAL_MINUTES, MONITOR_INTERVAL_MINUTES, daily_loss_limit, setting,
+    SNIPER_ONLY_MODE, paper_mode,
+)
 from weather import (log_model_accuracy, get_station_coords, prefetch_signal_engines,
                      validate_config_tables)
 from metar import final_extreme_f
@@ -51,6 +61,29 @@ trading_paused = False
 # Tracks circuit-breaker state across scan cycles so the dashboard notification
 # fires once on the transition into tripped — not every 10-minute cycle.
 _circuit_tripped = False
+
+# Maps execute_trade()'s outcome constants to the sniper_audit outcome string
+# and a static human-readable reason. Anything reaching a real CLOB/paper-book
+# attempt (FAIL_*) is EXECUTION_FAILED; every REJECT_* fired before that point
+# is a policy decline and gets its own DECLINED_* label, so the audit trail can
+# finally tell "the bot chose not to" from "the bot tried and couldn't."
+_OUTCOME_MAP = {
+    True: ("FILLED", None),
+    REJECT_ENTRY_HALTED: ("DECLINED_ENTRIES_HALTED", "entries halted after an earlier unrecorded fill"),
+    REJECT_DUPLICATE_POSITION: ("DECLINED_DUPLICATE_POSITION", "already holding a position in this market"),
+    REJECT_DAILY_CAP: ("DECLINED_DAILY_CAP", "MAX_TRADES_PER_DAY reached"),
+    REJECT_ONE_PER_CITY_DATE: ("DECLINED_POLICY_CITY_DATE", "one trade per city per day: already traded"),
+    REJECT_REENTRY_COOLDOWN: ("DECLINED_REENTRY_COOLDOWN", "re-entry cooldown active on this market"),
+    REJECT_MAX_CONCURRENT: ("DECLINED_MAX_CONCURRENT", "MAX_CONCURRENT_POSITIONS reached"),
+    REJECT_CORRELATION_CAP: ("DECLINED_CORRELATION_CAP", "correlated-exposure cap blocked this entry"),
+    REJECT_SUBMIT_REPRICE: ("DECLINED_SUBMIT_REPRICE", "book repriced past the submit-time basis"),
+    REJECT_TRAPPED_OBSERVATION: ("DECLINED_TRAPPED_OBSERVATION", "observed extreme already inside the bucket"),
+    REJECT_WALLET_UNVERIFIABLE: ("DECLINED_WALLET_UNVERIFIABLE", "wallet holdings could not be verified"),
+    REJECT_UNRECORDED_POSITION: ("DECLINED_UNRECORDED_POSITION", "wallet already holds this token unrecorded"),
+    REJECT_MARKET_ORDER_DISABLED: ("DECLINED_MARKET_ORDER_DISABLED", "USE_MARKETABLE_LIMIT disabled"),
+    FAIL_NO_FILL: ("EXECUTION_FAILED", "book attempt made, nothing filled"),
+    FAIL_RECORD_ERROR: ("EXECUTION_FAILED", "filled but the ledger write failed"),
+}
 
 def handle_sigterm(*args):
     global running
@@ -184,6 +217,10 @@ def check_resolutions():
             backfill_replay_outcomes()
         except Exception as e:
             logging.error(f"Replay-outcome backfill failed: {e}", exc_info=True)
+        try:
+            backfill_sniper_signal_outcomes()
+        except Exception as e:
+            logging.error(f"Sniper-signal outcome backfill failed: {e}", exc_info=True)
 
 # Heartbeat for /healthz: UTC timestamp of the last completed scan or monitor
 # cycle. If this goes stale while the process lives, the bot thread is a zombie.
@@ -235,7 +272,9 @@ def run_scan_cycle():
             engine_res = weather_cache.get((opp.city, opp.date, opp.is_high))
             signal_data = evaluate_opportunity(opp, portfolio_state, engine_res=engine_res)
             if signal_data and signal_data.get("signal"):
+                t0 = time.monotonic()
                 res = executor.execute_trade(signal_data)
+                latency_ms = (time.monotonic() - t0) * 1000.0
                 stake = float(signal_data.get("size_usdc", 0.0) or signal_data.get("stake_usd", 0.0) or 0.0)
                 # Rejections and empty FAKs must not consume working cash or
                 # count as trades in the rest of this scan.
@@ -247,23 +286,57 @@ def run_scan_cycle():
                 try:
                     from db import log_sniper_audit
                     bucket_label = f"{opp.bucket_low}-{opp.bucket_high}"
+                    outcome, static_detail = _OUTCOME_MAP.get(res, ("EXECUTION_FAILED", f"unrecognized result: {res!r}"))
+                    detail = signal_data.get("reason", "Scan cycle physical certainty snipe") if res is True else static_detail
                     log_sniper_audit(
-                        station_icao=getattr(opp, "station_icao", "") or "",
+                        station_icao=signal_data.get("station_icao") or "",
                         city=opp.city,
                         target_date=opp.date,
                         bucket_label=bucket_label,
                         side=signal_data["side"],
-                        observed_temp_f=float(getattr(opp, "observed_temp", 0.0) or 0.0),
+                        observed_temp_f=signal_data.get("observed_temp_f") or 0.0,
                         best_ask=signal_data["price"],
-                        best_bid=None,
-                        ask_depth_usd=getattr(opp, "usable_depth_usd", None),
+                        best_bid=signal_data.get("best_bid"),
+                        ask_depth_usd=signal_data.get("ask_depth_usd"),
                         stake_usd=stake,
-                        outcome="FILLED" if res is True else "EXECUTION_REJECTED",
-                        detail=signal_data.get("reason", "Scan cycle physical certainty snipe"),
-                        latency_ms=0.0
+                        outcome=outcome,
+                        detail=detail,
+                        latency_ms=latency_ms,
                     )
                 except Exception as e:
                     logging.error(f"Failed to log scan sniper audit: {e}")
+
+                try:
+                    from db import log_sniper_signal
+                    log_sniper_signal({
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "mode": "paper" if paper_mode() else "live",
+                        "city": opp.city, "city_key": opp.city,
+                        "station_icao": signal_data.get("station_icao"),
+                        "target_date": opp.date, "is_high": int(bool(opp.is_high)),
+                        "tier": signal_data.get("tier", "strict_monotonic"),
+                        "bucket_low": opp.bucket_low, "bucket_high": opp.bucket_high,
+                        "side": signal_data["side"],
+                        "observed_temp_f": signal_data.get("observed_temp_f"),
+                        "local_hour": signal_data.get("local_hour"),
+                        "conditioned_mean": signal_data.get("conditioned_mean"),
+                        "conditioned_sigma": signal_data.get("conditioned_sigma"),
+                        "hard_bound": signal_data.get("hard_bound"),
+                        "raw_prob": signal_data.get("raw_prob"),
+                        "calibrated_prob": signal_data.get("calibrated_prob"),
+                        "threshold_used": signal_data.get("threshold_used"),
+                        "best_ask": signal_data.get("price"),
+                        "best_bid": signal_data.get("best_bid"),
+                        "ask_depth_usd": signal_data.get("ask_depth_usd"),
+                        "kelly_fraction": signal_data.get("kelly"),
+                        "stake_usd": stake,
+                        "price": signal_data.get("price"),
+                        "outcome": outcome,
+                        "detail": detail,
+                        "latency_ms": latency_ms,
+                    })
+                except Exception as e:
+                    logging.error(f"Failed to log sniper signal: {e}")
             else:
                 skipped += 1
 

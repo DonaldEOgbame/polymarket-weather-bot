@@ -49,6 +49,27 @@ from intraday import settlement_state, LOCKED_LOSS, UNKNOWN
 # instance was built without __init__ (see Executor._exit_lock).
 _LOCK_TABLE_INIT = threading.Lock()
 
+# execute_trade() outcome constants. True still means "filled and recorded"
+# (unchanged, only consumer today is main.py's `if res is True`). Everything
+# else used to be a bare `return None`, indistinguishable in the caller from a
+# genuine execution failure — these give each policy-decline point and each
+# real-attempt failure its own identity so sniper_audit can tell "declined on
+# purpose" from "tried and failed" (2026-09 telemetry fix).
+REJECT_ENTRY_HALTED = "REJECT_ENTRY_HALTED"
+REJECT_DUPLICATE_POSITION = "REJECT_DUPLICATE_POSITION"
+REJECT_DAILY_CAP = "REJECT_DAILY_CAP"
+REJECT_ONE_PER_CITY_DATE = "REJECT_ONE_PER_CITY_DATE"
+REJECT_REENTRY_COOLDOWN = "REJECT_REENTRY_COOLDOWN"
+REJECT_MAX_CONCURRENT = "REJECT_MAX_CONCURRENT"
+REJECT_CORRELATION_CAP = "REJECT_CORRELATION_CAP"
+REJECT_SUBMIT_REPRICE = "REJECT_SUBMIT_REPRICE"
+REJECT_TRAPPED_OBSERVATION = "REJECT_TRAPPED_OBSERVATION"
+REJECT_WALLET_UNVERIFIABLE = "REJECT_WALLET_UNVERIFIABLE"
+REJECT_UNRECORDED_POSITION = "REJECT_UNRECORDED_POSITION"
+REJECT_MARKET_ORDER_DISABLED = "REJECT_MARKET_ORDER_DISABLED"
+FAIL_NO_FILL = "FAIL_NO_FILL"
+FAIL_RECORD_ERROR = "FAIL_RECORD_ERROR"
+
 
 def get_wallet_collateral(client=None):
     """Real USDC collateral in the wallet right now, or None if unreadable.
@@ -1218,11 +1239,11 @@ class Executor:
                 f"Entries halted (a fill went unrecorded earlier this process) — "
                 f"skipping {opp.city} {opp.date}. Restart after adopting the "
                 f"orphan position to re-arm.")
-            return
+            return REJECT_ENTRY_HALTED
 
         if get_open_position(opp.market_id):
             logging.info(f"Already holding position in {opp.market_id} — skipping")
-            return
+            return REJECT_DUPLICATE_POSITION
 
         # Daily entry cap (owner decision 2026-08-12): at most MAX_TRADES_PER_DAY
         # NEW entries per UTC day, bounding worst-case daily exposure under the
@@ -1239,7 +1260,7 @@ class Executor:
                 logging.info(
                     f"Daily trade cap reached ({n_today}/{MAX_TRADES_PER_DAY} "
                     f"entries today) — skipping {opp.city} {opp.date}")
-                return
+                return REJECT_DAILY_CAP
 
         # One trade per city per target day. Sibling buckets on the same city/date all
         # settle on the SAME realized temperature, so a second entry there is stacked
@@ -1257,7 +1278,7 @@ class Executor:
                     f"City/date already traded ({opp.city} {opp.date}, trade "
                     f"{prior[0]['id']}) — one trade per city per day, skipping"
                 )
-                return
+                return REJECT_ONE_PER_CITY_DATE
 
         # Re-entry cooldown: don't re-open a market we recently EXITED. Without this the
         # bot churns — a position force-closed on noise gets re-bought on the next scan,
@@ -1279,14 +1300,14 @@ class Executor:
                             f"Re-entry cooldown active for {opp.market_id}: exited "
                             f"{hrs:.1f}h ago (< {REENTRY_COOLDOWN_HOURS}h) — skipping"
                         )
-                        return
+                        return REJECT_REENTRY_COOLDOWN
                 except (ValueError, TypeError):
                     pass  # unparseable timestamp — don't block entry on it
 
         max_concurrent = setting("MAX_CONCURRENT_POSITIONS")
         if self.get_open_positions_count() >= max_concurrent:
             logging.info(f"Max {max_concurrent} concurrent positions reached, skipping entry.")
-            return
+            return REJECT_MAX_CONCURRENT
 
         # Correlated-exposure caps. Checked LAST of the portfolio gates, so a
         # trade refused here has already passed everything cheaper and the log
@@ -1307,7 +1328,7 @@ class Executor:
                 f"${detail['direction_cap']:.2f}"
             )
             add_notification("correlation", why, "info")
-            return
+            return REJECT_CORRELATION_CAP
         if detail["positions_with_unknown_direction"]:
             # Excluded positions weaken the direction cap silently otherwise.
             logging.warning(
@@ -1357,7 +1378,7 @@ class Executor:
             if basis is None:
                 logging.info(f"SUBMIT_REPRICE | {opp.city} {opp.date} | {skip} "
                              f"— not sending this cycle (any arm stays alive)")
-                return
+                return REJECT_SUBMIT_REPRICE
             limit_basis = basis
         else:
             limit_basis = max(quoted_price, walked) if walked is not None else quoted_price
@@ -1394,7 +1415,7 @@ class Executor:
                             f"TRAPPED_LOW | {opp.city} {opp.date} | running min "
                             f"{rmin:.1f}F already inside bucket [{lo}, {hi}] — "
                             f"skipping entry")
-                        return
+                        return REJECT_TRAPPED_OBSERVATION
             except Exception as e:
                 logging.error(f"observed-min guard failed for {opp.market_id}: {e}")
 
@@ -1420,7 +1441,7 @@ class Executor:
                     f"Refusing live entry for {opp.market_id}: wallet holdings "
                     "could not be verified"
                 )
-                return
+                return REJECT_WALLET_UNVERIFIABLE
             held = wallet_sizes.get(str(signal_data["token_id"]), 0.0)
             if held >= 1.0:
                 msg = (f"{opp.city} {opp.date}: wallet already holds {held:.2f} of this "
@@ -1431,7 +1452,7 @@ class Executor:
                     add_notification("execution", "error", msg)
                 except Exception:
                     pass
-                return
+                return REJECT_UNRECORDED_POSITION
 
             logging.info(
                 f"Executing LIVE trade: BUY ${size:.2f} of {opp.market_id} {side} "
@@ -1451,9 +1472,9 @@ class Executor:
                     f"Refusing live entry for {opp.market_id}: "
                     "USE_MARKETABLE_LIMIT=false would bypass MAX_ENTRY_PRICE"
                 )
-                return
+                return REJECT_MARKET_ORDER_DISABLED
             if not fill:
-                return  # nothing filled → no phantom position
+                return FAIL_NO_FILL  # nothing filled → no phantom position
             price = round(fill["price"], 4)
             shares = fill["shares"]
             size = round(shares * price, 2)                  # actual USDC deployed
@@ -1473,7 +1494,7 @@ class Executor:
                     f"PAPER order did not fill for {opp.market_id}: no ask "
                     f"at or below ${max_entry_limit:.4f}"
                 )
-                return
+                return FAIL_NO_FILL
             filled_usd = float(paper_fill.get("filled_usd") or 0.0)
             paper_price = float(paper_fill["vwap"])
             if filled_usd <= 0.0 or paper_price > max_entry_limit + 1e-9:
@@ -1482,7 +1503,7 @@ class Executor:
                     f"capped liquidity unavailable (vwap={paper_price:.4f}, "
                     f"cap={max_entry_limit:.4f}, filled=${filled_usd:.2f})"
                 )
-                return
+                return FAIL_NO_FILL
             price = round(paper_price, 4)
             shares = filled_usd / paper_price
             size = round(filled_usd, 2)
@@ -1520,7 +1541,7 @@ class Executor:
                     f"RECORDED ({e}). New entries halted until restart.")
             except Exception:
                 pass
-            return
+            return FAIL_RECORD_ERROR
         send_trade_entry(opp.question, price, signal_data["model_prob"], signal_data["edge"], size)
         # Consume any armed re-entry waiver AFTER the position books, not at
         # signal time: a FAK that fills nothing must leave the arm alive so the

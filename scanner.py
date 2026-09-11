@@ -527,17 +527,18 @@ def usable_ask_depth_usd(token_id, max_price):
 def estimate_fill(token_id, usd_amount, max_price=None, force=False):
     """What `usd_amount` would really fill at, by walking the live book.
 
-    Returns {"vwap", "filled_usd", "exhausted", "usable_depth_usd", "best_ask"}
-    or None when the book cannot be read. `force=True` bypasses the book cache
-    — the submit path needs the book as it is NOW, not as it was at scan start."""
+    Returns {"vwap", "filled_usd", "exhausted", "usable_depth_usd", "best_ask",
+    "best_bid"} or None when the book cannot be read. `force=True` bypasses the
+    book cache — the submit path needs the book as it is NOW, not as it was at
+    scan start."""
     data = get_book(token_id, force=force)
     if data is None:
         return None
-    best_ask, _ = _best_ask_bid_from_book(data)
+    best_ask, best_bid = _best_ask_bid_from_book(data)
     vwap, filled, exhausted = _walk_asks(data, usd_amount, max_price)
     return {"vwap": vwap, "filled_usd": filled, "exhausted": exhausted,
             "usable_depth_usd": _usable_ask_depth_usd(data, max_price),
-            "best_ask": best_ask}
+            "best_ask": best_ask, "best_bid": best_bid}
 
 
 def _walk_bids(data, shares):

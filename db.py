@@ -487,6 +487,60 @@ def init_db():
         conn.execute("CREATE INDEX IF NOT EXISTS idx_orderbook_snapshots_market_ts "
                      "ON orderbook_snapshots(market_id, timestamp)")
 
+        # Sniper-path telemetry (2026-09). SNIPER_ONLY_MODE's evaluate_opportunity
+        # branch returns before ever reaching log_replay_signal, so replay_signals
+        # stays empty for this strategy — this table is its own, deliberately
+        # smaller, feature set (no ensemble model_weights etc.) so it doesn't
+        # force harness.py's fold/purge logic to special-case a mostly-NULL row
+        # shape. Written on EVERY settlement_state check the sniper makes, not
+        # only on a taken trade, so a future analysis can see what was declined
+        # and why, not just what was bought.
+        conn.execute('''
+            CREATE TABLE IF NOT EXISTS sniper_signals (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                timestamp TEXT NOT NULL,
+                mode TEXT,
+                city TEXT,
+                city_key TEXT,
+                station_icao TEXT,
+                target_date TEXT,
+                is_high INTEGER,
+                tier TEXT,
+
+                bucket_low REAL,
+                bucket_high REAL,
+                side TEXT,
+
+                observed_temp_f REAL,
+                local_hour REAL,
+                conditioned_mean REAL,
+                conditioned_sigma REAL,
+                hard_bound REAL,
+
+                raw_prob REAL,
+                calibrated_prob REAL,
+                threshold_used REAL,
+
+                best_ask REAL,
+                best_bid REAL,
+                ask_depth_usd REAL,
+
+                kelly_fraction REAL,
+                stake_usd REAL,
+                price REAL,
+
+                outcome TEXT,
+                detail TEXT,
+                latency_ms REAL,
+
+                settled_value REAL,
+                settled_outcome TEXT
+            )
+        ''')
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sniper_signals_ts ON sniper_signals(timestamp)")
+        conn.execute("CREATE INDEX IF NOT EXISTS idx_sniper_signals_settle "
+                     "ON sniper_signals(target_date, city, is_high)")
+
         # Structured gate outcomes, one row per gate per signal. NOT a
         # free-text reason string: the prose `signals.signal_type` field is
         # what made the survivor-count reconciliation ambiguous, because
@@ -1598,6 +1652,73 @@ def backfill_replay_outcomes(limit=5000):
     execute_query(
         """
         UPDATE replay_signals
+           SET settled_outcome = CASE
+                   WHEN settled_value IS NULL THEN NULL
+                   WHEN settled_value >= COALESCE(bucket_low, -1e9) - 0.5
+                    AND settled_value <= COALESCE(bucket_high, 1e9) + 0.5
+                   THEN 'YES' ELSE 'NO' END
+         WHERE settled_value IS NOT NULL AND settled_outcome IS NULL
+        """
+    )
+
+
+def log_sniper_signal(row):
+    """Persist one sniper-path decision (taken or declined) for backtesting.
+
+    Best-effort, same contract as log_replay_signal: a logging failure must
+    never stop a scan or block a trade, and unknown keys in `row` are dropped
+    rather than raising, so adding a field to the caller before a migration
+    lands is safe."""
+    try:
+        with _write_lock:
+            conn = sqlite3.connect(DB_PATH, timeout=30.0)
+            try:
+                cols = {r[1] for r in conn.execute("PRAGMA table_info(sniper_signals)")}
+                data = {k: v for k, v in row.items() if k in cols}
+                if not data:
+                    return None
+                names = ", ".join(data)
+                marks = ", ".join("?" * len(data))
+                cur = conn.execute(
+                    f"INSERT INTO sniper_signals ({names}) VALUES ({marks})",
+                    tuple(data.values()),
+                )
+                conn.commit()
+                return cur.lastrowid
+            finally:
+                conn.close()
+    except Exception as e:
+        logging.error(f"sniper signal logging failed: {e}", exc_info=True)
+        return None
+
+
+def backfill_sniper_signal_outcomes(limit=5000):
+    """Attach settlement to sniper_signals rows whose target day has resolved.
+
+    Mirrors backfill_replay_outcomes exactly, off the same resolutions table,
+    so the sniper's near-certainty tier can be validated against real
+    settlement rather than its own claimed probability."""
+    execute_query(
+        """
+        UPDATE sniper_signals
+           SET settled_value = (
+                   SELECT r.actual_value FROM resolutions r
+                    WHERE r.city = sniper_signals.city
+                      AND r.target_date = sniper_signals.target_date
+                      AND r.actual_value IS NOT NULL
+                    ORDER BY r.id DESC LIMIT 1)
+         WHERE settled_value IS NULL
+           AND target_date IS NOT NULL
+           AND EXISTS (
+                   SELECT 1 FROM resolutions r
+                    WHERE r.city = sniper_signals.city
+                      AND r.target_date = sniper_signals.target_date
+                      AND r.actual_value IS NOT NULL)
+        """
+    )
+    execute_query(
+        """
+        UPDATE sniper_signals
            SET settled_outcome = CASE
                    WHEN settled_value IS NULL THEN NULL
                    WHEN settled_value >= COALESCE(bucket_low, -1e9) - 0.5

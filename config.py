@@ -44,6 +44,11 @@ MANAGED_SETTINGS = (
     "REQUIRE_SAME_DAY",
     "MIN_ENTRY_PRICE",
     "MAX_ENTRY_PRICE",
+    "SNIPER_NEAR_CERTAINTY_ENABLED",
+    "SNIPER_NEAR_CERTAINTY_THRESHOLD",
+    "SNIPER_NEAR_CERTAINTY_MARGIN",
+    "SNIPER_NEAR_CERTAINTY_MAX_STAKE",
+    "SNIPER_PEAK_PASSED_FRACTION",
 )
 
 
@@ -309,6 +314,35 @@ TRADE_LOW_MARKETS = os.getenv("TRADE_LOW_MARKETS", "true").lower() == "true"
 ENABLE_YES_ENTRIES = os.getenv("ENABLE_YES_ENTRIES", "true").lower() == "true"
 ENABLE_DUAL_BOOK_SYNTHETIC_ARBITRAGE = os.getenv("ENABLE_DUAL_BOOK_SYNTHETIC_ARBITRAGE", "true").lower() == "true"
 SNIPER_ONLY_MODE = os.getenv("SNIPER_ONLY_MODE", "false").lower() == "true"
+
+# --- Sniper near-certainty tier (2026-09) ---
+# The strict-monotonic sniper above only acts on LITERAL certainty (observed
+# extreme already past the bucket boundary) — a deliberately rare event, since
+# it requires zero-tolerance mathematical certainty. This tier widens the
+# funnel using the SAME conditioned-forecast machinery the non-sniper path
+# already relies on (intraday.condition() / get_bucket_probability()),
+# entering only when the residual probability of a miss is provably tiny AND
+# the local diurnal peak has passed. Money+risk knobs, dashboard-tunable like
+# MIN_ENTRY_PRICE/MAX_ENTRY_PRICE above.
+SNIPER_NEAR_CERTAINTY_ENABLED = str(_tunable("SNIPER_NEAR_CERTAINTY_ENABLED", "false")).strip().lower() == "true"
+# P(NO), net of SNIPER_NEAR_CERTAINTY_MARGIN, must clear this bar before the
+# tier will enter. Default 0.995: a claimed 1-in-200 residual miss rate — well
+# short of the strict tier's effective zero, so this tier is NOT risk-free.
+SNIPER_NEAR_CERTAINTY_THRESHOLD = float(_tunable("SNIPER_NEAR_CERTAINTY_THRESHOLD", "0.995"))
+# Explicit, auditable safety margin subtracted from the raw calibrated
+# probability before any sizing math sees it (strategy.py's
+# _near_certainty_fill()) — keeps "how much margin was taken" a logged number
+# per trade, not an implicit assumption baked silently into the threshold.
+SNIPER_NEAR_CERTAINTY_MARGIN = float(_tunable("SNIPER_NEAR_CERTAINTY_MARGIN", "0.003"))
+# Separate, smaller dollar cap than the strict tier's $10: KELLY_CAP alone
+# assumes the edge estimate is exactly right, and this tier's edge rests on a
+# fitted curve (REMAINING_RISE_TABLE, below) never validated for ENTRIES
+# before — only exits used it prior to this tier.
+SNIPER_NEAR_CERTAINTY_MAX_STAKE = float(_tunable("SNIPER_NEAR_CERTAINTY_MAX_STAKE", "3.0"))
+# Deliberately independent from EXIT_PEAK_PASSED_FRACTION even though both
+# read the same underlying remaining_fraction() curve: entry and exit tuning
+# must never be coupled through one shared knob.
+SNIPER_PEAK_PASSED_FRACTION = float(_tunable("SNIPER_PEAK_PASSED_FRACTION", "0.02"))
 
 # --- Wrong-thermometer exclusions (owner decision 2026-08-13) ---
 # Cities whose SETTLEMENT STATION is structurally divergent from the air mass
@@ -1382,6 +1416,11 @@ _RUNTIME = {
     "REQUIRE_SAME_DAY": REQUIRE_SAME_DAY,
     "MIN_ENTRY_PRICE": MIN_ENTRY_PRICE,
     "MAX_ENTRY_PRICE": MAX_ENTRY_PRICE,
+    "SNIPER_NEAR_CERTAINTY_ENABLED": SNIPER_NEAR_CERTAINTY_ENABLED,
+    "SNIPER_NEAR_CERTAINTY_THRESHOLD": SNIPER_NEAR_CERTAINTY_THRESHOLD,
+    "SNIPER_NEAR_CERTAINTY_MARGIN": SNIPER_NEAR_CERTAINTY_MARGIN,
+    "SNIPER_NEAR_CERTAINTY_MAX_STAKE": SNIPER_NEAR_CERTAINTY_MAX_STAKE,
+    "SNIPER_PEAK_PASSED_FRACTION": SNIPER_PEAK_PASSED_FRACTION,
 }
 
 

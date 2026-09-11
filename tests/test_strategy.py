@@ -313,6 +313,126 @@ class TestOrderbookDepthLogging:
         assert logged_rows[0][-2:] == (None, None)
 
 
+class TestSniperNearCertaintyTier:
+    """The 2026-09 probabilistic near-certainty tier: widens the strict-monotonic
+    sniper's entry funnel using the same conditioned-forecast machinery the
+    non-sniper path already relies on, but only past a very high, marginated
+    probability bar and only once the local diurnal peak has passed."""
+
+    def _run(self, monkeypatch, prob_yes, no_price=0.90, day_over=False,
+              hour=20.0, frac=(0.01, 0.005), available_cash=100.0,
+              setting_overrides=None, convective_cities=frozenset(),
+              settlement_state_fn=None):
+        import strategy
+        import metar
+        import intraday
+        from types import SimpleNamespace
+
+        opp = SimpleNamespace(
+            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=10.0,
+            bucket_low=88.0, bucket_high=90.0, yes_price=1.0 - no_price, no_price=no_price,
+            token_id_yes="tok_yes", token_id_no="tok_no", market_id="m1",
+        )
+        portfolio_state = {"available_cash": available_cash, "total_equity": available_cash,
+                            "locked_cash": 0.0}
+
+        settings = {
+            "MAX_ENTRY_PRICE": 0.96, "MIN_ENTRY_PRICE": 0.70,
+            "SNIPER_NEAR_CERTAINTY_ENABLED": True,
+            "SNIPER_NEAR_CERTAINTY_THRESHOLD": 0.995,
+            "SNIPER_NEAR_CERTAINTY_MARGIN": 0.003,
+            "SNIPER_NEAR_CERTAINTY_MAX_STAKE": 3.0,
+            "SNIPER_PEAK_PASSED_FRACTION": 0.02,
+        }
+        if setting_overrides:
+            settings.update(setting_overrides)
+
+        monkeypatch.setattr(strategy, "SNIPER_ONLY_MODE", True)
+        monkeypatch.setattr(strategy, "setting", lambda k: settings[k])
+        monkeypatch.setattr(strategy, "CONVECTIVE_CITIES", convective_cities)
+        monkeypatch.setattr(strategy, "log_sniper_signal", lambda row: None)
+
+        monkeypatch.setattr(metar, "resolved_extreme_f", lambda city, date, is_high: 87.0)
+        monkeypatch.setattr(metar, "get_station", lambda city: ("TEST", "UTC"))
+
+        monkeypatch.setattr(
+            intraday, "settlement_state",
+            settlement_state_fn or
+            (lambda *a, **k: {"state": "UNDECIDED", "observed": 87.0, "reason": "test"}))
+        monkeypatch.setattr(intraday, "_day_phase", lambda city, date: (hour, day_over))
+        monkeypatch.setattr(intraday, "remaining_fraction", lambda h, is_high: frac)
+        monkeypatch.setattr(intraday, "condition",
+                             lambda engine_res, date: {**engine_res, "ensemble_mean": 85.0,
+                                                        "ensemble_std": 1.0, "hard_bound": 87.0})
+
+        monkeypatch.setattr(strategy, "get_signal_engine",
+                             lambda *a, **k: {"ensemble_mean": 85.0, "ensemble_std": 1.0,
+                                               "city_key": opp.city, "is_high": opp.is_high,
+                                               "forecast_diurnal_range_f": 10.0})
+        monkeypatch.setattr(strategy, "get_bucket_probability", lambda engine_res, lo, hi: prob_yes)
+        monkeypatch.setattr(strategy, "estimate_fill",
+                             lambda tok, usd, cap, force=False: {
+                                 "vwap": no_price, "filled_usd": usd, "exhausted": False,
+                                 "usable_depth_usd": 5000.0, "best_ask": no_price,
+                                 "best_bid": no_price - 0.01})
+
+        return strategy.evaluate_opportunity(opp, portfolio_state)
+
+    def test_clears_threshold_and_returns_signal(self, monkeypatch):
+        # prob_yes=0.001 -> prob_no=0.999; margin 0.003 -> effective=0.996 >= 0.995.
+        result = self._run(monkeypatch, prob_yes=0.001)
+        assert result is not None
+        assert result["signal"] == "BUY_NO"
+        assert result["side"] == "NO"
+        assert result["tier"] == "near_certainty"
+        assert result["price"] == 0.90
+        assert result["calibrated_prob"] == pytest.approx(0.999)
+        # Sized by real Kelly against a separate, smaller cap than the strict
+        # tier's $10 — never the strict tier's flat 0.15 cash fraction.
+        assert 0 < result["size_usdc"] <= 3.0
+        assert result["risk_direction"] in ("HOT", "COLD", None)
+
+    def test_below_threshold_returns_none(self, monkeypatch):
+        # prob_yes=0.05 -> prob_no=0.95, well short of the 0.995 bar.
+        result = self._run(monkeypatch, prob_yes=0.05)
+        assert result is None
+
+    def test_convective_city_excluded(self, monkeypatch):
+        result = self._run(monkeypatch, prob_yes=0.001, convective_cities={"TestCity"})
+        assert result is None
+
+    def test_peak_not_passed_returns_none(self, monkeypatch):
+        # Remaining-fraction mean (0.10) is above the peak-passed cutoff (0.02).
+        result = self._run(monkeypatch, prob_yes=0.001, frac=(0.10, 0.02))
+        assert result is None
+
+    def test_disabled_flag_returns_none(self, monkeypatch):
+        result = self._run(monkeypatch, prob_yes=0.001,
+                            setting_overrides={"SNIPER_NEAR_CERTAINTY_ENABLED": False})
+        assert result is None
+
+    def test_day_over_bypasses_peak_gate(self, monkeypatch):
+        # A finalized day has no "hour" to gate on — day_over alone must be
+        # sufficient, matching the exit-side ratchet's own treatment of it.
+        result = self._run(monkeypatch, prob_yes=0.001, day_over=True, hour=None,
+                            frac=(0.99, 0.5))  # would fail the peak gate if checked
+        assert result is not None
+
+    def test_strict_tier_takes_priority_when_both_would_fire(self, monkeypatch):
+        # If the strict monotonic check finds LOCKED_WIN, the near-certainty
+        # tier must never be reached — the strict entry is strictly safer.
+        import intraday
+
+        def _breach_on_no(city, date, is_high, lo, hi, side, **k):
+            if side == "NO":
+                return {"state": intraday.LOCKED_WIN, "observed": 91.0, "reason": "breach"}
+            return {"state": "UNDECIDED", "observed": 91.0, "reason": "x"}
+
+        result = self._run(monkeypatch, prob_yes=0.001, settlement_state_fn=_breach_on_no)
+        assert result is not None
+        assert result.get("tier") == "strict_monotonic"
+
+
 class TestParseTargetDate:
     """Date must come from the market's 'on <DATE>' resolution text, not the endDate
     timestamp whose UTC-close convention drifted and mis-dated far-offset stations."""

@@ -5,7 +5,7 @@ from weather import (get_signal_engine, get_bucket_probability,
 from scanner import (get_realtime_price, get_orderbook_depth_usd, estimate_fill,
                      PARSER_VERSION)
 from risk import risk_direction
-from db import execute_query
+from db import execute_query, log_sniper_signal
 from datetime import datetime, timezone, timedelta
 from config import (
     EDGE_THRESHOLD, MIN_MODEL_AGREEMENT, MAX_MODEL_SPREAD_STD,
@@ -21,7 +21,7 @@ from config import (
     MIN_DEPTH_MULTIPLE, REQUIRE_DEPTH_TO_TRADE,
     MIN_MODEL_CONFIDENCE, MAX_MODEL_CONFIDENCE, MIN_ENTRY_PRICE, MAX_HOURS_TO_RESOLUTION,
     REQUIRE_SAME_DAY, EXCLUDED_CITIES, TRADE_HIGH_MARKETS, TRADE_LOW_MARKETS,
-    ENABLE_YES_ENTRIES, SNIPER_ONLY_MODE,
+    ENABLE_YES_ENTRIES, SNIPER_ONLY_MODE, CONVECTIVE_CITIES,
     ARMED_REENTRY_ENABLED, ARMED_SIGNAL_TTL_HOURS,
     setting,
 )
@@ -465,7 +465,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
     """Evaluate a market opportunity and decide whether to trade."""
     if SNIPER_ONLY_MODE:
         from intraday import settlement_state, LOCKED_WIN
-        from metar import resolved_extreme_f
+        from metar import resolved_extreme_f, get_station
         sniper_cap = min(0.96, float(setting("MAX_ENTRY_PRICE")))
         min_entry_p = float(setting("MIN_ENTRY_PRICE"))
 
@@ -490,6 +490,7 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
             price = float(fill["vwap"])
             if filled_usd <= 0.0 or price > sniper_cap + 1e-9 or price < min_entry_p:
                 return None
+            station_icao, _tz = get_station(opp.city)
             return {
                 "signal": f"BUY_{side}",
                 "action": "BUY",
@@ -507,6 +508,174 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                 "opp": opp,
                 "kelly": 0.15,
                 "reason": reason,
+                # Telemetry the sniper's own book-walk already computed but the
+                # audit log used to read (wrongly) off `opp`, which never
+                # carried these attributes — see 2026-09 telemetry fix.
+                "station_icao": station_icao,
+                "observed_temp_f": obs,
+                "ask_depth_usd": fill.get("usable_depth_usd"),
+                "best_bid": fill.get("best_bid"),
+                # Substituting the observed extreme for a forecast mean: the
+                # strict-certainty sniper has no ensemble mean of its own, and
+                # `obs` is the best available point estimate of which way this
+                # bucket sits relative to the day's real temperature. Without
+                # this, sniper trades were invisible to MAX_DIRECTION_STAKES_PER_DATE.
+                "risk_direction": risk_direction(side, opp.bucket_low, opp.bucket_high, obs),
+                "tier": "strict_monotonic",
+            }
+
+        def _near_certainty_fill():
+            """NO-side probabilistic near-certainty entry (2026-09 tier).
+
+            The strict checks above only ever fire on LITERAL certainty
+            (observed extreme already past the bucket boundary) — genuinely
+            safe, but genuinely rare: in practice this meant only one city
+            ever produced a signal across days of scanning 46+ cities. This
+            tier widens the funnel using the SAME conditioned-forecast
+            machinery the non-sniper path already relies on
+            (get_signal_engine -> intraday.condition -> get_bucket_probability)
+            rather than inventing new forecast math, entering only when the
+            residual miss probability is provably tiny AND the local diurnal
+            peak has passed. NOT risk-free — see SNIPER_NEAR_CERTAINTY_MARGIN.
+
+            Phase 1, NO side only: a YES-side version is a materially
+            different, less obviously safe bet shape and is deliberately
+            deferred until this tier has real evidence behind it.
+            """
+            if not setting("SNIPER_NEAR_CERTAINTY_ENABLED"):
+                return None
+            if opp.city in CONVECTIVE_CITIES:
+                # Afternoon convection breaks the smooth diurnal-curve
+                # assumption this tier's whole safety margin depends on.
+                return None
+            if not opp.token_id_no:
+                return None
+
+            from intraday import _day_phase, remaining_fraction, condition
+            hour, day_over = _day_phase(opp.city, opp.date)
+            if not day_over:
+                if hour is None:
+                    return None
+                frac = remaining_fraction(hour, opp.is_high)
+                peak_passed_fraction = float(setting("SNIPER_PEAK_PASSED_FRACTION"))
+                if frac is None or frac[0] > peak_passed_fraction:
+                    return None
+
+            try:
+                engine_res_raw = get_signal_engine(
+                    opp.city, opp.date, opp.is_high,
+                    hours_to_resolution=opp.hours_to_resolution,
+                )
+            except Exception:
+                return None
+            if not engine_res_raw:
+                return None
+            engine_res = condition(engine_res_raw, opp.date)
+
+            # From this point on the conditioning is trustworthy enough to be
+            # worth recording even when the tier declines — this is exactly
+            # the calibration evidence the validation plan (B.6) needs, and
+            # volume is naturally bounded (only non-convective cities, only
+            # once the local peak has passed). Rows where a signal IS returned
+            # below are deliberately NOT logged here — main.py logs those once
+            # with the real execution outcome, so each decision gets exactly
+            # one sniper_signals row.
+            def _log_eval(outcome, **extra):
+                try:
+                    row = {
+                        "timestamp": datetime.now(timezone.utc).isoformat(),
+                        "mode": "paper" if paper_mode() else "live",
+                        "city": opp.city, "city_key": opp.city,
+                        "station_icao": (get_station(opp.city) or (None, None))[0],
+                        "target_date": opp.date, "is_high": int(bool(opp.is_high)),
+                        "tier": "near_certainty",
+                        "bucket_low": opp.bucket_low, "bucket_high": opp.bucket_high,
+                        "side": "NO",
+                        "observed_temp_f": obs, "local_hour": hour,
+                        "conditioned_mean": engine_res.get("ensemble_mean"),
+                        "conditioned_sigma": engine_res.get("ensemble_std"),
+                        "hard_bound": engine_res.get("hard_bound"),
+                        "raw_prob": prob_no, "calibrated_prob": prob_no,
+                        "threshold_used": threshold,
+                        "outcome": outcome,
+                    }
+                    row.update(extra)
+                    log_sniper_signal(row)
+                except Exception as e:
+                    logging.error(f"near-certainty signal logging failed: {e}")
+
+            prob_yes = get_bucket_probability(engine_res, opp.bucket_low, opp.bucket_high)
+            prob_no = 1.0 - prob_yes
+            margin = float(setting("SNIPER_NEAR_CERTAINTY_MARGIN"))
+            effective_prob = prob_no - margin
+            threshold = float(setting("SNIPER_NEAR_CERTAINTY_THRESHOLD"))
+            if effective_prob < threshold:
+                _log_eval("BELOW_THRESHOLD")
+                return None
+
+            # Bound the walk to what this tier could ever actually use — no
+            # reason to walk deep into a book for size the max-stake cap below
+            # will refuse anyway.
+            max_stake = float(setting("SNIPER_NEAR_CERTAINTY_MAX_STAKE"))
+            requested = min(portfolio_state.get("available_cash", 100.0), max_stake)
+            fill = estimate_fill(opp.token_id_no, requested, sniper_cap, force=True)
+            if not fill or fill.get("vwap") is None:
+                _log_eval("NO_FILL_AVAILABLE")
+                return None
+            filled_usd_cap = float(fill.get("filled_usd") or 0.0)
+            price = float(fill["vwap"])
+            if filled_usd_cap <= 0.0 or price > sniper_cap + 1e-9 or price < min_entry_p:
+                _log_eval("NO_FILL_AVAILABLE", best_ask=fill.get("best_ask"))
+                return None
+
+            cost = transaction_cost(price, engine_res.get("spread_fraction"))
+            edge = effective_prob - price - cost
+            if edge <= 0:
+                _log_eval("NEGATIVE_EDGE", best_ask=price)
+                return None
+            kelly = calculate_kelly(edge, price)
+            size = min(kelly * portfolio_state.get("available_cash", 100.0),
+                       max_stake, filled_usd_cap)
+            if size <= 0:
+                _log_eval("ZERO_SIZE", best_ask=price, kelly_fraction=kelly)
+                return None
+
+            station_icao, _tz = get_station(opp.city)
+            return {
+                "signal": "BUY_NO",
+                "action": "BUY",
+                "side": "NO",
+                "token_id": opp.token_id_no,
+                "target_token": opp.token_id_no,
+                "price": price,
+                "target_price": price,
+                "size_usdc": size,
+                "stake": size,
+                "stake_usd": size,
+                "walked_vwap": price,
+                "edge": edge,
+                "model_prob": effective_prob,
+                "opp": opp,
+                "kelly": kelly,
+                "reason": (
+                    f"Sniper Near-Certainty: P(NO)={prob_no:.4f} margin={margin:.4f} "
+                    f"effective={effective_prob:.4f} >= threshold {threshold:.4f}"
+                ),
+                "station_icao": station_icao,
+                "observed_temp_f": obs,
+                "ask_depth_usd": fill.get("usable_depth_usd"),
+                "best_bid": fill.get("best_bid"),
+                "risk_direction": risk_direction(
+                    "NO", opp.bucket_low, opp.bucket_high, engine_res.get("ensemble_mean")
+                ),
+                "tier": "near_certainty",
+                "calibrated_prob": prob_no,
+                "raw_prob": prob_no,
+                "threshold_used": threshold,
+                "local_hour": hour,
+                "conditioned_mean": engine_res.get("ensemble_mean"),
+                "conditioned_sigma": engine_res.get("ensemble_std"),
+                "hard_bound": engine_res.get("hard_bound"),
             }
 
         try:
@@ -536,6 +705,14 @@ def evaluate_opportunity(opp, portfolio_state, engine_res=None):
                 )
                 if signal:
                     return signal
+
+        # 3. Probabilistic near-certainty (non-strict — widens the funnel
+        # beyond literal certainty; never pre-empts the strict checks above,
+        # only fills the gap when they don't fire).
+        signal = _near_certainty_fill()
+        if signal:
+            return signal
+
         return None
 
     if engine_res is None:

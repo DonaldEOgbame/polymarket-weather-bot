@@ -80,6 +80,11 @@ SETTING_SPECS = {
     'REQUIRE_SAME_DAY':           ('bool',  None,    None,  'Require same-day trade'),
     'MIN_ENTRY_PRICE':            ('float', 0.10,    0.95,  'Min entry price'),
     'MAX_ENTRY_PRICE':            ('float', 0.50,    0.99,  'Max entry price'),
+    'SNIPER_NEAR_CERTAINTY_ENABLED':  ('bool',  None,   None,   'Sniper near-certainty tier'),
+    'SNIPER_NEAR_CERTAINTY_THRESHOLD':('float', 0.98,   0.9999, 'Near-certainty probability bar'),
+    'SNIPER_NEAR_CERTAINTY_MARGIN':   ('float', 0.0,    0.02,   'Near-certainty safety margin'),
+    'SNIPER_NEAR_CERTAINTY_MAX_STAKE':('float', 0.5,    10.0,   'Near-certainty max stake'),
+    'SNIPER_PEAK_PASSED_FRACTION':    ('float', 0.0,    0.10,   'Sniper peak-passed cutoff'),
 }
 
 _TRUE_STRINGS = {'true', '1', 'yes', 'on'}
