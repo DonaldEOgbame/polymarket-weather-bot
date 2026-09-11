@@ -18,7 +18,7 @@ from config import (
     DEBUG_MARKET_SCAN, DEBUG_MARKET_SCAN_VERBOSE, DEBUG_WEATHER_DISCOVERY,
     MARKET_DISCOVERY_LIMIT, MARKET_DISCOVERY_MAX_PAGES,
     MARKET_DISCOVERY_STOP_AFTER_WEATHER, MAX_CLOB_CANDIDATES,
-    MAX_BUCKETS_PER_CITY_DATE, TRADE_HIGH_MARKETS, TRADE_LOW_MARKETS,
+    MAX_BUCKETS_PER_CITY_DATE, TRADE_HIGH_MARKETS, TRADE_LOW_MARKETS, SNIPER_ONLY_MODE,
 )
 from utils import (get_session, parse_utc_datetime, safe_get, get_cached_price,
                    set_cached_price, get_cached_depth, get_cached_top_size)
@@ -1133,6 +1133,38 @@ def _run_debug_weather_discovery() -> None:
         print(f"{'─'*60}")
 
 
+def _candidate_score(m, liq_max, sniper_mode):
+    """Ranking score for the MAX_CLOB_CANDIDATES diversity cap: which
+    candidates survive when discovery finds more markets than can be sent to
+    the CLOB this cycle.
+
+    Default (non-sniper): 60% log-liquidity + 40% price uncertainty. Price
+    uncertainty peaks at 50/50 (YES price = 0.5) where edge potential is
+    highest; near-certain markets (0.02 or 0.98) score zero on this term — the
+    market already agrees, so there's no forecast edge to bet.
+
+    SNIPER_ONLY_MODE is the opposite strategy: it specifically wants markets
+    the price ALREADY agrees are near-certain (0.92-0.99, matching every real
+    fill so far) and is trying to catch the last few cents before a physical
+    breach pays out at 1.00. Under the default formula those candidates score
+    zero on the uncertainty term and get crowded out of the top
+    MAX_BUCKETS_PER_CITY_DATE slots whenever the cap bites — confirmed live
+    (2026-09-11): 2123 candidates discovered, capped to 1200, and only one of
+    46+ scanned cities ever produced a signal in days of data. Liquidity-only
+    ranking for this mode so certainty is never penalized."""
+    liq = float(m.get("liquidityNum") or 0)
+    liq_norm = math.log1p(liq) / math.log1p(max(liq_max, 1.0))
+    if sniper_mode:
+        return liq_norm
+    op = m.get("outcomePrices")
+    try:
+        prices = json.loads(op) if isinstance(op, str) else op
+        yes_p = float(prices[0]) if prices and len(prices) >= 2 else 0.5
+    except (TypeError, ValueError, IndexError):
+        yes_p = 0.5
+    return 0.6 * liq_norm + 0.4 * (1.0 - abs(yes_p - 0.5) * 2.0)
+
+
 def scan_markets():
     """
     Discover active weather markets and build trading opportunities.
@@ -1204,20 +1236,10 @@ def scan_markets():
             f"{len(prefiltered)} remain for CLOB evaluation"
         )
 
-    # Score candidates: 60% log-liquidity + 40% price uncertainty.
-    # Price uncertainty peaks at 50/50 (YES price = 0.5) where edge potential is highest;
-    # near-certain markets (0.02 or 0.98) score zero — the market already agrees.
+    # Score candidates for the MAX_CLOB_CANDIDATES cap below.
     liq_max = max((float(m.get("liquidityNum") or 0) for m in prefiltered), default=1.0)
     for m in prefiltered:
-        liq = float(m.get("liquidityNum") or 0)
-        liq_norm = math.log1p(liq) / math.log1p(max(liq_max, 1.0))
-        op = m.get("outcomePrices")
-        try:
-            prices = json.loads(op) if isinstance(op, str) else op
-            yes_p = float(prices[0]) if prices and len(prices) >= 2 else 0.5
-        except (TypeError, ValueError, IndexError):
-            yes_p = 0.5
-        m["_score"] = 0.6 * liq_norm + 0.4 * (1.0 - abs(yes_p - 0.5) * 2.0)
+        m["_score"] = _candidate_score(m, liq_max, SNIPER_ONLY_MODE)
 
     prefiltered.sort(key=lambda m: m.get("_score", 0.0), reverse=True)
 

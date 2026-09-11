@@ -259,3 +259,50 @@ class TestParseBucketInclusiveVsStrict:
         # 11.5°C..14.5°C → 52.7..58.1°F, pre-compensated: (53.2, 57.6)
         assert lb == pytest.approx(53.2)
         assert ub == pytest.approx(57.6)
+
+
+class TestCandidateScore:
+    """The MAX_CLOB_CANDIDATES diversity-cap ranking. Under the default
+    formula, a near-certain market (price close to 0 or 1) scores zero on the
+    uncertainty term — correct for the forecast-edge strategy, but backwards
+    for SNIPER_ONLY_MODE, which specifically targets near-certain markets.
+    Live evidence 2026-09-11: with 2123 candidates capped to 1200, this
+    formula crowded out 45 of 46 scanned cities' genuine physical-certainty
+    opportunities before they ever reached evaluate_opportunity()."""
+
+    def _market(self, liquidity, yes_price):
+        import json as _json
+        return {"liquidityNum": liquidity, "outcomePrices": _json.dumps([yes_price, 1 - yes_price])}
+
+    def test_default_mode_penalizes_near_certain_price(self):
+        from scanner import _candidate_score
+        uncertain = self._market(liquidity=1000, yes_price=0.50)
+        certain = self._market(liquidity=1000, yes_price=0.98)
+        s_uncertain = _candidate_score(uncertain, liq_max=1000, sniper_mode=False)
+        s_certain = _candidate_score(certain, liq_max=1000, sniper_mode=False)
+        assert s_uncertain > s_certain
+        # Near-certain scores exactly the liquidity-only floor (uncertainty term ~0).
+        assert s_certain == pytest.approx(0.6 * s_uncertain, rel=0.05)
+
+    def test_sniper_mode_does_not_penalize_near_certain_price(self):
+        from scanner import _candidate_score
+        uncertain = self._market(liquidity=1000, yes_price=0.50)
+        certain = self._market(liquidity=1000, yes_price=0.98)
+        s_uncertain = _candidate_score(uncertain, liq_max=1000, sniper_mode=True)
+        s_certain = _candidate_score(certain, liq_max=1000, sniper_mode=True)
+        # Same liquidity -> identical score regardless of price under sniper mode.
+        assert s_certain == pytest.approx(s_uncertain)
+
+    def test_sniper_mode_still_ranks_by_liquidity(self):
+        from scanner import _candidate_score
+        thin = self._market(liquidity=10, yes_price=0.95)
+        thick = self._market(liquidity=1000, yes_price=0.95)
+        assert _candidate_score(thick, liq_max=1000, sniper_mode=True) > \
+            _candidate_score(thin, liq_max=1000, sniper_mode=True)
+
+    def test_missing_price_data_defaults_safely(self):
+        from scanner import _candidate_score
+        m = {"liquidityNum": 500, "outcomePrices": None}
+        # Should not raise in either mode.
+        _candidate_score(m, liq_max=500, sniper_mode=False)
+        _candidate_score(m, liq_max=500, sniper_mode=True)
