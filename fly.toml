@@ -25,6 +25,11 @@ primary_region = 'arn'
   MIN_DEPTH_MULTIPLE = '3.0'
   MIN_ENTRY_PRICE = '0.40'
   MAX_ENTRY_PRICE = '0.96'
+  # Sniper-only knobs. Separate from MAX_ENTRY_PRICE above, which bounds the
+  # (currently dormant) forecast-edge path: those two used to be min()'d
+  # together, so the forecast band silently dragged the sniper's ceiling down.
+  SNIPER_MAX_ENTRY_PRICE = '0.97'
+  SNIPER_MAX_STAKE = '100.0'
   SCAN_INTERVAL_MINUTES = '2'
   MAX_CONCURRENT_POSITIONS = '4'
   TRADE_LOW_MARKETS = 'true'

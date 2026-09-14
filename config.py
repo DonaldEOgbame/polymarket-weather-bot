@@ -44,11 +44,9 @@ MANAGED_SETTINGS = (
     "REQUIRE_SAME_DAY",
     "MIN_ENTRY_PRICE",
     "MAX_ENTRY_PRICE",
-    "SNIPER_NEAR_CERTAINTY_ENABLED",
-    "SNIPER_NEAR_CERTAINTY_THRESHOLD",
-    "SNIPER_NEAR_CERTAINTY_MARGIN",
-    "SNIPER_NEAR_CERTAINTY_MAX_STAKE",
-    "SNIPER_PEAK_PASSED_FRACTION",
+    "SNIPER_MAX_STAKE",
+    "SNIPER_MAX_ENTRY_PRICE",
+    "SNIPER_ENTRY_CLEARANCE_F",
 )
 
 
@@ -315,34 +313,67 @@ ENABLE_YES_ENTRIES = os.getenv("ENABLE_YES_ENTRIES", "true").lower() == "true"
 ENABLE_DUAL_BOOK_SYNTHETIC_ARBITRAGE = os.getenv("ENABLE_DUAL_BOOK_SYNTHETIC_ARBITRAGE", "true").lower() == "true"
 SNIPER_ONLY_MODE = os.getenv("SNIPER_ONLY_MODE", "false").lower() == "true"
 
-# --- Sniper near-certainty tier (2026-09) ---
-# The strict-monotonic sniper above only acts on LITERAL certainty (observed
-# extreme already past the bucket boundary) — a deliberately rare event, since
-# it requires zero-tolerance mathematical certainty. This tier widens the
-# funnel using the SAME conditioned-forecast machinery the non-sniper path
-# already relies on (intraday.condition() / get_bucket_probability()),
-# entering only when the residual probability of a miss is provably tiny AND
-# the local diurnal peak has passed. Money+risk knobs, dashboard-tunable like
-# MIN_ENTRY_PRICE/MAX_ENTRY_PRICE above.
-SNIPER_NEAR_CERTAINTY_ENABLED = str(_tunable("SNIPER_NEAR_CERTAINTY_ENABLED", "false")).strip().lower() == "true"
-# P(NO), net of SNIPER_NEAR_CERTAINTY_MARGIN, must clear this bar before the
-# tier will enter. Default 0.995: a claimed 1-in-200 residual miss rate — well
-# short of the strict tier's effective zero, so this tier is NOT risk-free.
-SNIPER_NEAR_CERTAINTY_THRESHOLD = float(_tunable("SNIPER_NEAR_CERTAINTY_THRESHOLD", "0.995"))
-# Explicit, auditable safety margin subtracted from the raw calibrated
-# probability before any sizing math sees it (strategy.py's
-# _near_certainty_fill()) — keeps "how much margin was taken" a logged number
-# per trade, not an implicit assumption baked silently into the threshold.
-SNIPER_NEAR_CERTAINTY_MARGIN = float(_tunable("SNIPER_NEAR_CERTAINTY_MARGIN", "0.003"))
-# Separate, smaller dollar cap than the strict tier's $10: KELLY_CAP alone
-# assumes the edge estimate is exactly right, and this tier's edge rests on a
-# fitted curve (REMAINING_RISE_TABLE, below) never validated for ENTRIES
-# before — only exits used it prior to this tier.
-SNIPER_NEAR_CERTAINTY_MAX_STAKE = float(_tunable("SNIPER_NEAR_CERTAINTY_MAX_STAKE", "3.0"))
-# Deliberately independent from EXIT_PEAK_PASSED_FRACTION even though both
-# read the same underlying remaining_fraction() curve: entry and exit tuning
-# must never be coupled through one shared knob.
-SNIPER_PEAK_PASSED_FRACTION = float(_tunable("SNIPER_PEAK_PASSED_FRACTION", "0.02"))
+# Dollar ceiling on a single strict-monotonic sniper fill (strategy.py's
+# _sniper_fill), replacing a hardcoded $10. The sizing formula itself is
+# unchanged — min(15% of available cash, this cap) — so the cap only ever
+# narrows what the book and the cash balance already allow; it does not
+# widen it. Dashboard-tunable like MIN_ENTRY_PRICE/MAX_ENTRY_PRICE above so
+# it can be pulled back down live without a redeploy if a fill goes wrong.
+# Raised to $100 (2026-09-14): the only two fills logged with entry-side
+# depth on record had $158-175 resting at the walked price, i.e. the old $10
+# cap was binding at 6-7% of what the book actually supported.
+SNIPER_MAX_STAKE = float(_tunable("SNIPER_MAX_STAKE", "100.0"))
+
+# Hard price ceiling for sniper entries, independent of MAX_ENTRY_PRICE (which
+# the forecast-edge path uses for a completely different bet shape). Was an
+# inline 0.96 literal in strategy._sniper_fill.
+#
+# The economics are unforgiving and set the whole argument: held to settlement,
+# entry price IS the break-even accuracy, and one loss erases p/(1-p) wins —
+# 24 at 0.96, 32 at 0.97, 49 at 0.98, 99 at 0.99. Against that, the sniper's
+# ONLY protection is that the barrier breach is real: monotonic-ratchet
+# arithmetic (intraday.settlement_state, strict_monotonic=True) padded by
+# BUCKET_EDGE_PAD_F, currently 0.5°F. That pad is the entire margin absorbing
+# settlement-source divergence — the same class of error behind the KLAX -7.0°F
+# and Hong Kong HKO-vs-VHHH findings — so the sizing must stay well inside what
+# a 0.5°F cushion can honestly support.
+#
+# 0.97 (owner decision 2026-09-14). Motivated by the measured repricing window:
+# the Wellington 2026-09-11 tape reprices 0.63 -> 0.99 over FOUR HOURS after the
+# physical peak and then sits at 0.999 for hours more, so the opportunity is
+# real and slow — but 0.98/0.99 buy the last ~2c by tripling the loss
+# multiplier, which a 0.5°F pad does not justify. Raise only alongside a wider
+# clearance requirement at the top of the band, never on its own.
+SNIPER_MAX_ENTRY_PRICE = float(_tunable("SNIPER_MAX_ENTRY_PRICE", "0.97"))
+
+# Extra °F the observed extreme must clear the bucket by, for SNIPER ENTRY only,
+# on top of BUCKET_EDGE_PAD_F. Entry and exit deliberately do not share this:
+# BUCKET_EDGE_PAD_F also governs the physics exit gate, where widening it would
+# make the bot hold positions the observations have already killed. Here a wider
+# margin only ever removes trades, which is the safe direction.
+#
+# Why it exists. Scoring the 19 settled strict-breach calls by how far the
+# observation cleared the padded boundary (2026-09-14):
+#
+#     margin        correct  wrong   accuracy
+#     0.5-1.0 °F        3      2       60%     <- the tradeable band
+#     2.0-4.0 °F        4      0      100%
+#     4.0+   °F         9      1       90%
+#
+# The marginal band is where liquidity still exists (obvious breaches are already
+# priced at 0.003, nothing left to take) and it is also where the call is barely
+# better than a coin flip — against a 0.97 entry needing 97% accuracy. Both losses
+# missed by the same 1.8°F, from the same cause (HKO airport proxy vs the published
+# figure that pays; that specific bug is fixed separately by
+# resolved_extreme_f(require_settlement_source=True)).
+#
+# 2.5°F is NOT fitted — the sample is 19 calls, 5 of them marginal, and the
+# observed-vs-settled table has only 4 usable city-days, all one city. It is
+# chosen to sit clear of the one error magnitude actually measured (1.8°F, twice)
+# with room to spare, and to land in the 2.0-4.0 band that scored 4/4. Re-measure
+# once the fleet has produced breaches outside Hong Kong; if the source fix alone
+# restores marginal-band accuracy, this can come back down.
+SNIPER_ENTRY_CLEARANCE_F = float(_tunable("SNIPER_ENTRY_CLEARANCE_F", "2.5"))
 
 # --- Wrong-thermometer exclusions (owner decision 2026-08-13) ---
 # Cities whose SETTLEMENT STATION is structurally divergent from the air mass
@@ -1416,11 +1447,9 @@ _RUNTIME = {
     "REQUIRE_SAME_DAY": REQUIRE_SAME_DAY,
     "MIN_ENTRY_PRICE": MIN_ENTRY_PRICE,
     "MAX_ENTRY_PRICE": MAX_ENTRY_PRICE,
-    "SNIPER_NEAR_CERTAINTY_ENABLED": SNIPER_NEAR_CERTAINTY_ENABLED,
-    "SNIPER_NEAR_CERTAINTY_THRESHOLD": SNIPER_NEAR_CERTAINTY_THRESHOLD,
-    "SNIPER_NEAR_CERTAINTY_MARGIN": SNIPER_NEAR_CERTAINTY_MARGIN,
-    "SNIPER_NEAR_CERTAINTY_MAX_STAKE": SNIPER_NEAR_CERTAINTY_MAX_STAKE,
-    "SNIPER_PEAK_PASSED_FRACTION": SNIPER_PEAK_PASSED_FRACTION,
+    "SNIPER_MAX_STAKE": SNIPER_MAX_STAKE,
+    "SNIPER_MAX_ENTRY_PRICE": SNIPER_MAX_ENTRY_PRICE,
+    "SNIPER_ENTRY_CLEARANCE_F": SNIPER_ENTRY_CLEARANCE_F,
 }
 
 

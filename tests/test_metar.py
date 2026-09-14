@@ -27,6 +27,58 @@ class TestRoundHalfAway:
         assert round_half_away(-2.6) == -3
 
 
+class TestIEMStationTranslation:
+    """IEM keys US ASOS on the FAA identifier (ORD), not the ICAO one (KORD),
+    and answers the ICAO spelling with an empty result set rather than an
+    error. That silence made resolved_extreme_f() return None for all 11 US
+    cities, so the sniper could never fire on them (measured 2026-09-14)."""
+
+    def test_us_icao_is_stripped(self):
+        assert metar._iem_station("KORD") == "ORD"
+        assert metar._iem_station("KLAX") == "LAX"
+
+    def test_canada_is_not_stripped(self):
+        # Verified against IEM: CYYZ returns data, YYZ returns none — the
+        # opposite of the US rule, so the symmetry is a trap.
+        assert metar._iem_station("CYYZ") == "CYYZ"
+
+    def test_other_icao_passes_through(self):
+        for icao in ("VHHH", "EGLC", "RJTT", "OPMR"):
+            assert metar._iem_station(icao) == icao
+
+    def test_non_four_letter_untouched(self):
+        assert metar._iem_station("ORD") == "ORD"
+
+    def test_request_carries_translated_id(self, monkeypatch):
+        """The translation must reach the wire, not just the helper."""
+        sent = {}
+
+        class Resp:
+            status_code = 200
+            text = "station,valid,tmpc\n"
+
+        def fake_get(url, params=None, **kw):
+            sent.update(params or {})
+            return Resp()
+
+        monkeypatch.setattr(metar, "safe_get", fake_get)
+        metar.fetch_day_extremes("KORD", "UTC", "2026-09-12")
+        assert sent["station"] == "ORD"
+
+    def test_cache_stays_keyed_on_icao(self, monkeypatch):
+        """Callers pass ICAO; the cache must not fragment across both forms."""
+        class Resp:
+            status_code = 200
+            text = "station,valid,tmpc\nORD,2026-09-12 12:00,20.00\n"
+
+        monkeypatch.setattr(metar, "safe_get", lambda *a, **k: Resp())
+        monkeypatch.setattr(metar, "day_complete", lambda tz, d: True)
+        _METAR_CACHE.clear()
+        metar.fetch_day_extremes("KORD", "UTC", "2026-09-12")
+        assert ("KORD", "2026-09-12") in _METAR_CACHE
+        _METAR_CACHE.clear()
+
+
 class TestCachePolicy:
     """The cache froze same-day observations forever, blinding the intraday
     bucket-bust check. Only complete past days with real data may be cached."""

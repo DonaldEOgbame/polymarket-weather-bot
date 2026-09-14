@@ -313,126 +313,6 @@ class TestOrderbookDepthLogging:
         assert logged_rows[0][-2:] == (None, None)
 
 
-class TestSniperNearCertaintyTier:
-    """The 2026-09 probabilistic near-certainty tier: widens the strict-monotonic
-    sniper's entry funnel using the same conditioned-forecast machinery the
-    non-sniper path already relies on, but only past a very high, marginated
-    probability bar and only once the local diurnal peak has passed."""
-
-    def _run(self, monkeypatch, prob_yes, no_price=0.90, day_over=False,
-              hour=20.0, frac=(0.01, 0.005), available_cash=100.0,
-              setting_overrides=None, convective_cities=frozenset(),
-              settlement_state_fn=None):
-        import strategy
-        import metar
-        import intraday
-        from types import SimpleNamespace
-
-        opp = SimpleNamespace(
-            city="TestCity", date="2026-07-15", is_high=True, hours_to_resolution=10.0,
-            bucket_low=88.0, bucket_high=90.0, yes_price=1.0 - no_price, no_price=no_price,
-            token_id_yes="tok_yes", token_id_no="tok_no", market_id="m1",
-        )
-        portfolio_state = {"available_cash": available_cash, "total_equity": available_cash,
-                            "locked_cash": 0.0}
-
-        settings = {
-            "MAX_ENTRY_PRICE": 0.96, "MIN_ENTRY_PRICE": 0.70,
-            "SNIPER_NEAR_CERTAINTY_ENABLED": True,
-            "SNIPER_NEAR_CERTAINTY_THRESHOLD": 0.995,
-            "SNIPER_NEAR_CERTAINTY_MARGIN": 0.003,
-            "SNIPER_NEAR_CERTAINTY_MAX_STAKE": 3.0,
-            "SNIPER_PEAK_PASSED_FRACTION": 0.02,
-        }
-        if setting_overrides:
-            settings.update(setting_overrides)
-
-        monkeypatch.setattr(strategy, "SNIPER_ONLY_MODE", True)
-        monkeypatch.setattr(strategy, "setting", lambda k: settings[k])
-        monkeypatch.setattr(strategy, "CONVECTIVE_CITIES", convective_cities)
-        monkeypatch.setattr(strategy, "log_sniper_signal", lambda row: None)
-
-        monkeypatch.setattr(metar, "resolved_extreme_f", lambda city, date, is_high: 87.0)
-        monkeypatch.setattr(metar, "get_station", lambda city: ("TEST", "UTC"))
-
-        monkeypatch.setattr(
-            intraday, "settlement_state",
-            settlement_state_fn or
-            (lambda *a, **k: {"state": "UNDECIDED", "observed": 87.0, "reason": "test"}))
-        monkeypatch.setattr(intraday, "_day_phase", lambda city, date: (hour, day_over))
-        monkeypatch.setattr(intraday, "remaining_fraction", lambda h, is_high: frac)
-        monkeypatch.setattr(intraday, "condition",
-                             lambda engine_res, date: {**engine_res, "ensemble_mean": 85.0,
-                                                        "ensemble_std": 1.0, "hard_bound": 87.0})
-
-        monkeypatch.setattr(strategy, "get_signal_engine",
-                             lambda *a, **k: {"ensemble_mean": 85.0, "ensemble_std": 1.0,
-                                               "city_key": opp.city, "is_high": opp.is_high,
-                                               "forecast_diurnal_range_f": 10.0})
-        monkeypatch.setattr(strategy, "get_bucket_probability", lambda engine_res, lo, hi: prob_yes)
-        monkeypatch.setattr(strategy, "estimate_fill",
-                             lambda tok, usd, cap, force=False: {
-                                 "vwap": no_price, "filled_usd": usd, "exhausted": False,
-                                 "usable_depth_usd": 5000.0, "best_ask": no_price,
-                                 "best_bid": no_price - 0.01})
-
-        return strategy.evaluate_opportunity(opp, portfolio_state)
-
-    def test_clears_threshold_and_returns_signal(self, monkeypatch):
-        # prob_yes=0.001 -> prob_no=0.999; margin 0.003 -> effective=0.996 >= 0.995.
-        result = self._run(monkeypatch, prob_yes=0.001)
-        assert result is not None
-        assert result["signal"] == "BUY_NO"
-        assert result["side"] == "NO"
-        assert result["tier"] == "near_certainty"
-        assert result["price"] == 0.90
-        assert result["calibrated_prob"] == pytest.approx(0.999)
-        # Sized by real Kelly against a separate, smaller cap than the strict
-        # tier's $10 — never the strict tier's flat 0.15 cash fraction.
-        assert 0 < result["size_usdc"] <= 3.0
-        assert result["risk_direction"] in ("HOT", "COLD", None)
-
-    def test_below_threshold_returns_none(self, monkeypatch):
-        # prob_yes=0.05 -> prob_no=0.95, well short of the 0.995 bar.
-        result = self._run(monkeypatch, prob_yes=0.05)
-        assert result is None
-
-    def test_convective_city_excluded(self, monkeypatch):
-        result = self._run(monkeypatch, prob_yes=0.001, convective_cities={"TestCity"})
-        assert result is None
-
-    def test_peak_not_passed_returns_none(self, monkeypatch):
-        # Remaining-fraction mean (0.10) is above the peak-passed cutoff (0.02).
-        result = self._run(monkeypatch, prob_yes=0.001, frac=(0.10, 0.02))
-        assert result is None
-
-    def test_disabled_flag_returns_none(self, monkeypatch):
-        result = self._run(monkeypatch, prob_yes=0.001,
-                            setting_overrides={"SNIPER_NEAR_CERTAINTY_ENABLED": False})
-        assert result is None
-
-    def test_day_over_bypasses_peak_gate(self, monkeypatch):
-        # A finalized day has no "hour" to gate on — day_over alone must be
-        # sufficient, matching the exit-side ratchet's own treatment of it.
-        result = self._run(monkeypatch, prob_yes=0.001, day_over=True, hour=None,
-                            frac=(0.99, 0.5))  # would fail the peak gate if checked
-        assert result is not None
-
-    def test_strict_tier_takes_priority_when_both_would_fire(self, monkeypatch):
-        # If the strict monotonic check finds LOCKED_WIN, the near-certainty
-        # tier must never be reached — the strict entry is strictly safer.
-        import intraday
-
-        def _breach_on_no(city, date, is_high, lo, hi, side, **k):
-            if side == "NO":
-                return {"state": intraday.LOCKED_WIN, "observed": 91.0, "reason": "breach"}
-            return {"state": "UNDECIDED", "observed": 91.0, "reason": "x"}
-
-        result = self._run(monkeypatch, prob_yes=0.001, settlement_state_fn=_breach_on_no)
-        assert result is not None
-        assert result.get("tier") == "strict_monotonic"
-
-
 class TestParseTargetDate:
     """Date must come from the market's 'on <DATE>' resolution text, not the endDate
     timestamp whose UTC-close convention drifted and mis-dated far-offset stations."""
@@ -456,3 +336,171 @@ class TestParseTargetDate:
     def test_full_month_name(self):
         from scanner import parse_target_date
         assert parse_target_date("... on 5 January '26.", None) == "2026-01-05"
+
+
+class TestSniperEntryCaps:
+    """The strict-monotonic sniper's price ceiling and stake ceiling.
+
+    Both were inline literals (0.96 / $10). The price cap additionally used to
+    be min()'d against MAX_ENTRY_PRICE, silently dragging the sniper down to
+    the forecast path's much lower band (0.77 by default) — the two knobs bound
+    different bet shapes and must not be coupled."""
+
+    def _run(self, monkeypatch, *, no_price, cap, stake_cap, cash=1000.0,
+             depth=5000.0):
+        import strategy, metar, intraday
+        from types import SimpleNamespace
+
+        opp = SimpleNamespace(
+            city="TestCity", date="2026-07-15", is_high=True,
+            hours_to_resolution=6.0, bucket_low=80.0, bucket_high=82.0,
+            yes_price=1.0 - no_price, no_price=no_price,
+            token_id_yes="ty", token_id_no="tn", market_id="m1",
+        )
+        settings = {
+            "SNIPER_MAX_ENTRY_PRICE": cap,
+            "SNIPER_MAX_STAKE": stake_cap,
+            "SNIPER_ENTRY_CLEARANCE_F": 0.0,   # gate covered by its own class
+            "MIN_ENTRY_PRICE": 0.10,
+            "MAX_ENTRY_PRICE": 0.77,   # forecast-path knob; must NOT bind here
+        }
+        monkeypatch.setattr(strategy, "SNIPER_ONLY_MODE", True)
+        monkeypatch.setattr(strategy, "setting", lambda k: settings[k])
+        monkeypatch.setattr(
+            metar, "resolved_extreme_f",
+            lambda c, d, h, require_settlement_source=False: 95.0)
+        monkeypatch.setattr(metar, "get_station", lambda c: ("TEST", "UTC"))
+        monkeypatch.setattr(
+            intraday, "settlement_state",
+            lambda *a, **k: {"state": intraday.LOCKED_WIN, "observed": 95.0,
+                             "reason": "breach"})
+
+        captured = {}
+
+        def fake_fill(tok, usd, maxp, force=False):
+            captured["requested"] = usd
+            captured["maxp"] = maxp
+            if no_price > maxp:
+                return {"vwap": None, "filled_usd": 0.0, "exhausted": True,
+                        "usable_depth_usd": depth, "best_ask": no_price,
+                        "best_bid": no_price - 0.01}
+            return {"vwap": no_price, "filled_usd": min(usd, depth),
+                    "exhausted": False, "usable_depth_usd": depth,
+                    "best_ask": no_price, "best_bid": no_price - 0.01}
+
+        monkeypatch.setattr(strategy, "estimate_fill", fake_fill)
+        res = strategy.evaluate_opportunity(
+            opp, {"available_cash": cash, "total_equity": cash,
+                  "locked_cash": 0.0})
+        return res, captured
+
+    def test_enters_at_price_below_cap(self, monkeypatch):
+        res, _ = self._run(monkeypatch, no_price=0.95, cap=0.97, stake_cap=100.0)
+        assert res is not None and res["signal"] == "BUY_NO"
+
+    def test_refuses_price_above_cap(self, monkeypatch):
+        res, _ = self._run(monkeypatch, no_price=0.98, cap=0.97, stake_cap=100.0)
+        assert res is None
+
+    def test_cap_not_clamped_by_forecast_max_entry_price(self, monkeypatch):
+        """MAX_ENTRY_PRICE is 0.77 in these settings; a 0.95 sniper fill must
+        still be reachable, which the old min() made impossible."""
+        res, cap_seen = self._run(monkeypatch, no_price=0.95, cap=0.97,
+                                  stake_cap=100.0)
+        assert cap_seen["maxp"] == 0.97
+        assert res is not None
+
+    def test_stake_cap_binds(self, monkeypatch):
+        # 15% of $1000 = $150, above the $100 cap -> cap wins.
+        _, cap_seen = self._run(monkeypatch, no_price=0.95, cap=0.97,
+                                stake_cap=100.0)
+        assert cap_seen["requested"] == 100.0
+
+    def test_cash_fraction_binds_when_smaller(self, monkeypatch):
+        # 15% of $200 = $30, below the $100 cap -> fraction wins.
+        _, cap_seen = self._run(monkeypatch, no_price=0.95, cap=0.97,
+                                stake_cap=100.0, cash=200.0)
+        assert cap_seen["requested"] == pytest.approx(30.0)
+
+
+class TestSniperEntryClearance:
+    """Entry-only clearance margin on top of BUCKET_EDGE_PAD_F.
+
+    Scoring the 19 settled strict-breach calls (2026-09-14): breaches clearing
+    the padded edge by 0.5-1.0°F were 60% accurate, against a 0.97 entry that
+    needs 97%. Both misses were the same 1.8°F source divergence. This gate
+    refuses that band; it must never refuse a finalized day, where the recorded
+    extreme IS the settled value."""
+
+    def _run(self, monkeypatch, *, obs, lo, hi, is_high, clearance,
+             day_over=False, side_locked="NO"):
+        import strategy, metar, intraday
+        from types import SimpleNamespace
+
+        opp = SimpleNamespace(
+            city="TestCity", date="2026-07-15", is_high=is_high,
+            hours_to_resolution=6.0, bucket_low=lo, bucket_high=hi,
+            yes_price=0.05, no_price=0.90,
+            token_id_yes="ty", token_id_no="tn", market_id="m1",
+        )
+        settings = {
+            "SNIPER_MAX_ENTRY_PRICE": 0.97,
+            "SNIPER_MAX_STAKE": 50.0,
+            "SNIPER_ENTRY_CLEARANCE_F": clearance,
+            "MIN_ENTRY_PRICE": 0.10,
+            "MAX_ENTRY_PRICE": 0.77,
+        }
+        reason = "Finalized day: x" if day_over else "Monotonic barrier breach: x"
+        monkeypatch.setattr(strategy, "SNIPER_ONLY_MODE", True)
+        monkeypatch.setattr(strategy, "setting", lambda k: settings[k])
+        monkeypatch.setattr(metar, "resolved_extreme_f",
+                            lambda c, d, h, require_settlement_source=False: obs)
+        monkeypatch.setattr(metar, "get_station", lambda c: ("TEST", "UTC"))
+
+        def fake_state(city, date, ih, blo, bhi, side, **k):
+            if side != side_locked:
+                return {"state": "UNDECIDED", "observed": obs, "reason": "x"}
+            return {"state": intraday.LOCKED_WIN, "observed": obs,
+                    "reason": reason, "day_over": day_over}
+
+        monkeypatch.setattr(intraday, "settlement_state", fake_state)
+        monkeypatch.setattr(
+            strategy, "estimate_fill",
+            lambda tok, usd, maxp, force=False: {
+                "vwap": 0.90, "filled_usd": usd, "exhausted": False,
+                "usable_depth_usd": 5000.0, "best_ask": 0.90, "best_bid": 0.89})
+        return strategy.evaluate_opportunity(
+            opp, {"available_cash": 500.0, "total_equity": 500.0,
+                  "locked_cash": 0.0})
+
+    def test_marginal_breach_refused(self, monkeypatch):
+        """The real HK 09-11 loss: obs 91.4 vs bucket 89.2-90.0 (padded 90.5),
+        clearing by only 0.9°F. Settled 89.6 — inside the bucket."""
+        assert self._run(monkeypatch, obs=91.4, lo=89.2, hi=90.0,
+                         is_high=True, clearance=2.5) is None
+
+    def test_wide_breach_allowed(self, monkeypatch):
+        res = self._run(monkeypatch, obs=95.0, lo=89.2, hi=90.0,
+                        is_high=True, clearance=2.5)
+        assert res is not None and res["signal"] == "BUY_NO"
+
+    def test_finalized_day_bypasses_clearance(self, monkeypatch):
+        """Day over = recorded extreme IS the settled value; no ratchet risk
+        left to buffer, so a narrow margin must still trade."""
+        res = self._run(monkeypatch, obs=90.6, lo=89.2, hi=90.0,
+                        is_high=True, clearance=2.5, day_over=True)
+        assert res is not None
+
+    def test_zero_clearance_disables_gate(self, monkeypatch):
+        res = self._run(monkeypatch, obs=90.6, lo=89.2, hi=90.0,
+                        is_high=True, clearance=0.0)
+        assert res is not None
+
+    def test_low_market_uses_floor_side(self, monkeypatch):
+        # Low market: daily min only falls, so a NO lock needs obs BELOW the
+        # padded floor by the clearance.
+        assert self._run(monkeypatch, obs=59.0, lo=60.0, hi=61.0,
+                         is_high=False, clearance=2.5) is None
+        res = self._run(monkeypatch, obs=56.0, lo=60.0, hi=61.0,
+                        is_high=False, clearance=2.5)
+        assert res is not None

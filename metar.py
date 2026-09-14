@@ -24,6 +24,27 @@ from utils import safe_get
 
 MESONET_URL = "https://mesonet.agron.iastate.edu/cgi-bin/request/asos.py"
 
+
+def _iem_station(icao):
+    """Translate an ICAO code into the identifier IEM's ASOS service expects.
+
+    IEM keys US ASOS on the FAA identifier (ORD, LAX), not the ICAO form
+    (KORD, KLAX), and silently returns an empty result set for the ICAO
+    spelling rather than erroring. Measured 2026-09-14: all 11
+    configured K-prefixed stations returned ZERO rows over a 48h window while
+    their stripped forms returned full data, which made resolved_extreme_f()
+    return None for every US city and left the sniper structurally unable to
+    fire on them.
+
+    Only K-prefixed (US) codes are rewritten. Canada is deliberately NOT
+    included even though it looks symmetric: IEM keys Canadian stations on the
+    full ICAO (verified 2026-09-14 — CYYZ returns data, YYZ returns none), so
+    stripping there would break Toronto exactly the way the US spelling breaks
+    Chicago. Every non-K prefix is IEM's own key already and passes through."""
+    if len(icao) == 4 and icao[0] == "K":
+        return icao[1:]
+    return icao
+
 # City name -> (ICAO station, IANA timezone). ICAO is the station Polymarket names in
 # each market's resolution text; the tz makes "the highest temp on <local day>" align
 # to the station's civil day, exactly as Wunderground's daily history page does.
@@ -158,7 +179,7 @@ def fetch_day_extremes(icao, tz, date_str):
     y, m, d = (int(x) for x in date_str.split("-"))
     nd = _date(y, m, d) + timedelta(days=1)
     params = {
-        "station": icao, "data": "tmpc",
+        "station": _iem_station(icao), "data": "tmpc",
         "year1": y, "month1": m, "day1": d,
         "year2": nd.year, "month2": nd.month, "day2": nd.day,
         "tz": tz, "format": "onlycomma", "latlon": "no", "missing": "M",
@@ -207,7 +228,7 @@ def prewarm_day_extremes(icao, tz, start_date, end_date):
     y2, m2, d2 = (int(x) for x in end_date.split("-"))
     nd = _date(y2, m2, d2) + timedelta(days=1)
     params = {
-        "station": icao, "data": "tmpc",
+        "station": _iem_station(icao), "data": "tmpc",
         "year1": y1, "month1": m1, "day1": d1,
         "year2": nd.year, "month2": nd.month, "day2": nd.day,
         "tz": tz, "format": "onlycomma", "latlon": "no", "missing": "M",
@@ -272,7 +293,7 @@ def final_extreme_f(city_key, date_str, is_high):
     return resolved_extreme_f(city_key, date_str, is_high)
 
 
-def resolved_extreme_f(city_key, date_str, is_high):
+def resolved_extreme_f(city_key, date_str, is_high, require_settlement_source=False):
     """The realized daily extreme SO FAR at this city's resolution station on
     date_str, returned in °F to match the rest of the pipeline. None if not yet
     available. Mid-day this is the running extreme, NOT the final one — use it for
@@ -283,7 +304,17 @@ def resolved_extreme_f(city_key, date_str, is_high):
 
     HKO cities: uses the published HKO value (floor semantics) once available; before
     publication falls back to the airport METAR as a rough intraday proxy — good
-    enough for bucket-bust monitoring, never used for settlement (final_extreme_f)."""
+    enough for bucket-bust monitoring, never used for settlement (final_extreme_f).
+
+    `require_settlement_source=True` refuses that fallback, returning None instead
+    of a proxy. Callers that treat this value as PHYSICAL CERTAINTY must pass it.
+    Measured 2026-09-14 on the 19 settled breach calls: both marginal-band losses
+    were HKO cities where the VHHH airport proxy read 1.8°F hotter than the HKO
+    figure that actually paid (09-11: proxy 91.4 vs settled 89.6, bucket 89.2-90.0;
+    09-13: proxy 89.6 vs settled 87.8, bucket 87.4-88.2). In both the proxy cleared
+    the padded ceiling by 0.9°F while the real value sat INSIDE the bucket, so the
+    sniper bought a "certain" NO that settled at $0. A proxy is fine for monitoring
+    a position; it must never be the evidence that an outcome is already decided."""
     icao, tz = get_station(city_key)
     if not icao:
         return None
@@ -292,6 +323,8 @@ def resolved_extreme_f(city_key, date_str, is_high):
         val_c = mx_c if is_high else mn_c
         if val_c is not None:
             return math.floor(val_c) * 9.0 / 5.0 + 32.0
+        if require_settlement_source:
+            return None
         # fall through to airport METAR as intraday approximation
     mx_c, mn_c = fetch_day_extremes(icao, tz, date_str)
     val_c = mx_c if is_high else mn_c
