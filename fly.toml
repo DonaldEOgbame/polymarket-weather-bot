@@ -39,7 +39,7 @@ primary_region = 'arn'
   FORECAST_MARGIN_F = '5.0'
   ENABLE_YES_ENTRIES = 'false'
   # Physical certainty & post-close stale liquidity arbitrage targets all supported stations
-  EXCLUDED_CITIES = 'Ankara,Atlanta,Beijing,Buenos Aires,Cape Town,Chengdu,Chongqing,Denver,Guangzhou,Hong Kong,Houston,Karachi,Lagos,Lucknow,Milan,Munich,NYC,New York,Panama,San Francisco,Sao Paulo,Seoul,Shenzhen,Taipei,Tel Aviv,Wuhan'
+  EXCLUDED_CITIES = 'Ankara,Atlanta,Beijing,Buenos Aires,Cape Town,Chengdu,Chongqing,Denver,Guangzhou,Hong Kong,Houston,Lagos,Lucknow,Milan,Munich,NYC,New York,Panama,San Francisco,Sao Paulo,Seoul,Shenzhen,Taipei,Tel Aviv,Wuhan'
 
 [processes]
   app = 'python app.py'
