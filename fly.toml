@@ -18,13 +18,13 @@ primary_region = 'arn'
 [env]
   DB_PATH = '/data/bot.db'
   PAPER_MODE = 'true'
-  SNIPER_ONLY_MODE = 'true'
+  SNIPER_ONLY_MODE = 'false'
   PAUSE_SCANNING = 'false'
   PORT = '8080'
   STARTING_BANKROLL = '10.0'
   MIN_DEPTH_MULTIPLE = '3.0'
-  MIN_ENTRY_PRICE = '0.40'
-  MAX_ENTRY_PRICE = '0.96'
+  MIN_ENTRY_PRICE = '0.90'
+  MAX_ENTRY_PRICE = '0.95'
   # Sniper-only knobs. Separate from MAX_ENTRY_PRICE above, which bounds the
   # (currently dormant) forecast-edge path: those two used to be min()'d
   # together, so the forecast band silently dragged the sniper's ceiling down.
@@ -32,14 +32,14 @@ primary_region = 'arn'
   SNIPER_MAX_STAKE = '100.0'
   SCAN_INTERVAL_MINUTES = '2'
   MAX_CONCURRENT_POSITIONS = '4'
-  TRADE_LOW_MARKETS = 'true'
+  TRADE_LOW_MARKETS = 'false'
   TRADE_HIGH_MARKETS = 'true'
-  MAX_HOURS_TO_RESOLUTION = '48.0'
-  REQUIRE_SAME_DAY = 'false'
-  FORECAST_MARGIN_F = '4.0'
-  ENABLE_YES_ENTRIES = 'true'
+  MAX_HOURS_TO_RESOLUTION = '16.0'
+  REQUIRE_SAME_DAY = 'true'
+  FORECAST_MARGIN_F = '5.0'
+  ENABLE_YES_ENTRIES = 'false'
   # Physical certainty & post-close stale liquidity arbitrage targets all supported stations
-  EXCLUDED_CITIES = ''
+  EXCLUDED_CITIES = 'Ankara,Atlanta,Beijing,Buenos Aires,Cape Town,Chengdu,Chongqing,Denver,Guangzhou,Hong Kong,Houston,Karachi,Lagos,Lucknow,Milan,Munich,NYC,New York,Panama,San Francisco,Sao Paulo,Seoul,Shenzhen,Taipei,Tel Aviv,Wuhan'
 
 [processes]
   app = 'python app.py'
