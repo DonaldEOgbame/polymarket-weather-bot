@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-scripts/reset_bot_db.py - Reset bot database, clear archives, and seed $10 paper bankroll.
+scripts/reset_bot_db.py - Reset bot database, initialize schema, and seed $10 paper bankroll.
 """
 import os
 import sys
@@ -8,10 +8,14 @@ import sqlite3
 from datetime import datetime, timezone
 
 def reset_database(db_path: str, starting_bankroll: float = 10.0):
-    print(f'Connecting to database at {db_path}...')
-    if not os.path.exists(db_path):
-        print(f'Database at {db_path} does not exist.')
-        return
+    print(f'Resetting database at {db_path}...')
+    os.environ['DB_PATH'] = db_path
+    
+    # Import and run init_db() to ensure all tables and indexes exist
+    import db
+    db.DB_PATH = db_path
+    db.init_db()
+    print('Schema initialized via db.init_db()')
     
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()

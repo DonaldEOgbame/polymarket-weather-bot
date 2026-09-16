@@ -23,7 +23,15 @@ APP_URL = "https://stormedgev2.fly.dev"
 EMAIL = "donaldemmaogbame@gmail.com"
 PASSWORD = "stormedge"
 
+import argparse
+
 def main():
+    parser = argparse.ArgumentParser(description="Fetch live SQLite database from Fly.io to local backups/ and optionally sync to data/bot.db")
+    parser.add_argument("--no-snapshot", action="store_true", help="Skip triggering a fresh snapshot on Fly before download")
+    parser.add_argument("--sync-data", action="store_true", default=True, help="Also copy the downloaded snapshot to data/bot.db (default: True)")
+    parser.add_argument("--no-sync-data", dest="sync_data", action="store_false", help="Do not copy to data/bot.db")
+    args = parser.parse_args()
+
     t_start = time.time()
     print("==================================================")
     print("1. AUTHENTICATING TO FLY DASHBOARD")
@@ -42,8 +50,24 @@ def main():
         print(f"Authentication failed: {e}", file=sys.stderr)
         sys.exit(1)
 
+    if not args.no_snapshot:
+        print("\n==================================================")
+        print("2. TRIGGERING FRESH LIVE SNAPSHOT ON FLY")
+        print("==================================================")
+        try:
+            run_url = f"{APP_URL}/api/backup/run"
+            run_req = urllib.request.Request(run_url, data=b"{}", headers={"Content-Type": "application/json"})
+            run_resp = opener.open(run_req, timeout=60)
+            run_data = json.loads(run_resp.read().decode("utf-8"))
+            if run_data.get("ok"):
+                print(f"✓ Fresh live snapshot created on Fly: {run_data.get('path')} ({run_data.get('bytes', 0):,} bytes)")
+            else:
+                print(f"⚠ Warning: Snapshot returned: {run_data.get('error')}", file=sys.stderr)
+        except Exception as e:
+            print(f"⚠ Could not trigger fresh snapshot: {e}. Falling back to latest existing snapshot.", file=sys.stderr)
+
     print("\n==================================================")
-    print("2. QUERYING LATEST LIVE BACKUP METADATA")
+    print("3. QUERYING LATEST LIVE BACKUP METADATA")
     print("==================================================")
     download_url = f"{APP_URL}/api/backup/latest"
     try:
@@ -68,7 +92,7 @@ def main():
     dest_db = os.path.join(BACKUPS_DIR, f"bot-{stamp}.db")
 
     print("\n==================================================")
-    print("3. DOWNLOADING LIVE SNAPSHOT OVER HTTPS")
+    print("4. DOWNLOADING LIVE SNAPSHOT OVER HTTPS")
     print("==================================================")
     chunk_size = 32 * 1024 * 1024  # 32 MB chunks
     h = hashlib.sha256()
@@ -107,7 +131,7 @@ def main():
     print(f"  SHA-256: {sha256}")
 
     print("\n==================================================")
-    print("4. DECOMPRESSING TO LOCAL SQLITE DATABASE")
+    print("5. DECOMPRESSING TO LOCAL SQLITE DATABASE")
     print("==================================================")
     t_dec = time.time()
     with gzip.open(dest_gz, "rb") as fin, open(dest_db, "wb") as fout:
@@ -119,7 +143,7 @@ def main():
     print(f"✓ Decompressed to {dest_db} in {time.time()-t_dec:.1f}s ({db_size:,} bytes / {db_size/(1024*1024):.2f} MB)")
 
     print("\n==================================================")
-    print("5. VERIFYING SQLITE INTEGRITY & AUDITING TABLES")
+    print("6. VERIFYING SQLITE INTEGRITY & AUDITING TABLES")
     print("==================================================")
     conn = sqlite3.connect(dest_db)
     res_integrity = conn.execute("PRAGMA integrity_check").fetchone()[0]
@@ -136,22 +160,52 @@ def main():
 
     print("\n--- Latest 3 Trades ---")
     tcols = [c[1] for c in conn.execute("PRAGMA table_info(trades)").fetchall()]
-    for row in conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 3").fetchall():
-        d = dict(zip(tcols, row))
-        print(f"  Trade #{d.get('id')}: {d.get('city')} | {d.get('direction')} | Status: {d.get('status')} | Price: ${d.get('entry_price')} | Size: ${d.get('position_size_usd')} | Time: {d.get('timestamp')}")
+    trades = conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 3").fetchall()
+    if trades:
+        for row in trades:
+            d = dict(zip(tcols, row))
+            print(f"  Trade #{d.get('id')}: {d.get('city')} | {d.get('side')} | Fill: {d.get('fill_price')} | Size: ${d.get('size_usdc')} | Status: {d.get('status')} | Time: {d.get('entry_time')}")
+    else:
+        print("  (No trades recorded in this database)")
 
     print("\n--- Latest 3 Bankroll Entries ---")
     bcols = [c[1] for c in conn.execute("PRAGMA table_info(bankroll)").fetchall()]
-    for row in conn.execute("SELECT * FROM bankroll ORDER BY id DESC LIMIT 3").fetchall():
-        d = dict(zip(bcols, row))
-        print(f"  Bankroll #{d.get('id')}: Total: ${d.get('bankroll')} | Avail: ${d.get('available')} | PnL: ${d.get('pnl_dollars')} | Time: {d.get('timestamp')}")
+    bankrolls = conn.execute("SELECT * FROM bankroll ORDER BY id DESC LIMIT 3").fetchall()
+    if bankrolls:
+        for row in bankrolls:
+            d = dict(zip(bcols, row))
+            print(f"  Bankroll #{d.get('id')}: Event: {d.get('event')} | Amount: ${d.get('amount')} | Balance: ${d.get('balance')} | Mode: {d.get('mode')} | Time: {d.get('timestamp')}")
+    else:
+        print("  (No bankroll entries recorded in this database)")
 
     conn.close()
+
+    if args.sync_data:
+        print("\n==================================================")
+        print("7. SYNCING TO LOCAL WORKING DATABASE (data/bot.db)")
+        print("==================================================")
+        local_db_path = os.path.join(APP_DIR, "data", "bot.db")
+        os.makedirs(os.path.dirname(local_db_path), exist_ok=True)
+        if os.path.exists(local_db_path):
+            backup_local = f"{local_db_path}.bak"
+            shutil.copy2(local_db_path, backup_local)
+            print(f"✓ Backed up prior local DB to {backup_local}")
+        for ext in ["-wal", "-shm"]:
+            stale_f = f"{local_db_path}{ext}"
+            if os.path.exists(stale_f):
+                try:
+                    os.unlink(stale_f)
+                except OSError:
+                    pass
+        shutil.copy2(dest_db, local_db_path)
+        print(f"✓ Copied live snapshot to {local_db_path}")
 
     print("\n==================================================")
     print(f"✓ BACKUP COMPLETED & VERIFIED IN {time.time()-t_start:.1f}s")
     print(f"  SQLite DB:  {dest_db}")
     print(f"  Compressed: {dest_gz}")
+    if args.sync_data:
+        print(f"  Working DB: {os.path.join(APP_DIR, 'data', 'bot.db')}")
     print("==================================================")
 
 if __name__ == "__main__":

@@ -11,3 +11,6 @@ data/
 .DS_Store
 .pytest_cache/
 backups/
+
+# Backtest trade-tape cache (large, regenerable via scripts/backtest_9092_stop.py)
+scripts/_backtest_cache/

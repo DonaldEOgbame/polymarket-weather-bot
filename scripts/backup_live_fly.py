@@ -27,6 +27,7 @@ import hashlib
 import subprocess
 import urllib.request
 import http.cookiejar
+import argparse
 from datetime import datetime, timezone
 
 APP_DIR = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
@@ -80,6 +81,11 @@ def run_remote_python(code: str) -> str:
 
 
 def main():
+    parser = argparse.ArgumentParser(description="Backup live SQLite database from Fly.io directly to local backups/ and data/bot.db")
+    parser.add_argument("--sync-data", action="store_true", default=True, help="Also copy the downloaded snapshot to data/bot.db (default: True)")
+    parser.add_argument("--no-sync-data", dest="sync_data", action="store_false", help="Do not copy to data/bot.db")
+    args = parser.parse_args()
+
     t_start = time.time()
     stamp = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     dest_gz = os.path.join(BACKUPS_DIR, f"bot-{stamp}.db.gz")
@@ -122,7 +128,7 @@ print(json.dumps({'checkpoint': cp, 'counts': counts, 'db_size': db_size}))
         live_counts = live_meta["counts"]
         remote_size = live_meta["db_size"]
         print(f"✓ PRAGMA wal_checkpoint(TRUNCATE) result: {live_meta['checkpoint']}")
-        print(f"✓ Live DB Size: {remote_size:,} bytes ({remote_size / (1024**3):.2f} GB)")
+        print(f"✓ Live DB Size: {remote_size:,} bytes ({remote_size / (1024*1024):.2f} MB)")
         print(f"✓ Live Tables Counted: {len(live_counts)} tables")
         for sentinel in ["trades", "bankroll", "resolutions", "signals", "replay_gates"]:
             if sentinel in live_counts:
@@ -219,25 +225,56 @@ print(json.dumps({'checkpoint': cp, 'counts': counts, 'db_size': db_size}))
 
         print("\n--- Latest 3 Trades in Backup ---")
         tcols = [c[1] for c in conn.execute("PRAGMA table_info(trades)").fetchall()]
-        for row in conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 3").fetchall():
-            d = dict(zip(tcols, row))
-            print(f"  Trade #{d.get('id')}: {d.get('city')} | {d.get('side')} | Fill: {d.get('fill_price')} | Size: {d.get('size_usdc')} | Time: {d.get('created_at') or d.get('timestamp')}")
+        trades = conn.execute("SELECT * FROM trades ORDER BY id DESC LIMIT 3").fetchall()
+        if trades:
+            for row in trades:
+                d = dict(zip(tcols, row))
+                print(f"  Trade #{d.get('id')}: {d.get('city')} | {d.get('side')} | Fill: {d.get('fill_price')} | Size: ${d.get('size_usdc')} | Status: {d.get('status')} | Time: {d.get('entry_time') or d.get('timestamp')}")
+        else:
+            print("  (No trades recorded)")
 
         print("\n--- Latest Bankroll Entry in Backup ---")
         bcols = [c[1] for c in conn.execute("PRAGMA table_info(bankroll)").fetchall()]
         latest_b = conn.execute("SELECT * FROM bankroll ORDER BY id DESC LIMIT 1").fetchone()
         if latest_b:
             d = dict(zip(bcols, latest_b))
-            print(f"  Bankroll #{d.get('id')}: Bankroll: {d.get('bankroll')} | Avail: {d.get('available')} | PnL: {d.get('pnl_dollars')} | Time: {d.get('timestamp')}")
+            print(f"  Bankroll #{d.get('id')}: Event: {d.get('event')} | Amount: ${d.get('amount')} | Balance: ${d.get('balance')} | Mode: {d.get('mode')} | Time: {d.get('timestamp')}")
+        else:
+            print("  (No bankroll entries recorded)")
 
     finally:
         conn.close()
+
+    if args.sync_data:
+        print("\n7. SYNCING TO LOCAL WORKING DATABASE (data/bot.db)...")
+        local_db_path = os.path.join(APP_DIR, "data", "bot.db")
+        os.makedirs(os.path.dirname(local_db_path), exist_ok=True)
+        if os.path.exists(local_db_path):
+            backup_local = f"{local_db_path}.bak"
+            shutil.copy2(local_db_path, backup_local)
+            print(f"✓ Backed up prior local DB to {backup_local}")
+        local_wal = f"{local_db_path}-wal"
+        local_shm = f"{local_db_path}-shm"
+        if os.path.exists(local_wal):
+            try:
+                os.unlink(local_wal)
+            except OSError:
+                pass
+        if os.path.exists(local_shm):
+            try:
+                os.unlink(local_shm)
+            except OSError:
+                pass
+        shutil.copy2(dest_db, local_db_path)
+        print(f"✓ Copied live snapshot to {local_db_path}")
 
     total_time = time.time() - t_start
     print("\n==================================================")
     print(f"✓ LIVE FLY BACKUP SUCCESSFULLY COMPLETED IN {total_time:.1f}s")
     print(f"  Compressed: {dest_gz} ({gz_size / (1024*1024):.2f} MB)")
-    print(f"  SQLite DB:  {dest_db} ({db_size / (1024**3):.2f} GB)")
+    print(f"  SQLite DB:  {dest_db} ({db_size / (1024*1024):.2f} MB)")
+    if args.sync_data:
+        print(f"  Working DB: {os.path.join(APP_DIR, 'data', 'bot.db')}")
     print("==================================================")
 
 
